@@ -30,8 +30,8 @@ type Log struct {
 	IsStream          bool   `json:"is_stream" gorm:"default:false"`
 	SystemPromptReset bool   `json:"system_prompt_reset" gorm:"default:false"`
 	ChannelName       string `json:"channel_name" gorm:"default:''"`
-	RequestBody       string `json:"request_body" gorm:"type:mediumtext"`
-	ResponseBody      string `json:"response_body" gorm:"type:mediumtext"`
+	RequestBody       string `json:"request_body" gorm:"type:text"`
+	ResponseBody      string `json:"response_body" gorm:"type:text"`
 	RequestHeader     string `json:"request_header" gorm:"type:text"`
 }
 
