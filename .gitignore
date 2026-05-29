@@ -14,7 +14,6 @@ cmd.md
 temp
 .DS_Store
 .codegraph/
-.github/
 .opencode/
 .agents/
 .codex/
