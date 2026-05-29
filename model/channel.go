@@ -3,6 +3,8 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode"
 
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
@@ -32,10 +34,13 @@ type Channel struct {
 	Balance            float64 `json:"balance"` // in USD
 	BalanceUpdatedTime int64   `json:"balance_updated_time" gorm:"bigint"`
 	Models             string  `json:"models"`
+	models             []string
 	Group              string  `json:"group" gorm:"type:varchar(32);default:'default'"`
 	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
 	ModelMapping       *string `json:"model_mapping" gorm:"type:varchar(1024);default:''"`
-	Priority           *int64  `json:"priority" gorm:"bigint;default:0"`
+	Priority           *int64  `json:"priority" gorm:"bigint;default:1"`
+	ModelsAlias        string  `json:"models_alias" gorm:"type:text"`
+	alias              []string
 	Config             string  `json:"config"`
 	SystemPrompt       *string `json:"system_prompt" gorm:"type:text"`
 }
@@ -50,6 +55,20 @@ type ChannelConfig struct {
 	Plugin            string `json:"plugin,omitempty"`
 	VertexAIProjectID string `json:"vertex_ai_project_id,omitempty"`
 	VertexAIADC       string `json:"vertex_ai_adc,omitempty"`
+}
+
+// SimplifyModelName strips non-alphanumeric characters and lowercases the model name.
+// This produces a simplified alias suitable for display or matching purposes.
+func SimplifyModelName(modelName string) string {
+	splits := strings.Split(modelName, "/")
+	modelName = splits[len(splits)-1]
+	var builder strings.Builder
+	for _, r := range modelName {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			builder.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return builder.String()
 }
 
 func GetAllChannels(startIdx int, num int, scope string) ([]*Channel, error) {
@@ -84,6 +103,9 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 
 func BatchInsertChannels(channels []Channel) error {
 	var err error
+	for i := range channels {
+		channels[i].autoGenerateModelsAlias()
+	}
 	err = DB.Create(&channels).Error
 	if err != nil {
 		return err
@@ -111,6 +133,26 @@ func (channel *Channel) GetBaseURL() string {
 	return *channel.BaseURL
 }
 
+func (channel *Channel) GetAlias() []string {
+	if channel.alias == nil {
+		if channel.ModelsAlias == "" {
+			return nil
+		}
+		channel.alias = strings.Split(channel.ModelsAlias, ",")
+	}
+	return channel.alias
+}
+
+func (channel *Channel) GetModels() []string {
+	if channel.models == nil {
+		if channel.Models == "" {
+			return nil
+		}
+		channel.models = strings.Split(channel.Models, ",")
+	}
+	return channel.models
+}
+
 func (channel *Channel) GetModelMapping() map[string]string {
 	if channel.ModelMapping == nil || *channel.ModelMapping == "" || *channel.ModelMapping == "{}" {
 		return nil
@@ -124,8 +166,24 @@ func (channel *Channel) GetModelMapping() map[string]string {
 	return modelMapping
 }
 
+func (channel *Channel) autoGenerateModelsAlias() {
+	if channel.Models == "" {
+		channel.ModelsAlias = ""
+		return
+	}
+	parts := strings.Split(channel.Models, ",")
+	aliases := make([]string, 0, len(parts))
+	for _, part := range parts {
+		aliases = append(aliases, SimplifyModelName(part))
+	}
+	channel.ModelsAlias = strings.Join(aliases, ",")
+	channel.alias = aliases
+	channel.models = parts
+}
+
 func (channel *Channel) Insert() error {
 	var err error
+	channel.autoGenerateModelsAlias()
 	err = DB.Create(channel).Error
 	if err != nil {
 		return err
@@ -136,6 +194,7 @@ func (channel *Channel) Insert() error {
 
 func (channel *Channel) Update() error {
 	var err error
+	channel.autoGenerateModelsAlias()
 	err = DB.Model(channel).Updates(channel).Error
 	if err != nil {
 		return err

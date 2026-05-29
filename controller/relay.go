@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,7 +52,12 @@ func Relay(c *gin.Context) {
 	}
 	channelId := c.GetInt(ctxkey.ChannelId)
 	userId := c.GetInt(ctxkey.Id)
+	requestModel := c.GetString(ctxkey.RequestModel)
+	if requestModel == "" {
+		requestModel = "auto"
+	}
 	bizErr := relayHelper(c, relayMode)
+	middleware.AffinityGlobal.Set(userId, requestModel, channelId)
 	if bizErr == nil {
 		monitor.Emit(channelId, true)
 		return
@@ -59,7 +65,6 @@ func Relay(c *gin.Context) {
 	lastFailedChannelId := channelId
 	channelName := c.GetString(ctxkey.ChannelName)
 	group := c.GetString(ctxkey.Group)
-	originalModel := c.GetString(ctxkey.OriginalModel)
 	go processChannelRelayError(ctx, userId, channelId, channelName, *bizErr)
 	requestId := c.GetString(helper.RequestIdKey)
 	retryTimes := config.RetryTimes
@@ -67,26 +72,26 @@ func Relay(c *gin.Context) {
 		logger.Errorf(ctx, "relay error happen, status code is %d, won't retry in this case", bizErr.StatusCode)
 		retryTimes = 0
 	}
+	// Use the original request model (could be "auto" or specific model)
+	// to maintain proper distribution behavior during retries.
 	for i := retryTimes; i > 0; i-- {
-		channel, err := dbmodel.CacheGetRandomSatisfiedChannel(group, originalModel, i != retryTimes)
+		channel, suggestedModel, err := middleware.SelectChannel(group, requestModel, lastFailedChannelId, userId)
 		if err != nil {
-			logger.Errorf(ctx, "CacheGetRandomSatisfiedChannel failed: %+v", err)
+			logger.Errorf(ctx, "DistributeForRetry failed: %+v", err)
 			break
 		}
-		logger.Infof(ctx, "using channel #%d to retry (remain times %d)", channel.Id, i)
-		if channel.Id == lastFailedChannelId {
-			continue
-		}
-		middleware.SetupContextForSelectedChannel(c, channel, originalModel)
+		logger.Infof(ctx, "using channel #%d model:%v to retry (remain times %d)", channel.Id, suggestedModel, i)
+		middleware.SetupContextForSelectedChannel(c, channel, suggestedModel)
 		requestBody, err := common.GetRequestBody(c)
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
 		bizErr = relayHelper(c, relayMode)
+		middleware.AffinityGlobal.Set(userId, requestModel, channel.Id)
 		if bizErr == nil {
 			return
 		}
-		channelId := c.GetInt(ctxkey.ChannelId)
+		channelId = c.GetInt(ctxkey.ChannelId)
 		lastFailedChannelId = channelId
-		channelName := c.GetString(ctxkey.ChannelName)
+		channelName = c.GetString(ctxkey.ChannelName)
 		go processChannelRelayError(ctx, userId, channelId, channelName, *bizErr)
 	}
 	if bizErr != nil {
@@ -99,6 +104,7 @@ func Relay(c *gin.Context) {
 		c.JSON(bizErr.StatusCode, gin.H{
 			"error": bizErr.Error,
 		})
+		recordFailureLog(c, bizErr, channelName)
 	}
 }
 
@@ -121,6 +127,28 @@ func shouldRetry(c *gin.Context, statusCode int) bool {
 	return true
 }
 
+func buildFailureLog(c *gin.Context, bizErr *model.ErrorWithStatusCode, channelName string) *dbmodel.Log {
+	respBody, _ := json.Marshal(bizErr.Error) // safe: Error struct has only simple types
+	requestBody, _ := common.GetRequestBody(c)
+	return &dbmodel.Log{
+		UserId:        c.GetInt(ctxkey.Id),
+		ChannelId:     c.GetInt(ctxkey.ChannelId),
+		Quota:         0,
+		Content:       fmt.Sprintf("HTTP status: %d, error: %s", bizErr.StatusCode, bizErr.Error.Message),
+		ChannelName:   channelName,
+		TokenName:     c.GetString(ctxkey.TokenName),
+		ModelName:     c.GetString(ctxkey.RequestModel),
+		ResponseBody:  string(respBody),
+		RequestBody:   string(requestBody),
+		RequestHeader: fmt.Sprintf("%v", c.Request.Header),
+	}
+}
+
+func recordFailureLog(c *gin.Context, bizErr *model.ErrorWithStatusCode, channelName string) {
+	log := buildFailureLog(c, bizErr, channelName)
+	dbmodel.RecordConsumeLog(c.Request.Context(), log)
+}
+
 func processChannelRelayError(ctx context.Context, userId int, channelId int, channelName string, err model.ErrorWithStatusCode) {
 	logger.Errorf(ctx, "relay error (channel id %d, user id: %d): %s", channelId, userId, err.Message)
 	// https://platform.openai.com/docs/guides/error-codes/api-errors
@@ -128,6 +156,7 @@ func processChannelRelayError(ctx context.Context, userId int, channelId int, ch
 		monitor.DisableChannel(channelId, channelName, err.Message)
 	} else {
 		monitor.Emit(channelId, false)
+		middleware.CooldownGlobal.Put(channelId)
 	}
 }
 

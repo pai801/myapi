@@ -1,6 +1,6 @@
 import PropTypes from 'prop-types';
 
-import { TableRow, TableCell } from '@mui/material';
+import { TableRow, TableCell, Button } from '@mui/material';
 
 import { timestamp2string, renderQuota } from 'utils/common';
 import Label from 'ui-component/Label';
@@ -25,7 +25,7 @@ function renderType(type) {
   }
 }
 
-export default function LogTableRow({ item, userIsAdmin }) {
+export default function LogTableRow({ item, userIsAdmin, onDetailClick }) {
   return (
     <>
       <TableRow tabIndex={item.id}>
@@ -58,6 +58,11 @@ export default function LogTableRow({ item, userIsAdmin }) {
         <TableCell>{item.completion_tokens || ''}</TableCell>
         <TableCell>{item.quota ? renderQuota(item.quota, 6) : ''}</TableCell>
         <TableCell>{item.content}</TableCell>
+        {userIsAdmin && (
+          <TableCell>
+            <Button onClick={() => onDetailClick(item)}>详情</Button>
+          </TableCell>
+        )}
       </TableRow>
     </>
   );
@@ -65,5 +70,6 @@ export default function LogTableRow({ item, userIsAdmin }) {
 
 LogTableRow.propTypes = {
   item: PropTypes.object,
-  userIsAdmin: PropTypes.bool
+  userIsAdmin: PropTypes.bool,
+  onDetailClick: PropTypes.func
 };

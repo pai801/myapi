@@ -29,6 +29,10 @@ type Log struct {
 	ElapsedTime       int64  `json:"elapsed_time" gorm:"default:0"` // unit is ms
 	IsStream          bool   `json:"is_stream" gorm:"default:false"`
 	SystemPromptReset bool   `json:"system_prompt_reset" gorm:"default:false"`
+	ChannelName       string `json:"channel_name" gorm:"default:''"`
+	RequestBody       string `json:"request_body" gorm:"type:mediumtext"`
+	ResponseBody      string `json:"response_body" gorm:"type:mediumtext"`
+	RequestHeader     string `json:"request_header" gorm:"type:text"`
 }
 
 const (
@@ -48,7 +52,7 @@ func recordLogHelper(ctx context.Context, log *Log) {
 		logger.Error(ctx, "failed to record log: "+err.Error())
 		return
 	}
-	logger.Infof(ctx, "record log: %+v", log)
+	logger.Infof(ctx, "record log userId:%v, userName:%v, channelName:%v, modelName:%v, isStream:%v", log.UserId, log.Username, log.ChannelName, log.ModelName, log.IsStream)
 }
 
 func RecordLog(ctx context.Context, userId int, logType int, content string) {

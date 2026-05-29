@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/config"
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay"
 	"github.com/songquanpeng/one-api/relay/adaptor"
@@ -35,10 +37,17 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 
 	// map model name
 	meta.OriginModelName = textRequest.Model
-	textRequest.Model, _ = getMappedModelName(textRequest.Model, meta.ModelMapping)
-	meta.ActualModelName = textRequest.Model
+	textRequest.Model, _ = getMappedModelName(meta.ActualModelName, meta.ModelMapping)
 	// set system prompt if not empty
 	systemPromptReset := setSystemPrompt(ctx, textRequest, meta.ForcedSystemPrompt)
+
+	// Store request body and headers in context for logging (controlled by LogConsumeEnabled)
+	if config.LogConsumeEnabled {
+		bodyJSON, _ := json.Marshal(textRequest)
+		ctx = context.WithValue(ctx, ctxKeyRequestBody, string(bodyJSON))
+		ctx = context.WithValue(ctx, ctxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
+	}
+
 	// get model ratio & group ratio
 	modelRatio := billingratio.GetModelRatio(textRequest.Model, meta.ChannelType)
 	groupRatio := billingratio.GetGroupRatio(meta.Group)
@@ -77,6 +86,11 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 
 	// do response
 	usage, respErr := adaptor.DoResponse(c, resp, meta)
+	if config.LogConsumeEnabled {
+		if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
+			ctx = context.WithValue(ctx, ctxKeyResponseBody, respBody)
+		}
+	}
 	if respErr != nil {
 		logger.Errorf(ctx, "respErr is not nil: %+v", respErr)
 		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)

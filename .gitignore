@@ -13,3 +13,16 @@ cmd.md
 /one-api
 temp
 .DS_Store
+.codegraph/
+.github/
+.opencode/
+.agents/
+.codex/
+.cursor/
+openspec
+AGENTS.md
+migrate_models_alias
+.zed/
+requirement-2025-05-28.md
+docs/contracts/
+docs/superpowers/

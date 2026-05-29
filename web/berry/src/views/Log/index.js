@@ -14,6 +14,7 @@ import { Button, Card, Stack, Container, Typography, Box } from '@mui/material';
 import LogTableRow from './component/TableRow';
 import LogTableHead from './component/TableHead';
 import TableToolBar from './component/TableToolBar';
+import DetailDialog from './component/DetailDialog';
 import { API } from 'utils/api';
 import { isAdmin } from 'utils/common';
 import { ITEMS_PER_PAGE } from 'constants';
@@ -36,6 +37,17 @@ export default function Log() {
   const [searchKeyword, setSearchKeyword] = useState(originalKeyword);
   const [initPage, setInitPage] = useState(true);
   const userIsAdmin = isAdmin();
+  const [selectedLogItem, setSelectedLogItem] = useState(null);
+  const [detailDialogOpen, setDetailDialogOpen] = useState(false);
+
+  const handleDetailClick = (logItem) => {
+    setSelectedLogItem(logItem);
+    setDetailDialogOpen(true);
+  };
+
+  const handleDetailClose = () => {
+    setDetailDialogOpen(false);
+  };
 
   const loadLogs = async (startIdx) => {
     setSearching(true);
@@ -102,6 +114,7 @@ export default function Log() {
 
   return (
     <>
+      <DetailDialog open={detailDialogOpen} onClose={handleDetailClose} logItem={selectedLogItem} />
       <Stack direction="row" alignItems="center" justifyContent="space-between" mb={2.5}>
         <Typography variant="h4">日志</Typography>
       </Stack>
@@ -137,7 +150,7 @@ export default function Log() {
               <LogTableHead userIsAdmin={userIsAdmin} />
               <TableBody>
                 {logs.slice(activePage * ITEMS_PER_PAGE, (activePage + 1) * ITEMS_PER_PAGE).map((row, index) => (
-                  <LogTableRow item={row} key={`${row.id}_${index}`} userIsAdmin={userIsAdmin} />
+                  <LogTableRow item={row} key={`${row.id}_${index}`} userIsAdmin={userIsAdmin} onDetailClick={handleDetailClick} />
                 ))}
               </TableBody>
             </Table>

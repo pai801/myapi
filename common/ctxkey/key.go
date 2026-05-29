@@ -21,4 +21,6 @@ const (
 	AvailableModels   = "available_models"
 	KeyRequestBody    = "key_request_body"
 	SystemPrompt      = "system_prompt"
+	SuggestedModel    = "suggested_model"
+	ResponseBody      = "response_body"
 )

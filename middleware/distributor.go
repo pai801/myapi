@@ -2,8 +2,11 @@ package middleware
 
 import (
 	"fmt"
+	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
@@ -12,6 +15,170 @@ import (
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 )
+
+var autoRoundRobinIndex map[string]int
+var autoRoundRobinMu sync.Mutex
+
+func nextAutoChannel(group string, channels []*model.Channel) (*model.Channel, int) {
+	autoRoundRobinMu.Lock()
+	defer autoRoundRobinMu.Unlock()
+
+	if autoRoundRobinIndex == nil {
+		autoRoundRobinIndex = make(map[string]int)
+	}
+
+	idx := autoRoundRobinIndex[group]
+	autoRoundRobinIndex[group] = (idx + 1) % len(channels)
+	ch := channels[idx]
+	return ch, idx
+}
+
+func setDistributeContext(c *gin.Context, channel *model.Channel, requestModel string, suggestedModel string) error {
+	c.Set(ctxkey.OriginalModel, requestModel)
+	c.Set(ctxkey.RequestModel, requestModel)
+	c.Set(ctxkey.SuggestedModel, suggestedModel)
+	c.Set(ctxkey.ChannelId, channel.Id)
+	c.Set(ctxkey.Channel, channel.Type)
+	c.Set(ctxkey.ChannelName, channel.Name)
+	return nil
+}
+
+func matchChannelsByAlias(requestModel string, channels []*model.Channel) ([]*model.Channel, string) {
+	alias := model.SimplifyModelName(requestModel)
+	if alias == "" {
+		return nil, ""
+	}
+
+	// First pass: exact match
+	var exactMatches []*model.Channel
+	for _, ch := range channels {
+		for _, a := range ch.GetAlias() {
+			if a == alias {
+				exactMatches = append(exactMatches, ch)
+				break
+			}
+		}
+	}
+	if len(exactMatches) > 0 {
+		return exactMatches, alias
+	}
+
+	// Second pass: prefix match
+	var prefixMatches []*model.Channel
+	for _, ch := range channels {
+		for _, a := range ch.GetAlias() {
+			if strings.HasPrefix(a, alias) {
+				prefixMatches = append(prefixMatches, ch)
+				break
+			}
+		}
+	}
+	return prefixMatches, alias
+}
+
+func selectAutoModel(channel *model.Channel) string {
+	if channel.ModelsAlias == "" && channel.Models == "" {
+		return ""
+	}
+	if channel.Models != "" {
+		parts := channel.GetModels()
+		return strings.TrimSpace(parts[rand.Intn(len(parts))])
+	}
+	return ""
+}
+
+func weightedRandomSelect(channels []*model.Channel) *model.Channel {
+	if len(channels) == 0 {
+		return nil
+	}
+	if len(channels) == 1 {
+		return channels[0]
+	}
+
+	var totalWeight int64
+	weights := make([]int64, len(channels))
+	for i, ch := range channels {
+		if priority := ch.GetPriority(); priority > 0 {
+			weights[i] = priority
+			totalWeight += priority
+		} else {
+			weights[i] = 0
+		}
+	}
+
+	if totalWeight == 0 {
+		return channels[rand.Intn(len(channels))]
+	}
+
+	r := rand.Int63n(totalWeight)
+	cumulative := int64(0)
+	for i, w := range weights {
+		cumulative += w
+		if r < cumulative {
+			return channels[i]
+		}
+	}
+	return channels[len(channels)-1]
+}
+
+func autoDistribute(group string, channels []*model.Channel) (*model.Channel, string, error) {
+	if len(channels) == 0 {
+		return nil, "", fmt.Errorf("当前分组 %s 下无可用渠道", group)
+	}
+	ch, _ := nextAutoChannel(group, channels)
+	selectedModel := selectAutoModel(ch)
+	return ch, selectedModel, nil
+}
+
+func nonAutoDistribute(userId int, requestModel string, channels []*model.Channel) (*model.Channel, string, error) {
+	matched, alias := matchChannelsByAlias(requestModel, channels)
+	if len(matched) == 0 {
+		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
+	}
+
+	var ch *model.Channel
+
+	// Check affinity first: prefer the last used channel for this (user, model)
+	if affChId, ok := AffinityGlobal.Get(userId, requestModel); ok {
+		for _, c := range matched {
+			if c.Id == affChId {
+				ch = c
+				break
+			}
+		}
+	}
+
+	// If no affinity or affinity channel not in matched set, pick weighted random by Priority
+	if ch == nil {
+		ch = weightedRandomSelect(matched)
+	}
+	if ch == nil {
+		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
+	}
+	targedIdx := -1
+	for idx, a := range ch.GetAlias() {
+		if a == alias {
+			targedIdx = idx
+			break
+		}
+	}
+	if targedIdx <= -1 {
+		for idx, a := range ch.GetAlias() {
+			if strings.HasPrefix(a, alias) {
+				targedIdx = idx
+				break
+			}
+		}
+	}
+	if targedIdx <= -1 {
+		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
+	}
+	models := ch.GetModels()
+	if targedIdx < len(models) {
+		return ch, models[targedIdx], nil
+	}
+	return nil, "", fmt.Errorf("no model found for alias %s", alias)
+}
 
 type ModelRequest struct {
 	Model string `json:"model" form:"model"`
@@ -23,8 +190,12 @@ func Distribute() func(c *gin.Context) {
 		userId := c.GetInt(ctxkey.Id)
 		userGroup, _ := model.CacheGetUserGroup(userId)
 		c.Set(ctxkey.Group, userGroup)
-		var requestModel string
+
 		var channel *model.Channel
+		var requestModel string
+		var suggestedModel string
+		var err error
+
 		channelId, ok := c.Get(ctxkey.SpecificChannelId)
 		if ok {
 			id, err := strconv.Atoi(channelId.(string))
@@ -41,23 +212,62 @@ func Distribute() func(c *gin.Context) {
 				abortWithMessage(c, http.StatusForbidden, "该渠道已被禁用")
 				return
 			}
+			requestModel = c.GetString(ctxkey.RequestModel)
+			suggestedModel = requestModel
 		} else {
 			requestModel = c.GetString(ctxkey.RequestModel)
-			var err error
-			channel, err = model.CacheGetRandomSatisfiedChannel(userGroup, requestModel, false)
+			if requestModel == "" {
+				requestModel = "auto"
+				c.Set(ctxkey.RequestModel, requestModel)
+			}
+			channel, suggestedModel, err = SelectChannel(userGroup, requestModel, -1, userId)
 			if err != nil {
-				message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, requestModel)
-				if channel != nil {
-					logger.SysError(fmt.Sprintf("渠道不存在：%d", channel.Id))
-					message = "数据库一致性已被破坏，请联系管理员"
-				}
-				abortWithMessage(c, http.StatusServiceUnavailable, message)
+				abortWithMessage(c, http.StatusServiceUnavailable, err.Error())
 				return
 			}
 		}
-		logger.Debugf(ctx, "user id %d, user group: %s, request model: %s, using channel #%d", userId, userGroup, requestModel, channel.Id)
-		SetupContextForSelectedChannel(c, channel, requestModel)
+
+		logger.Debugf(ctx, "user id %d, user group: %s, request model: %s, suggested model: %s, using channel #%d", userId, userGroup, requestModel, suggestedModel, channel.Id)
+		setDistributeContext(c, channel, requestModel, suggestedModel)
+		SetupContextForSelectedChannel(c, channel, suggestedModel)
 		c.Next()
+	}
+}
+
+func filterCoolingChannels(channels []*model.Channel) []*model.Channel {
+	var result []*model.Channel
+	for _, ch := range channels {
+		if !CooldownGlobal.IsCoolingDown(ch.Id) {
+			result = append(result, ch)
+		}
+	}
+	return result
+}
+
+func filterLastFailedChannel(channels []*model.Channel, lastFailedChannelId int) []*model.Channel {
+	if lastFailedChannelId <= 0 {
+		return channels
+	}
+	var result []*model.Channel
+	for _, ch := range channels {
+		if ch.Id != lastFailedChannelId {
+			result = append(result, ch)
+		}
+	}
+	return result
+}
+
+func SelectChannel(group, requestModel string, lastFailedChannelId int, userId int) (*model.Channel, string, error) {
+	channels := model.CacheGetGroupChannels(group)
+	channels = filterCoolingChannels(channels)
+	channels = filterLastFailedChannel(channels, lastFailedChannelId)
+	if len(channels) == 0 {
+		return nil, "", fmt.Errorf("no channels available for retry in group %s", group)
+	}
+	if requestModel == "auto" {
+		return autoDistribute(group, channels)
+	} else {
+		return nonAutoDistribute(userId, requestModel, channels)
 	}
 }
 
@@ -69,7 +279,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		c.Set(ctxkey.SystemPrompt, *channel.SystemPrompt)
 	}
 	c.Set(ctxkey.ModelMapping, channel.GetModelMapping())
-	c.Set(ctxkey.OriginalModel, modelName) // for retry
+	c.Set(ctxkey.SuggestedModel, modelName) // for retry
 	c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", channel.Key))
 	c.Set(ctxkey.BaseURL, channel.GetBaseURL())
 	cfg, _ := channel.LoadConfig()

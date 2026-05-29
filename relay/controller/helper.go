@@ -26,6 +26,14 @@ import (
 	"github.com/songquanpeng/one-api/relay/relaymode"
 )
 
+type contextKey int
+
+const (
+	ctxKeyRequestBody contextKey = iota
+	ctxKeyResponseBody
+	ctxKeyRequestHeader
+)
+
 func getAndValidateTextRequest(c *gin.Context, relayMode int) (*relaymodel.GeneralOpenAIRequest, error) {
 	textRequest := &relaymodel.GeneralOpenAIRequest{}
 	err := common.UnmarshalBodyReusable(c, textRequest)
@@ -123,6 +131,20 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 		logger.Error(ctx, "error update user quota cache: "+err.Error())
 	}
 	logContent := fmt.Sprintf("倍率：%.2f × %.2f × %.2f", modelRatio, groupRatio, completionRatio)
+
+	var requestBody string
+	if v := ctx.Value(ctxKeyRequestBody); v != nil {
+		requestBody = v.(string)
+	}
+	var responseBody string
+	if v := ctx.Value(ctxKeyResponseBody); v != nil {
+		responseBody = v.(string)
+	}
+	var requestHeader string
+	if v := ctx.Value(ctxKeyRequestHeader); v != nil {
+		requestHeader = v.(string)
+	}
+
 	model.RecordConsumeLog(ctx, &model.Log{
 		UserId:            meta.UserId,
 		ChannelId:         meta.ChannelId,
@@ -135,6 +157,10 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 		IsStream:          meta.IsStream,
 		ElapsedTime:       helper.CalcElapsedTime(meta.StartTime),
 		SystemPromptReset: systemPromptReset,
+		ChannelName:       meta.ChannelName,
+		RequestBody:       requestBody,
+		ResponseBody:      responseBody,
+		RequestHeader:     requestHeader,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(meta.UserId, quota)
 	model.UpdateChannelUsedQuota(meta.ChannelId, quota)

@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/conv"
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/relaymode"
@@ -96,6 +97,45 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 	return nil, responseText, usage
 }
 
+func buildStreamResponseBody(responseText string, usage *model.Usage, modelName string) string {
+	type streamChoice struct {
+		Index        int             `json:"index"`
+		Message      model.Message   `json:"message"`
+		FinishReason string          `json:"finish_reason"`
+	}
+	type streamResponse struct {
+		Id      string         `json:"id"`
+		Object  string         `json:"object"`
+		Created int64          `json:"created"`
+		Model   string         `json:"model"`
+		Choices []streamChoice `json:"choices"`
+		Usage   *model.Usage   `json:"usage"`
+	}
+	resp := streamResponse{
+		Id:      "chatcmpl-xxx",
+		Object:  "chat.completion",
+		Created: 1234567890,
+		Model:   modelName,
+		Choices: []streamChoice{
+			{
+				Index: 0,
+				Message: model.Message{
+					Role:    "assistant",
+					Content: responseText,
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: usage,
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		logger.SysError("buildStreamResponseBody marshal failed: " + err.Error())
+		return ""
+	}
+	return string(data)
+}
+
 func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
 	var textResponse SlimTextResponse
 	responseBody, err := io.ReadAll(resp.Body)
@@ -147,5 +187,6 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 			TotalTokens:      promptTokens + completionTokens,
 		}
 	}
+	c.Set(ctxkey.ResponseBody, string(responseBody))
 	return nil, &textResponse.Usage
 }

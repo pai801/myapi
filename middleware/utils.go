@@ -6,6 +6,7 @@ import (
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/model"
 	"strings"
 )
 
@@ -50,9 +51,19 @@ func getRequestModel(c *gin.Context) (string, error) {
 }
 
 func isModelInList(modelName string, models string) bool {
+	if modelName == "" {
+		return false
+	}
+	if modelName == "auto" {
+		return true
+	}
+	if models == "" {
+		return true
+	}
+	simplified := model.SimplifyModelName(modelName)
 	modelList := strings.Split(models, ",")
-	for _, model := range modelList {
-		if modelName == model {
+	for _, alias := range modelList {
+		if simplified == alias || strings.HasPrefix(alias, simplified) {
 			return true
 		}
 	}

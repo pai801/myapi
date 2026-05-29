@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -145,6 +146,22 @@ func (t *Token) Delete() error {
 	var err error
 	err = DB.Delete(t).Error
 	return err
+}
+
+func SimplifyModelsField(models *string) *string {
+	if models == nil {
+		return nil
+	}
+	if *models == "" {
+		return models
+	}
+	modelList := strings.Split(*models, ",")
+	var aliases []string
+	for _, m := range modelList {
+		aliases = append(aliases, SimplifyModelName(m))
+	}
+	simplified := strings.Join(aliases, ",")
+	return &simplified
 }
 
 func (t *Token) GetModels() string {

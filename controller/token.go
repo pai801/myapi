@@ -148,7 +148,7 @@ func AddToken(c *gin.Context) {
 		ExpiredTime:    token.ExpiredTime,
 		RemainQuota:    token.RemainQuota,
 		UnlimitedQuota: token.UnlimitedQuota,
-		Models:         token.Models,
+		Models:         model.SimplifyModelsField(token.Models),
 		Subnet:         token.Subnet,
 	}
 	err = cleanToken.Insert()
@@ -237,7 +237,7 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.ExpiredTime = token.ExpiredTime
 		cleanToken.RemainQuota = token.RemainQuota
 		cleanToken.UnlimitedQuota = token.UnlimitedQuota
-		cleanToken.Models = token.Models
+		cleanToken.Models = model.SimplifyModelsField(token.Models)
 		cleanToken.Subnet = token.Subnet
 	}
 	err = cleanToken.Update()

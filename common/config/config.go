@@ -164,3 +164,6 @@ var UserContentRequestTimeout = env.Int("USER_CONTENT_REQUEST_TIMEOUT", 30)
 
 var EnforceIncludeUsage = env.Bool("ENFORCE_INCLUDE_USAGE", false)
 var TestPrompt = env.String("TEST_PROMPT", "Output only your specific model name with no additional text.")
+
+var ChannelCooldownSeconds = env.Int("CHANNEL_COOLDOWN_SECONDS", 600)
+var AffinityExpireSeconds = env.Int("AFFINITY_EXPIRE_SECONDS", 120)

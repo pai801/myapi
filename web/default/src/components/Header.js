@@ -5,7 +5,6 @@ import { useTranslation } from 'react-i18next';
 
 import {
   Button,
-  Container,
   Dropdown,
   Icon,
   Menu,
@@ -165,11 +164,14 @@ const Header = () => {
               : { borderTop: 'none', height: '52px' }
           }
         >
-          <Container
+          <div
             style={{
               width: '100%',
-              maxWidth: isMobile() ? '100%' : '1200px',
-              padding: isMobile() ? '0 10px' : '0 20px',
+              maxWidth: '100%',
+              margin: '0 auto',
+              display: 'flex',
+              alignItems: 'center',
+              padding: '0 10px',
             }}
           >
             <Menu.Item as={Link} to='/'>
@@ -183,7 +185,7 @@ const Header = () => {
                 <Icon name={showSidebar ? 'close' : 'sidebar'} />
               </Menu.Item>
             </Menu.Menu>
-          </Container>
+          </div>
         </Menu>
         {showSidebar ? (
           <Segment style={{ marginTop: 0, borderTop: '0' }}>
@@ -248,11 +250,14 @@ const Header = () => {
           border: 'none',
         }}
       >
-        <Container
+        <div
           style={{
-            width: '100%',
-            maxWidth: isMobile() ? '100%' : '1200px',
-            padding: isMobile() ? '0 10px' : '0 20px',
+            width: '92%',
+            maxWidth: '1600px',
+            margin: '0 auto',
+            display: 'flex',
+            alignItems: 'center',
+            padding: '0 20px',
           }}
         >
           <Menu.Item as={Link} to='/' className={'hide-on-mobile'}>
@@ -322,7 +327,7 @@ const Header = () => {
               />
             )}
           </Menu.Menu>
-        </Container>
+        </div>
       </Menu>
     </>
   );

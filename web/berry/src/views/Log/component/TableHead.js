@@ -14,7 +14,7 @@ const LogTableHead = ({ userIsAdmin }) => {
         <TableCell>提示</TableCell>
         <TableCell>补全</TableCell>
         <TableCell>额度</TableCell>
-        <TableCell>详情</TableCell>
+        {userIsAdmin && <TableCell>详情</TableCell>}
       </TableRow>
     </TableHead>
   );

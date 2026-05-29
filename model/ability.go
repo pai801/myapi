@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 
@@ -17,6 +18,33 @@ type Ability struct {
 	ChannelId int    `json:"channel_id" gorm:"primaryKey;autoIncrement:false;index"`
 	Enabled   bool   `json:"enabled"`
 	Priority  *int64 `json:"priority" gorm:"bigint;default:0;index"`
+}
+
+func GetChannelsByGroup(group string) ([]*Channel, error) {
+	groupCol := "`group`"
+	trueVal := "1"
+	if common.UsingPostgreSQL {
+		groupCol = `"group"`
+		trueVal = "true"
+	}
+
+	var err error = nil
+	channelQuery := DB.Where(groupCol+" = ? and enabled = "+trueVal, group)
+	abilities := make([]*Ability, 0)
+	if err = channelQuery.Find(&abilities).Error; err != nil {
+		return nil, err
+	}
+	channelIds := make([]int, 0, len(abilities))
+	for _, ability := range abilities {
+		channelIds = append(channelIds, ability.ChannelId)
+	}
+	slices.Sort(channelIds)
+	channelIds = slices.Compact(channelIds)
+	channels := make([]*Channel, 0, len(channelIds))
+	if err = DB.Where("id IN (?)", channelIds).Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	return channels, nil
 }
 
 func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {
@@ -51,7 +79,7 @@ func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority b
 }
 
 func (channel *Channel) AddAbilities() error {
-	models_ := strings.Split(channel.Models, ",")
+	models_ := channel.GetModels()
 	models_ = utils.DeDuplication(models_)
 	groups_ := strings.Split(channel.Group, ",")
 	abilities := make([]Ability, 0, len(models_))

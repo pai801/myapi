@@ -3,6 +3,9 @@ package router
 import (
 	"embed"
 	"fmt"
+	"net/http"
+	"strings"
+
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
@@ -10,11 +13,10 @@ import (
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/controller"
 	"github.com/songquanpeng/one-api/middleware"
-	"net/http"
-	"strings"
 )
 
 func SetWebRouter(router *gin.Engine, buildFS embed.FS) {
+	config.Theme = "default"
 	indexPageData, _ := buildFS.ReadFile(fmt.Sprintf("web/build/%s/index.html", config.Theme))
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 	router.Use(middleware.GlobalWebRateLimit())

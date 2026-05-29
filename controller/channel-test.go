@@ -92,7 +92,7 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 	modelName := request.Model
 	modelMap := channel.GetModelMapping()
 	if modelName == "" || !strings.Contains(channel.Models, modelName) {
-		modelNames := strings.Split(channel.Models, ",")
+		modelNames := channel.GetModels()
 		if len(modelNames) > 0 {
 			modelName = modelNames[0]
 		}

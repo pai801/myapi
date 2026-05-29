@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
 	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/config"
+	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/common/random"
 )
 
 var (
@@ -190,7 +191,7 @@ func InitChannelCache() {
 	for _, channel := range channels {
 		groups := strings.Split(channel.Group, ",")
 		for _, group := range groups {
-			models := strings.Split(channel.Models, ",")
+			models := channel.GetModels()
 			for _, model := range models {
 				if _, ok := newGroup2model2channels[group][model]; !ok {
 					newGroup2model2channels[group][model] = make([]*Channel, 0)
@@ -222,6 +223,38 @@ func SyncChannelCache(frequency int) {
 		logger.SysLog("syncing channels from database")
 		InitChannelCache()
 	}
+}
+
+func CacheGetGroupChannels(group string) []*Channel {
+	var channels []*Channel
+	var err error
+	if config.MemoryCacheEnabled {
+		channelSyncLock.RLock()
+		defer channelSyncLock.RUnlock()
+		groupModels, ok := group2model2channels[group]
+		if !ok {
+			return nil
+		}
+		seen := make(map[int]bool)
+		var channels []*Channel
+		for _, chs := range groupModels {
+			for _, ch := range chs {
+				if !seen[ch.Id] {
+					seen[ch.Id] = true
+					channels = append(channels, ch)
+				}
+			}
+		}
+		sort.Slice(channels, func(i, j int) bool {
+			return int64(channels[i].Id) < int64(channels[j].Id)
+		})
+	} else {
+		channels, err = GetChannelsByGroup(group)
+		if err != nil {
+			return nil
+		}
+	}
+	return channels
 }
 
 func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {

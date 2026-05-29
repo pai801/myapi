@@ -46,6 +46,7 @@ const EditChannel = () => {
     other: '',
     model_mapping: '',
     system_prompt: '',
+    priority: 1,
     models: [],
     groups: ['default'],
   };

@@ -124,7 +124,7 @@ func TokenAuth() func(c *gin.Context) {
 		c.Set(ctxkey.RequestModel, requestModel)
 		if token.Models != nil && *token.Models != "" {
 			c.Set(ctxkey.AvailableModels, *token.Models)
-			if requestModel != "" && !isModelInList(requestModel, *token.Models) {
+			if requestModel != "" && requestModel != "auto" && !isModelInList(requestModel, *token.Models) {
 				abortWithMessage(c, http.StatusForbidden, fmt.Sprintf("该令牌无权使用模型：%s", requestModel))
 				return
 			}

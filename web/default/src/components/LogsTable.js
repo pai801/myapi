@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next';
 import { ITEMS_PER_PAGE } from '../constants';
 import { renderColorLabel, renderQuota } from '../helpers/render';
 import { Link } from 'react-router-dom';
+import DetailDialog from './DetailDialog';
 
 function renderTimestamp(timestamp, request_id) {
   return (
@@ -139,6 +140,18 @@ const LogsTable = () => {
   const [searching, setSearching] = useState(false);
   const [logType, setLogType] = useState(0);
   const isAdminUser = isAdmin();
+  const [selectedLogItem, setSelectedLogItem] = useState(null);
+  const [detailDialogOpen, setDetailDialogOpen] = useState(false);
+
+  const handleDetailClick = (logItem) => {
+    setSelectedLogItem(logItem);
+    setDetailDialogOpen(true);
+  };
+
+  const handleDetailClose = () => {
+    setDetailDialogOpen(false);
+  };
+
   let now = new Date();
   const [inputs, setInputs] = useState({
     username: '',
@@ -310,6 +323,7 @@ const LogsTable = () => {
 
   return (
     <>
+      <DetailDialog open={detailDialogOpen} onClose={handleDetailClose} logItem={selectedLogItem} />
       <Header as='h3'>
         {t('log.usage_details')}（{t('log.total_quota')}：
         {showStat && renderQuota(stat.quota, t)}
@@ -428,7 +442,18 @@ const LogsTable = () => {
                 }}
                 width={1}
               >
-                {t('log.table.channel')}
+                渠道ID
+              </Table.HeaderCell>
+            )}
+            {isAdminUser && (
+              <Table.HeaderCell
+                style={{ cursor: 'pointer' }}
+                onClick={() => {
+                  sortLog('channel_name');
+                }}
+                width={1.5}
+              >
+                渠道名
               </Table.HeaderCell>
             )}
             <Table.HeaderCell
@@ -445,9 +470,18 @@ const LogsTable = () => {
               onClick={() => {
                 sortLog('model_name');
               }}
-              width={2}
+              width={3}
             >
               {t('log.table.model')}
+            </Table.HeaderCell>
+            <Table.HeaderCell
+              style={{ cursor: 'pointer' }}
+              onClick={() => {
+                sortLog('is_stream');
+              }}
+              width={1}
+            >
+              Stream
             </Table.HeaderCell>
             {showUserTokenQuota() && (
               <>
@@ -457,7 +491,7 @@ const LogsTable = () => {
                     onClick={() => {
                       sortLog('username');
                     }}
-                    width={2}
+                    width={1.5}
                   >
                     {t('log.table.username')}
                   </Table.HeaderCell>
@@ -467,7 +501,7 @@ const LogsTable = () => {
                   onClick={() => {
                     sortLog('token_name');
                   }}
-                  width={2}
+                  width={1.5}
                 >
                   {t('log.table.token_name')}
                 </Table.HeaderCell>
@@ -500,7 +534,7 @@ const LogsTable = () => {
                 </Table.HeaderCell>
               </>
             )}
-            <Table.HeaderCell>{t('log.table.detail')}</Table.HeaderCell>
+            {isAdminUser && <Table.HeaderCell>{t('log.table.detail')}</Table.HeaderCell>}
           </Table.Row>
         </Table.Header>
 
@@ -532,9 +566,19 @@ const LogsTable = () => {
                       )}
                     </Table.Cell>
                   )}
+                  {isAdminUser && (
+                    <Table.Cell>
+                      {log.channel_name || ''}
+                    </Table.Cell>
+                  )}
                   <Table.Cell>{renderType(log.type)}</Table.Cell>
                   <Table.Cell>
                     {log.model_name ? renderColorLabel(log.model_name) : ''}
+                  </Table.Cell>
+                  <Table.Cell>
+                    <Label basic color={log.is_stream ? 'blue' : 'grey'} size='mini'>
+                      {log.is_stream ? 'true' : 'false'}
+                    </Label>
                   </Table.Cell>
                   {showUserTokenQuota() && (
                     <>
@@ -569,7 +613,13 @@ const LogsTable = () => {
                     </>
                   )}
 
-                  <Table.Cell>{renderDetail(log)}</Table.Cell>
+                  {isAdminUser ? (
+                    <Table.Cell>
+                      <Button size='mini' onClick={() => handleDetailClick(log)}>详情</Button>
+                    </Table.Cell>
+                  ) : (
+                    <Table.Cell>{renderDetail(log)}</Table.Cell>
+                  )}
                 </Table.Row>
               );
             })}
@@ -577,7 +627,7 @@ const LogsTable = () => {
 
         <Table.Footer>
           <Table.Row>
-            <Table.HeaderCell colSpan={'10'}>
+            <Table.HeaderCell colSpan={'11'}>
               <Select
                 placeholder={t('log.type.select')}
                 options={LOG_OPTIONS}
