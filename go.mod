@@ -1,6 +1,8 @@
 module github.com/songquanpeng/one-api
 
-go 1.20
+go 1.23
+
+toolchain go1.24.3
 
 require (
 	cloud.google.com/go/iam v1.1.10
@@ -24,6 +26,8 @@ require (
 	github.com/pkoukk/tiktoken-go v0.1.7
 	github.com/smartystreets/goconvey v1.8.1
 	github.com/stretchr/testify v1.9.0
+	github.com/tidwall/gjson v1.19.0
+	github.com/tidwall/sjson v1.2.5
 	golang.org/x/crypto v0.31.0
 	golang.org/x/image v0.18.0
 	golang.org/x/sync v0.10.0
@@ -88,6 +92,8 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/smarty/assertions v1.15.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	go.opencensus.io v0.24.0 // indirect

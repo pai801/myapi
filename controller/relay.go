@@ -27,6 +27,10 @@ import (
 func relayHelper(c *gin.Context, relayMode int) *model.ErrorWithStatusCode {
 	var err *model.ErrorWithStatusCode
 	switch relayMode {
+	case relaymode.Responses:
+		fallthrough
+	case relaymode.ResponsesCompact:
+		err = controller.RelayResponsesHelper(c)
 	case relaymode.ImagesGenerations:
 		err = controller.RelayImageHelper(c, relayMode)
 	case relaymode.AudioSpeech:
@@ -128,7 +132,7 @@ func shouldRetry(c *gin.Context, statusCode int) bool {
 }
 
 func buildFailureLog(c *gin.Context, bizErr *model.ErrorWithStatusCode, channelName string) *dbmodel.Log {
-	respBody, _ := json.Marshal(bizErr.Error) // safe: Error struct has only simple types
+	respBody, _ := json.Marshal(bizErr.Error)
 	requestBody, _ := common.GetRequestBody(c)
 	return &dbmodel.Log{
 		UserId:        c.GetInt(ctxkey.Id),
@@ -140,7 +144,7 @@ func buildFailureLog(c *gin.Context, bizErr *model.ErrorWithStatusCode, channelN
 		ModelName:     c.GetString(ctxkey.RequestModel),
 		ResponseBody:  string(respBody),
 		RequestBody:   string(requestBody),
-		RequestHeader: fmt.Sprintf("%v", c.Request.Header),
+		RequestHeader: controller.MaskAuthorizationHeader(c.Request.Header),
 	}
 }
 

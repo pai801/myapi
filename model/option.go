@@ -1,13 +1,22 @@
 package model
 
 import (
+	"encoding/json"
+	"sync"
+
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
 	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
+	"github.com/songquanpeng/one-api/relay/apitype"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const ModelEndpointTypesKey = "ModelEndpointTypes"
+
+var modelEndpointTypesMap = make(map[string][]apitype.EndpointType)
+var modelEndpointTypesLock sync.RWMutex
 
 type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
@@ -239,6 +248,42 @@ func updateOptionMap(key string, value string) (err error) {
 		config.QuotaPerUnit, _ = strconv.ParseFloat(value, 64)
 	case "Theme":
 		config.Theme = value
+	case ModelEndpointTypesKey:
+		updateModelEndpointTypesMap(value)
 	}
 	return err
+}
+
+func updateModelEndpointTypesMap(jsonValue string) {
+	modelEndpointTypesLock.Lock()
+	defer modelEndpointTypesLock.Unlock()
+
+	modelEndpointTypesMap = make(map[string][]apitype.EndpointType)
+	if jsonValue == "" {
+		return
+	}
+
+	var rawMap map[string][]string
+	if err := json.Unmarshal([]byte(jsonValue), &rawMap); err != nil {
+		logger.SysError("failed to parse ModelEndpointTypes: " + err.Error())
+		return
+	}
+
+	for simplifiedName, endpoints := range rawMap {
+		endpointTypes := make([]apitype.EndpointType, 0, len(endpoints))
+		for _, ep := range endpoints {
+			endpointTypes = append(endpointTypes, apitype.EndpointType(ep))
+		}
+		modelEndpointTypesMap[simplifiedName] = endpointTypes
+	}
+}
+
+func GetModelEndpointTypes(modelName string) []apitype.EndpointType {
+	simplifiedName := SimplifyModelName(modelName)
+	modelEndpointTypesLock.RLock()
+	defer modelEndpointTypesLock.RUnlock()
+	if endpoints, ok := modelEndpointTypesMap[simplifiedName]; ok {
+		return endpoints
+	}
+	return []apitype.EndpointType{apitype.EndpointTypeOpenAI}
 }

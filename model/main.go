@@ -158,7 +158,7 @@ func migrateDB() error {
 	if err = DB.AutoMigrate(&Log{}); err != nil {
 		return err
 	}
-	if err = DB.AutoMigrate(&Channel{}); err != nil {
+	if err = DB.AutoMigrate(&ModelMetadata{}); err != nil {
 		return err
 	}
 	return nil

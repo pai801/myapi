@@ -13,6 +13,7 @@ const OperationSetting = () => {
     ModelRatio: '',
     CompletionRatio: '',
     GroupRatio: '',
+    ModelEndpointTypes: '',
     TopUpLink: '',
     ChatLink: '',
     QuotaPerUnit: 0,
@@ -35,7 +36,7 @@ const OperationSetting = () => {
     if (success) {
       let newInputs = {};
       data.forEach((item) => {
-        if (item.key === 'ModelRatio' || item.key === 'GroupRatio' || item.key === 'CompletionRatio') {
+        if (item.key === 'ModelRatio' || item.key === 'GroupRatio' || item.key === 'CompletionRatio' || item.key === 'ModelEndpointTypes') {
           item.value = JSON.stringify(JSON.parse(item.value), null, 2);
         }
         if (item.value === '{}') {
@@ -111,6 +112,13 @@ const OperationSetting = () => {
             return;
           }
           await updateOption('CompletionRatio', inputs.CompletionRatio);
+        }
+        if (originInputs['ModelEndpointTypes'] !== inputs.ModelEndpointTypes) {
+          if (!verifyJSON(inputs.ModelEndpointTypes)) {
+            showError('模型端点类型不是合法的 JSON 字符串');
+            return;
+          }
+          await updateOption('ModelEndpointTypes', inputs.ModelEndpointTypes);
         }
         break;
       case 'quota':
@@ -375,6 +383,17 @@ const OperationSetting = () => {
               autoComplete='new-password'
               value={inputs.GroupRatio}
               placeholder='为一个 JSON 文本，键为分组名称，值为倍率'
+            />
+          </Form.Group>
+          <Form.Group widths='equal'>
+            <Form.TextArea
+              label='模型端点类型'
+              name='ModelEndpointTypes'
+              onChange={handleInputChange}
+              style={{ minHeight: 250, fontFamily: 'JetBrains Mono, Consolas' }}
+              autoComplete='new-password'
+              value={inputs.ModelEndpointTypes}
+              placeholder='为一个 JSON 文本，键为简化后的模型名称，值为支持的端点类型数组，如 {"gpt4turbo": ["openai", "openai-response"]}'
             />
           </Form.Group>
           <Form.Button onClick={() => {

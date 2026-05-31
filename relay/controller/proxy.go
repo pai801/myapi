@@ -20,13 +20,14 @@ func RelayProxyHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 
 	adaptor := relay.GetAdaptor(meta.APIType)
 	if adaptor == nil {
+		logger.Errorf(ctx, "[%s] %+v", "invalid_api_type", fmt.Errorf("invalid api type: %d", meta.APIType))
 		return openai.ErrorWrapper(fmt.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
 	}
 	adaptor.Init(meta)
 
 	resp, err := adaptor.DoRequest(c, meta, c.Request.Body)
 	if err != nil {
-		logger.Errorf(ctx, "DoRequest failed: %s", err.Error())
+		logger.Errorf(ctx, "[%s] %+v", "do_request_failed", err)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 

@@ -30,7 +30,7 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	// get & validate textRequest
 	textRequest, err := getAndValidateTextRequest(c, meta.Mode)
 	if err != nil {
-		logger.Errorf(ctx, "getAndValidateTextRequest failed: %s", err.Error())
+		logger.Errorf(ctx, "[%s] %+v", "invalid_text_request", err)
 		return openai.ErrorWrapper(err, "invalid_text_request", http.StatusBadRequest)
 	}
 	meta.IsStream = textRequest.Stream
@@ -44,8 +44,8 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	// Store request body and headers in context for logging (controlled by LogConsumeEnabled)
 	if config.LogConsumeEnabled {
 		bodyJSON, _ := json.Marshal(textRequest)
-		ctx = context.WithValue(ctx, ctxKeyRequestBody, string(bodyJSON))
-		ctx = context.WithValue(ctx, ctxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
+		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(bodyJSON))
+		ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
 	}
 
 	// get model ratio & group ratio
@@ -63,6 +63,7 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 
 	adaptor := relay.GetAdaptor(meta.APIType)
 	if adaptor == nil {
+		logger.Errorf(ctx, "[%s] %+v", "invalid_api_type", fmt.Errorf("invalid api type: %d", meta.APIType))
 		return openai.ErrorWrapper(fmt.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
 	}
 	adaptor.Init(meta)
@@ -70,13 +71,14 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	// get request body
 	requestBody, err := getRequestBody(c, meta, textRequest, adaptor)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "convert_request_failed", err)
 		return openai.ErrorWrapper(err, "convert_request_failed", http.StatusInternalServerError)
 	}
 
 	// do request
 	resp, err := adaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
-		logger.Errorf(ctx, "DoRequest failed: %s", err.Error())
+		logger.Errorf(ctx, "[%s] %+v", "do_request_failed", err)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	if isErrorHappened(meta, resp) {
@@ -88,7 +90,7 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	usage, respErr := adaptor.DoResponse(c, resp, meta)
 	if config.LogConsumeEnabled {
 		if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
-			ctx = context.WithValue(ctx, ctxKeyResponseBody, respBody)
+			ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
 		}
 	}
 	if respErr != nil {

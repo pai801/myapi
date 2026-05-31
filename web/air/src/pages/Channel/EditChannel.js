@@ -596,7 +596,27 @@ const EditChannel = (props) => {
                       )
                     }
                     {
-                      inputs.type !== 3 && inputs.type !== 8 && inputs.type !== 22 && (
+                      inputs.type === 52 && (
+                        <>
+                            <div style={{ marginTop: 10 }}>
+                                <Typography.Text strong>Base URL：</Typography.Text>
+                            </div>
+                            <Input
+                              label='Base URL'
+                              name='base_url'
+                              required
+                              placeholder={'请输入 Codex 服务地址'}
+                              onChange={value => {
+                                  handleInputChange('base_url', value)
+                              }}
+                              value={inputs.base_url}
+                              autoComplete='new-password'
+                            />
+                        </>
+                      )
+                    }
+                    {
+                      inputs.type !== 3 && inputs.type !== 8 && inputs.type !== 22 && inputs.type !== 52 && (
                         <>
                             <div style={{ marginTop: 10 }}>
                                 <Typography.Text strong>代理：</Typography.Text>

@@ -630,6 +630,10 @@
           "title": "分组倍率",
           "placeholder": "为一个 JSON 文本，键为分组名称，值为倍率"
         },
+        "endpoint_types": {
+          "title": "模型端点类型",
+          "placeholder": "为一个 JSON 文本，键为简化后的模型名称，值为支持的端点类型数组，如 {\"gpt4turbo\": [\"openai\", \"openai-response\"]}"
+        },
         "buttons": {
           "save": "保存倍率设置"
         }

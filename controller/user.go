@@ -79,6 +79,18 @@ func SetupLogin(user *model.User, c *gin.Context) {
 		})
 		return
 	}
+
+	token, err := common.GenerateJWT(user.Id, user.Username, user.Role, user.Status)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "无法生成令牌，请重试",
+			"success": false,
+		})
+		return
+	}
+
+	c.SetCookie("session", token, config.JWTExpiresIn, "/", "", false, true)
+
 	cleanUser := model.User{
 		Id:          user.Id,
 		Username:    user.Username,
@@ -90,6 +102,7 @@ func SetupLogin(user *model.User, c *gin.Context) {
 		"message": "",
 		"success": true,
 		"data":    cleanUser,
+		"token":   token,
 	})
 }
 
@@ -104,6 +117,7 @@ func Logout(c *gin.Context) {
 		})
 		return
 	}
+	c.SetCookie("session", "", -1, "/", "", false, true)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
 		"success": true,

@@ -29,9 +29,9 @@ import (
 type contextKey int
 
 const (
-	ctxKeyRequestBody contextKey = iota
-	ctxKeyResponseBody
-	ctxKeyRequestHeader
+	CtxKeyRequestBody contextKey = iota
+	CtxKeyResponseBody
+	CtxKeyRequestHeader
 )
 
 func getAndValidateTextRequest(c *gin.Context, relayMode int) (*relaymodel.GeneralOpenAIRequest, error) {
@@ -78,13 +78,16 @@ func preConsumeQuota(ctx context.Context, textRequest *relaymodel.GeneralOpenAIR
 
 	userQuota, err := model.CacheGetUserQuota(ctx, meta.UserId)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "get_user_quota_failed", err)
 		return preConsumedQuota, openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
 	}
 	if userQuota-preConsumedQuota < 0 {
+		logger.Errorf(ctx, "[%s] %+v", "insufficient_user_quota", errors.New("user quota is not enough"))
 		return preConsumedQuota, openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 	}
 	err = model.CacheDecreaseUserQuota(meta.UserId, preConsumedQuota)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "decrease_user_quota_failed", err)
 		return preConsumedQuota, openai.ErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
 	}
 	if userQuota > 100*preConsumedQuota {
@@ -96,6 +99,7 @@ func preConsumeQuota(ctx context.Context, textRequest *relaymodel.GeneralOpenAIR
 	if preConsumedQuota > 0 {
 		err := model.PreConsumeTokenQuota(meta.TokenId, preConsumedQuota)
 		if err != nil {
+			logger.Errorf(ctx, "[%s] %+v", "pre_consume_token_quota_failed", err)
 			return preConsumedQuota, openai.ErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
 		}
 	}
@@ -133,15 +137,15 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 	logContent := fmt.Sprintf("倍率：%.2f × %.2f × %.2f", modelRatio, groupRatio, completionRatio)
 
 	var requestBody string
-	if v := ctx.Value(ctxKeyRequestBody); v != nil {
+	if v := ctx.Value(CtxKeyRequestBody); v != nil {
 		requestBody = v.(string)
 	}
 	var responseBody string
-	if v := ctx.Value(ctxKeyResponseBody); v != nil {
+	if v := ctx.Value(CtxKeyResponseBody); v != nil {
 		responseBody = v.(string)
 	}
 	var requestHeader string
-	if v := ctx.Value(ctxKeyRequestHeader); v != nil {
+	if v := ctx.Value(CtxKeyRequestHeader); v != nil {
 		requestHeader = v.(string)
 	}
 

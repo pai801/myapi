@@ -21,6 +21,7 @@ const OperationSetting = () => {
     ModelRatio: '',
     CompletionRatio: '',
     GroupRatio: '',
+    ModelEndpointTypes: '',
     TopUpLink: '',
     ChatLink: '',
     QuotaPerUnit: 0,
@@ -48,7 +49,8 @@ const OperationSetting = () => {
         if (
           item.key === 'ModelRatio' ||
           item.key === 'GroupRatio' ||
-          item.key === 'CompletionRatio'
+          item.key === 'CompletionRatio' ||
+          item.key === 'ModelEndpointTypes'
         ) {
           item.value = JSON.stringify(JSON.parse(item.value), null, 2);
         }
@@ -136,6 +138,13 @@ const OperationSetting = () => {
             return;
           }
           await updateOption('CompletionRatio', inputs.CompletionRatio);
+        }
+        if (originInputs['ModelEndpointTypes'] !== inputs.ModelEndpointTypes) {
+          if (!verifyJSON(inputs.ModelEndpointTypes)) {
+            showError('模型端点类型不是合法的 JSON 字符串');
+            return;
+          }
+          await updateOption('ModelEndpointTypes', inputs.ModelEndpointTypes);
         }
         break;
       case 'quota':
@@ -273,6 +282,17 @@ const OperationSetting = () => {
               autoComplete='new-password'
               value={inputs.GroupRatio}
               placeholder={t('setting.operation.ratio.group.placeholder')}
+            />
+          </Form.Group>
+          <Form.Group widths='equal'>
+            <Form.TextArea
+              label={t('setting.operation.ratio.endpoint_types.title')}
+              name='ModelEndpointTypes'
+              onChange={handleInputChange}
+              style={{ minHeight: 250, fontFamily: 'JetBrains Mono, Consolas' }}
+              autoComplete='new-password'
+              value={inputs.ModelEndpointTypes}
+              placeholder={t('setting.operation.ratio.endpoint_types.placeholder')}
             />
           </Form.Group>
           <Form.Button

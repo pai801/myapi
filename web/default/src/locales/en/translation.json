@@ -632,6 +632,10 @@
           "title": "Group Ratio",
           "placeholder": "A JSON text where keys are group names and values are ratios"
         },
+        "endpoint_types": {
+          "title": "Model Endpoint Types",
+          "placeholder": "A JSON text where keys are simplified model names and values are arrays of supported endpoint types, e.g. {\"gpt4turbo\": [\"openai\", \"openai-response\"]}"
+        },
         "buttons": {
           "save": "Save Ratio Settings"
         }

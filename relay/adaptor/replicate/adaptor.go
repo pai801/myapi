@@ -115,12 +115,14 @@ func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Read
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (usage *model.Usage, err *model.ErrorWithStatusCode) {
+	ctx := c.Request.Context()
 	switch meta.Mode {
 	case relaymode.ImagesGenerations:
 		err, usage = ImageHandler(c, resp)
 	case relaymode.ChatCompletions:
 		err, usage = ChatHandler(c, resp)
 	default:
+		logger.Errorf(ctx, "[%s] %+v", "not_implemented", errors.New("not implemented"))
 		err = openai.ErrorWrapper(errors.New("not implemented"), "not_implemented", http.StatusInternalServerError)
 	}
 

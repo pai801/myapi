@@ -2,61 +2,110 @@ package middleware
 
 import (
 	"fmt"
+	"net/http"
+	"strings"
+
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
+
+	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/blacklist"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/network"
 	"github.com/songquanpeng/one-api/model"
-	"net/http"
-	"strings"
 )
 
 func authHelper(c *gin.Context, minRole int) {
-	session := sessions.Default(c)
-	username := session.Get("username")
-	role := session.Get("role")
-	id := session.Get("id")
-	status := session.Get("status")
-	if username == nil {
-		// Check access token
-		accessToken := c.Request.Header.Get("Authorization")
-		if accessToken == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "无权进行此操作，未登录且未提供 access token",
-			})
-			c.Abort()
-			return
-		}
-		user := model.ValidateAccessToken(accessToken)
-		if user != nil && user.Username != "" {
-			// Token is valid
-			username = user.Username
-			role = user.Role
-			id = user.Id
-			status = user.Status
-		} else {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "无权进行此操作，access token 无效",
-			})
-			c.Abort()
-			return
+	var username interface{}
+	var roleVal interface{}
+	var idVal interface{}
+	var statusVal interface{}
+	authenticated := false
+	fromSession := false
+
+	// 1. Try JWT from cookie (stateless)
+	if jwtCookie, err := c.Cookie("session"); err == nil && jwtCookie != "" {
+		claims, parseErr := common.ParseJWT(jwtCookie)
+		if parseErr == nil {
+			username = claims.Username
+			roleVal = claims.Role
+			idVal = claims.UserId
+			statusVal = claims.Status
+			authenticated = true
 		}
 	}
-	if status.(int) == model.UserStatusDisabled || blacklist.IsUserBanned(id.(int)) {
+
+	// 2. Try JWT from Authorization header
+	if !authenticated {
+		authHeader := c.Request.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			claims, parseErr := common.ParseJWT(tokenStr)
+			if parseErr == nil {
+				username = claims.Username
+				roleVal = claims.Role
+				idVal = claims.UserId
+				statusVal = claims.Status
+				authenticated = true
+			}
+		}
+	}
+
+	// 3. Fallback to session (backward compatibility)
+	if !authenticated {
+		sess := sessions.Default(c)
+		username = sess.Get("username")
+		roleVal = sess.Get("role")
+		idVal = sess.Get("id")
+		statusVal = sess.Get("status")
+		if username != nil {
+			authenticated = true
+			fromSession = true
+		}
+	}
+
+	// 4. Fallback to access token
+	if !authenticated {
+		accessToken := c.Request.Header.Get("Authorization")
+		if accessToken != "" {
+			user := model.ValidateAccessToken(accessToken)
+			if user != nil && user.Username != "" {
+				username = user.Username
+				roleVal = user.Role
+				idVal = user.Id
+				statusVal = user.Status
+				authenticated = true
+			}
+		}
+	}
+
+	if !authenticated {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"message": "无权进行此操作，未登录且未提供有效凭证",
+		})
+		c.Abort()
+		return
+	}
+
+	statusInt, statusOk := statusVal.(int)
+	idInt, idOk := idVal.(int)
+	if !statusOk || !idOk || statusInt == model.UserStatusDisabled || blacklist.IsUserBanned(idInt) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "用户已被封禁",
 		})
-		session := sessions.Default(c)
-		session.Clear()
-		_ = session.Save()
+		if fromSession {
+			sess := sessions.Default(c)
+			sess.Clear()
+			_ = sess.Save()
+		}
 		c.Abort()
 		return
 	}
-	if role.(int) < minRole {
+
+	roleInt, roleOk := roleVal.(int)
+	if !roleOk || roleInt < minRole {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "无权进行此操作，权限不足",
@@ -64,9 +113,10 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
+
 	c.Set("username", username)
-	c.Set("role", role)
-	c.Set("id", id)
+	c.Set("role", roleVal)
+	c.Set("id", idVal)
 	c.Next()
 }
 

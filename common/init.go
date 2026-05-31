@@ -44,6 +44,11 @@ func Init() {
 			config.SessionSecret = os.Getenv("SESSION_SECRET")
 		}
 	}
+	if os.Getenv("JWT_SECRET") != "" {
+		config.JWTSecret = os.Getenv("JWT_SECRET")
+	} else if os.Getenv("SESSION_SECRET") != "" {
+		config.JWTSecret = config.SessionSecret
+	}
 	if os.Getenv("SQLITE_PATH") != "" {
 		SQLitePath = os.Getenv("SQLITE_PATH")
 	}

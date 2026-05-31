@@ -117,5 +117,14 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			groupRoute.GET("/", controller.GetGroups)
 		}
+		modelMetadataRoute := apiRouter.Group("/model-metadata")
+		modelMetadataRoute.Use(middleware.AdminAuth())
+		{
+			modelMetadataRoute.GET("/", controller.GetAllMetadata)
+			modelMetadataRoute.GET("/:name", controller.GetMetadata)
+			modelMetadataRoute.POST("/", controller.CreateMetadata)
+			modelMetadataRoute.PUT("/", controller.UpdateMetadata)
+			modelMetadataRoute.DELETE("/:name", controller.DeleteMetadata)
+		}
 	}
 }

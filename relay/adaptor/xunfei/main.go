@@ -154,9 +154,11 @@ func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
 }
 
 func StreamHandler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*model.ErrorWithStatusCode, *model.Usage) {
+	ctx := c.Request.Context()
 	domain, authUrl := getXunfeiAuthUrl(meta.Config.APIVersion, apiKey, apiSecret)
 	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "xunfei_request_failed", err)
 		return openai.ErrorWrapper(err, "xunfei_request_failed", http.StatusInternalServerError), nil
 	}
 	common.SetEventStreamHeaders(c)
@@ -184,9 +186,11 @@ func StreamHandler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpe
 }
 
 func Handler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*model.ErrorWithStatusCode, *model.Usage) {
+	ctx := c.Request.Context()
 	domain, authUrl := getXunfeiAuthUrl(meta.Config.APIVersion, apiKey, apiSecret)
 	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "xunfei_request_failed", err)
 		return openai.ErrorWrapper(err, "xunfei_request_failed", http.StatusInternalServerError), nil
 	}
 	var usage model.Usage
@@ -207,6 +211,7 @@ func Handler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIReq
 		}
 	}
 	if len(xunfeiResponse.Payload.Choices.Text) == 0 {
+		logger.Errorf(ctx, "[%s] %+v", "xunfei_empty_response_detected", errors.New("xunfei empty response detected"))
 		return openai.ErrorWrapper(errors.New("xunfei empty response detected"), "xunfei_empty_response_detected", http.StatusInternalServerError), nil
 	}
 	xunfeiResponse.Payload.Choices.Text[0].Content = content
@@ -214,6 +219,7 @@ func Handler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIReq
 	response := responseXunfei2OpenAI(&xunfeiResponse)
 	jsonResponse, err := json.Marshal(response)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "marshal_response_body_failed", err)
 		return openai.ErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 	c.Writer.Header().Set("Content-Type", "application/json")

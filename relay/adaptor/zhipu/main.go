@@ -144,6 +144,7 @@ func streamMetaResponseZhipu2OpenAI(zhipuResponse *StreamMetaResponse) (*openai.
 
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	var usage *model.Usage
+	ctx := c.Request.Context()
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if atEOF && len(data) == 0 {
@@ -203,6 +204,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 	err := resp.Body.Close()
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "close_response_body_failed", err)
 		return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
 
@@ -211,16 +213,20 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	var zhipuResponse Response
+	ctx := c.Request.Context()
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "read_response_body_failed", err)
 		return openai.ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
 	}
 	err = resp.Body.Close()
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "close_response_body_failed", err)
 		return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
 	err = json.Unmarshal(responseBody, &zhipuResponse)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "unmarshal_response_body_failed", err)
 		return openai.ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 	if !zhipuResponse.Success {
@@ -238,6 +244,7 @@ func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *
 	fullTextResponse.Model = "chatglm"
 	jsonResponse, err := json.Marshal(fullTextResponse)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "marshal_response_body_failed", err)
 		return openai.ErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 	c.Writer.Header().Set("Content-Type", "application/json")
@@ -248,21 +255,26 @@ func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *
 
 func EmbeddingsHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	var zhipuResponse EmbeddingResponse
+	ctx := c.Request.Context()
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "read_response_body_failed", err)
 		return openai.ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
 	}
 	err = resp.Body.Close()
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "close_response_body_failed", err)
 		return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
 	err = json.Unmarshal(responseBody, &zhipuResponse)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "unmarshal_response_body_failed", err)
 		return openai.ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 	fullTextResponse := embeddingResponseZhipu2OpenAI(&zhipuResponse)
 	jsonResponse, err := json.Marshal(fullTextResponse)
 	if err != nil {
+		logger.Errorf(ctx, "[%s] %+v", "marshal_response_body_failed", err)
 		return openai.ErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 	c.Writer.Header().Set("Content-Type", "application/json")

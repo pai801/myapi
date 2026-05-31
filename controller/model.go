@@ -33,22 +33,34 @@ type OpenAIModelPermission struct {
 }
 
 type OpenAIModels struct {
-	Id         string                  `json:"id"`
-	Object     string                  `json:"object"`
-	Created    int                     `json:"created"`
-	OwnedBy    string                  `json:"owned_by"`
-	Permission []OpenAIModelPermission `json:"permission"`
-	Root       string                  `json:"root"`
-	Parent     *string                 `json:"parent"`
+	Id                       string                  `json:"id"`
+	Object                   string                  `json:"object"`
+	Created                  int                     `json:"created"`
+	OwnedBy                  string                  `json:"owned_by"`
+	Permission               []OpenAIModelPermission `json:"permission"`
+	Root                     string                  `json:"root"`
+	Parent                   *string                 `json:"parent"`
+	SupportedEndpointTypes   []apitype.EndpointType  `json:"supported_endpoint_types,omitempty"`
+	DisplayName              string                  `json:"display_name,omitempty"`
+	Visibility               string                  `json:"visibility,omitempty"`
+	SupportedInApi           bool                    `json:"supported_in_api,omitempty"`
+	Priority                 int                     `json:"priority,omitempty"`
+	DefaultReasoningLevel    string                  `json:"default_reasoning_level,omitempty"`
+	SupportedReasoningLevels []string                `json:"supported_reasoning_levels,omitempty"`
+	ContextWindow            int                     `json:"context_window,omitempty"`
+	TruncationPolicy         string                  `json:"truncation_policy,omitempty"`
+	InputModalities          []string                `json:"input_modalities,omitempty"`
+	ApplyPatchToolType       string                  `json:"apply_patch_tool_type,omitempty"`
+	WebSearchToolType        string                  `json:"web_search_tool_type,omitempty"`
 }
 
 var models []OpenAIModels
 var modelsMap map[string]OpenAIModels
 var channelId2Models map[int][]string
+var defaultPermission []OpenAIModelPermission
 
 func init() {
-	var permission []OpenAIModelPermission
-	permission = append(permission, OpenAIModelPermission{
+	defaultPermission = append(defaultPermission, OpenAIModelPermission{
 		Id:                 "modelperm-LwHkVFn8AcMItP432fKKDIKJ",
 		Object:             "model_permission",
 		Created:            1626777600,
@@ -71,15 +83,8 @@ func init() {
 		channelName := adaptor.GetChannelName()
 		modelNames := adaptor.GetModelList()
 		for _, modelName := range modelNames {
-			models = append(models, OpenAIModels{
-				Id:         modelName,
-				Object:     "model",
-				Created:    1626777600,
-				OwnedBy:    channelName,
-				Permission: permission,
-				Root:       modelName,
-				Parent:     nil,
-			})
+			modelObj := createModelObject(modelName, channelName)
+			models = append(models, modelObj)
 		}
 	}
 	for _, channelType := range openai.CompatibleChannels {
@@ -88,15 +93,8 @@ func init() {
 		}
 		channelName, channelModelList := openai.GetCompatibleChannelMeta(channelType)
 		for _, modelName := range channelModelList {
-			models = append(models, OpenAIModels{
-				Id:         modelName,
-				Object:     "model",
-				Created:    1626777600,
-				OwnedBy:    channelName,
-				Permission: permission,
-				Root:       modelName,
-				Parent:     nil,
-			})
+			modelObj := createModelObject(modelName, channelName)
+			models = append(models, modelObj)
 		}
 	}
 	modelsMap = make(map[string]OpenAIModels)
@@ -114,6 +112,36 @@ func init() {
 	}
 }
 
+func createModelObject(modelName, channelName string) OpenAIModels {
+	modelObj := OpenAIModels{
+		Id:                     modelName,
+		Object:                 "model",
+		Created:                1626777600,
+		OwnedBy:                channelName,
+		Permission:             defaultPermission,
+		Root:                   modelName,
+		Parent:                 nil,
+		SupportedEndpointTypes: model.GetModelEndpointTypes(modelName),
+	}
+	applyMetadataToModel(&modelObj)
+	return modelObj
+}
+
+func applyMetadataToModel(modelObj *OpenAIModels) {
+	metadata := model.GetOrCreateDefaultMetadata(model.SimplifyModelName(modelObj.Id))
+	modelObj.DisplayName = metadata.DisplayName
+	modelObj.Visibility = metadata.Visibility
+	modelObj.SupportedInApi = metadata.SupportedInApi
+	modelObj.Priority = metadata.Priority
+	modelObj.DefaultReasoningLevel = metadata.DefaultReasoningLevel
+	modelObj.SupportedReasoningLevels = metadata.SupportedReasoningLevels
+	modelObj.ContextWindow = metadata.ContextWindow
+	modelObj.TruncationPolicy = metadata.TruncationPolicy
+	modelObj.InputModalities = metadata.InputModalities
+	modelObj.ApplyPatchToolType = metadata.ApplyPatchToolType
+	modelObj.WebSearchToolType = metadata.WebSearchToolType
+}
+
 func DashboardListModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -123,9 +151,15 @@ func DashboardListModels(c *gin.Context) {
 }
 
 func ListAllModels(c *gin.Context) {
+	data := make([]OpenAIModels, 0, len(models))
+	for _, m := range models {
+		m.SupportedEndpointTypes = model.GetModelEndpointTypes(m.Id)
+		applyMetadataToModel(&m)
+		data = append(data, m)
+	}
 	c.JSON(200, gin.H{
 		"object": "list",
-		"data":   models,
+		"data":   data,
 	})
 }
 
@@ -144,22 +178,28 @@ func ListModels(c *gin.Context) {
 		modelSet[availableModel] = true
 	}
 	availableOpenAIModels := make([]OpenAIModels, 0)
-	for _, model := range models {
-		if _, ok := modelSet[model.Id]; ok {
-			modelSet[model.Id] = false
-			availableOpenAIModels = append(availableOpenAIModels, model)
+	for _, m := range models {
+		if _, ok := modelSet[m.Id]; ok {
+			modelSet[m.Id] = false
+			m.SupportedEndpointTypes = model.GetModelEndpointTypes(m.Id)
+			applyMetadataToModel(&m)
+			availableOpenAIModels = append(availableOpenAIModels, m)
 		}
 	}
 	for modelName, ok := range modelSet {
 		if ok {
-			availableOpenAIModels = append(availableOpenAIModels, OpenAIModels{
-				Id:      modelName,
-				Object:  "model",
-				Created: 1626777600,
-				OwnedBy: "custom",
-				Root:    modelName,
-				Parent:  nil,
-			})
+			modelObj := OpenAIModels{
+				Id:                     modelName,
+				Object:                 "model",
+				Created:                1626777600,
+				OwnedBy:                "custom",
+				Permission:             defaultPermission,
+				Root:                   modelName,
+				Parent:                 nil,
+				SupportedEndpointTypes: model.GetModelEndpointTypes(modelName),
+			}
+			applyMetadataToModel(&modelObj)
+			availableOpenAIModels = append(availableOpenAIModels, modelObj)
 		}
 	}
 	c.JSON(200, gin.H{
@@ -170,8 +210,10 @@ func ListModels(c *gin.Context) {
 
 func RetrieveModel(c *gin.Context) {
 	modelId := c.Param("model")
-	if model, ok := modelsMap[modelId]; ok {
-		c.JSON(200, model)
+	if m, ok := modelsMap[modelId]; ok {
+		m.SupportedEndpointTypes = model.GetModelEndpointTypes(modelId)
+		applyMetadataToModel(&m)
+		c.JSON(200, m)
 	} else {
 		Error := relaymodel.Error{
 			Message: fmt.Sprintf("The model '%s' does not exist", modelId),
