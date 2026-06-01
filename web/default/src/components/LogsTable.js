@@ -152,13 +152,12 @@ const LogsTable = () => {
     setDetailDialogOpen(false);
   };
 
-  let now = new Date();
   const [inputs, setInputs] = useState({
     username: '',
     token_name: '',
     model_name: '',
     start_timestamp: timestamp2string(0),
-    end_timestamp: timestamp2string(now.getTime() / 1000 + 3600),
+    end_timestamp: timestamp2string(0),
     channel: '',
   });
   const {

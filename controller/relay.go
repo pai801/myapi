@@ -61,8 +61,8 @@ func Relay(c *gin.Context) {
 		requestModel = "auto"
 	}
 	bizErr := relayHelper(c, relayMode)
-	middleware.AffinityGlobal.Set(userId, requestModel, channelId)
 	if bizErr == nil {
+		middleware.AffinityGlobal.Set(userId, requestModel, channelId)
 		monitor.Emit(channelId, true)
 		return
 	}
@@ -89,8 +89,8 @@ func Relay(c *gin.Context) {
 		requestBody, err := common.GetRequestBody(c)
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
 		bizErr = relayHelper(c, relayMode)
-		middleware.AffinityGlobal.Set(userId, requestModel, channel.Id)
 		if bizErr == nil {
+			middleware.AffinityGlobal.Set(userId, requestModel, channel.Id)
 			return
 		}
 		channelId = c.GetInt(ctxkey.ChannelId)

@@ -27,7 +27,7 @@ export default function Log() {
     token_name: '',
     model_name: '',
     start_timestamp: 0,
-    end_timestamp: new Date().getTime() / 1000 + 3600,
+    end_timestamp: 0,
     type: 0,
     channel: ''
   };
