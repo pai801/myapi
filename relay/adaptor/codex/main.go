@@ -8,7 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common/client"
 	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/relaymode"
@@ -17,7 +16,8 @@ import (
 var _ adaptor.Adaptor = (*Adaptor)(nil)
 
 type Adaptor struct {
-	meta *meta.Meta
+	OpenAiImpl adaptor.Adaptor
+	meta       *meta.Meta
 }
 
 func (a *Adaptor) Init(meta *meta.Meta) {
@@ -61,12 +61,7 @@ func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Read
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (*model.Usage, *model.ErrorWithStatusCode) {
 	// Chat Completions / Completions 模式：上游返回的是 chat 格式 SSE，用 openai 的 handler 解析
 	if meta.Mode == relaymode.ChatCompletions || meta.Mode == relaymode.Completions {
-		if meta.IsStream {
-			err, _, usage := openai.StreamHandler(c, resp, meta.Mode)
-			return usage, err
-		}
-		err, usage := openai.Handler(c, resp, meta.PromptTokens, meta.ActualModelName)
-		return usage, err
+		return a.OpenAiImpl.DoResponse(c, resp, meta)
 	}
 	// Responses API 模式：上游返回的是 Responses 格式
 	if meta.IsStream {
