@@ -192,19 +192,23 @@ const ChannelsTable = () => {
         }
         res = await API.put('/api/channel/', data);
         break;
+      case 'reset':
+        res = await API.get(`/api/channel/reset/${id}`);
+        break;
     }
     const { success, message } = res.data;
     if (success) {
       showSuccess(t('channel.messages.operation_success'));
-      let channel = res.data.data;
       let newChannels = [...channels];
       let realIdx = (activePage - 1) * ITEMS_PER_PAGE + idx;
       if (action === 'delete') {
         newChannels[realIdx].deleted = true;
+        setChannels(newChannels);
       } else {
+        let channel = res.data.data;
         newChannels[realIdx].status = channel.status;
+        setChannels(newChannels);
       }
-      setChannels(newChannels);
     } else {
       showError(message);
     }
@@ -647,6 +651,14 @@ const ChannelsTable = () => {
                         {channel.status === 1
                           ? t('channel.buttons.disable')
                           : t('channel.buttons.enable')}
+                      </Button>
+                      <Button
+                        size={'tiny'}
+                        onClick={() => {
+                          manageChannel(channel.id, 'reset', idx);
+                        }}
+                      >
+                        重置
                       </Button>
                       <Button
                         size={'tiny'}

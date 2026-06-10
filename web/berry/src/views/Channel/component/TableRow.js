@@ -223,6 +223,14 @@ export default function ChannelTableRow({
           <IconEdit style={{ marginRight: "16px" }} />
           编辑
         </MenuItem>
+        <MenuItem
+          onClick={async () => {
+            handleCloseMenu();
+            await manageChannel(item.id, "reset", "");
+          }}
+        >
+          重置
+        </MenuItem>
         <MenuItem onClick={handleDeleteOpen} sx={{ color: "error.main" }}>
           <IconTrash style={{ marginRight: "16px" }} />
           删除

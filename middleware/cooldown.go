@@ -44,3 +44,9 @@ func (cm *CooldownManager) IsCoolingDown(channelId int) bool {
 
 	return true
 }
+
+func (cm *CooldownManager) Reset(channelId int) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	delete(cm.entries, channelId)
+}

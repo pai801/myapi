@@ -4,6 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
+	"github.com/songquanpeng/one-api/middleware"
 	"github.com/songquanpeng/one-api/model"
 	"net/http"
 	"strconv"
@@ -162,6 +163,36 @@ func UpdateChannel(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    channel,
+	})
+	return
+}
+
+func ResetChannel(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	middleware.CooldownGlobal.Reset(id)
+	channel, err := model.GetChannelById(id, false)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	if channel.Status == model.ChannelStatusAutoDisabled {
+		model.UpdateChannelStatusById(id, model.ChannelStatusEnabled)
+		channel.Status = model.ChannelStatusEnabled
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

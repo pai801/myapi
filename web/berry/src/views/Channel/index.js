@@ -110,11 +110,16 @@ export default function ChannelPage() {
       case 'test':
         res = await API.get(url + `test/${id}`);
         break;
+      case 'reset':
+        res = await API.get(url + `reset/${id}`);
+        break;
     }
     const { success, message } = res.data;
     if (success) {
       showSuccess('操作成功完成！');
       if (action === 'delete') {
+        await handleRefresh();
+      } else if (action === 'reset') {
         await handleRefresh();
       }
     } else {

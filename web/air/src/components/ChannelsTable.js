@@ -239,6 +239,16 @@ const ChannelsTable = () => {
           )}
           <Button
             theme='light'
+            type='secondary'
+            style={{ marginRight: 1 }}
+            onClick={async () => {
+              manageChannel(record.id, 'reset', record);
+            }}
+          >
+            重置
+          </Button>
+          <Button
+            theme='light'
             type='tertiary'
             style={{ marginRight: 1 }}
             onClick={() => {
@@ -382,17 +392,20 @@ const ChannelsTable = () => {
         }
         res = await API.put('/api/channel/', data);
         break;
+      case 'reset':
+        res = await API.get(`/api/channel/reset/${id}`);
+        break;
     }
     const { success, message } = res.data;
     if (success) {
       showSuccess('操作成功完成！');
-      let channel = res.data.data;
       let newChannels = [...channels];
       if (action === 'delete') {
       } else {
+        let channel = res.data.data;
         record.status = channel.status;
+        setChannels(newChannels);
       }
-      setChannels(newChannels);
     } else {
       showError(message);
     }
