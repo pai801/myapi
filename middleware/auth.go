@@ -181,6 +181,9 @@ func TokenAuth() func(c *gin.Context) {
 		}
 		c.Set(ctxkey.Id, token.UserId)
 		c.Set(ctxkey.TokenId, token.Id)
+		if token.ModelMapping != nil && *token.ModelMapping != "" && *token.ModelMapping != "{}" {
+			c.Set(ctxkey.TokenModelMapping, *token.ModelMapping)
+		}
 		c.Set(ctxkey.TokenName, token.Name)
 		if len(parts) > 1 {
 			if model.IsAdmin(token.UserId) {

@@ -197,6 +197,8 @@
       "models_placeholder": "请选择允许使用的模型，留空则不进行限制",
       "ip_limit": "IP 限制",
       "ip_limit_placeholder": "请输入允许访问的网段，例如：192.168.0.0/24，请使用英文逗号分隔多个网段",
+      "model_mapping": "模型映射",
+      "model_mapping_placeholder": "模型名称映射，如 {\"gpt-4\": \"gpt-4-turbo\"}（JSON 格式）",
       "expire_time": "过期时间",
       "expire_time_placeholder": "请输入过期时间，格式为 yyyy-MM-dd HH:mm:ss，-1 表示无限制",
       "quota_notice": "注意，令牌的额度仅用于限制令牌本身的最大额度使用量，实际的使用受到账户的剩余额度限制。",

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common/config"
@@ -117,6 +118,12 @@ func validateToken(c *gin.Context, token model.Token) error {
 			return fmt.Errorf("无效的网段：%s", err.Error())
 		}
 	}
+	if token.ModelMapping != nil && *token.ModelMapping != "" && *token.ModelMapping != "{}" {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(*token.ModelMapping), &m); err != nil {
+			return fmt.Errorf("模型映射必须是合法的 JSON 格式：%s", err.Error())
+		}
+	}
 	return nil
 }
 
@@ -150,6 +157,7 @@ func AddToken(c *gin.Context) {
 		UnlimitedQuota: token.UnlimitedQuota,
 		Models:         model.SimplifyModelsField(token.Models),
 		Subnet:         token.Subnet,
+		ModelMapping:   token.ModelMapping,
 	}
 	err = cleanToken.Insert()
 	if err != nil {
@@ -239,6 +247,7 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.UnlimitedQuota = token.UnlimitedQuota
 		cleanToken.Models = model.SimplifyModelsField(token.Models)
 		cleanToken.Subnet = token.Subnet
+		cleanToken.ModelMapping = token.ModelMapping
 	}
 	err = cleanToken.Update()
 	if err != nil {

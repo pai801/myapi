@@ -28,3 +28,5 @@ docs/superpowers/
 docs/diagnosis/
 request*.txt
 response*.txt
+.mimocode/
+.github

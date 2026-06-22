@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,6 +36,7 @@ type Token struct {
 	UsedQuota      int64   `json:"used_quota" gorm:"bigint;default:0"` // used quota
 	Models         *string `json:"models" gorm:"type:text"`            // allowed models
 	Subnet         *string `json:"subnet" gorm:"default:''"`           // allowed subnet
+	ModelMapping   *string `json:"model_mapping" gorm:"type:varchar(1024);default:''"`
 }
 
 func GetAllUserTokens(userId int, startIdx int, num int, order string) ([]*Token, error) {
@@ -133,7 +135,7 @@ func (t *Token) Insert() error {
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (t *Token) Update() error {
 	var err error
-	err = DB.Model(t).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota", "models", "subnet").Updates(t).Error
+	err = DB.Model(t).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota", "models", "subnet", "model_mapping").Updates(t).Error
 	return err
 }
 
@@ -172,6 +174,19 @@ func (t *Token) GetModels() string {
 		return ""
 	}
 	return *t.Models
+}
+
+func (t *Token) GetModelMapping() map[string]string {
+	if t == nil || t.ModelMapping == nil || *t.ModelMapping == "" || *t.ModelMapping == "{}" {
+		return nil
+	}
+	modelMapping := make(map[string]string)
+	err := json.Unmarshal([]byte(*t.ModelMapping), &modelMapping)
+	if err != nil {
+		logger.Log.Errorf("failed to unmarshal model mapping for token %d, error: %s", t.Id, err.Error())
+		return nil
+	}
+	return modelMapping
 }
 
 func DeleteTokenById(id int, userId int) (err error) {

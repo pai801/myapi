@@ -32,6 +32,7 @@ const EditToken = () => {
     unlimited_quota: false,
     models: [],
     subnet: '',
+    model_mapping: '',
   };
   const [inputs, setInputs] = useState(originInputs);
   const { name, remain_quota, expired_time, unlimited_quota } = inputs;
@@ -73,6 +74,19 @@ const EditToken = () => {
           data.models = [];
         } else {
           data.models = data.models.split(',');
+        }
+        if (data.model_mapping && data.model_mapping !== '' && data.model_mapping !== '{}') {
+          try {
+            data.model_mapping = JSON.stringify(
+              JSON.parse(data.model_mapping),
+              null,
+              2
+            );
+          } catch (e) {
+            console.warn('token model_mapping is not valid JSON:', e.message);
+          }
+        } else {
+          data.model_mapping = '';
         }
         setInputs(data);
       } else {
@@ -197,6 +211,17 @@ const EditToken = () => {
                 onChange={handleInputChange}
                 value={inputs.subnet}
                 autoComplete='new-password'
+              />
+            </Form.Field>
+            <Form.Field>
+              <Form.TextArea
+                label={t('token.edit.model_mapping')}
+                placeholder={t('token.edit.model_mapping_placeholder')}
+                name='model_mapping'
+                onChange={handleInputChange}
+                value={inputs.model_mapping}
+                autoComplete='new-password'
+                rows={5}
               />
             </Form.Field>
             <Form.Field>

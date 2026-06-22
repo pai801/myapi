@@ -23,4 +23,5 @@ const (
 	SystemPrompt      = "system_prompt"
 	SuggestedModel    = "suggested_model"
 	ResponseBody      = "response_body"
+	TokenModelMapping = "token_model_mapping"
 )
