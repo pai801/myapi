@@ -287,3 +287,128 @@ func TestStreamResponsesHandler_MixedToolsSurviveBadItem(t *testing.T) {
 		t.Fatalf("expected third item tool_search_call, got %#v", output[2])
 	}
 }
+
+func TestStreamResponsesHandler_DetectsResponseFailedEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// rate_limit_exceeded -> 429 应该触发重试
+	stream := strings.Join([]string{
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_fail_1","model":"gpt-4o","status":"failed","output":[],"error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded for user, please retry later"}}}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from response.failed event, got nil")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage from failed response, got %#v", usage)
+	}
+	if err.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429 for rate_limit error, got %d", err.StatusCode)
+	}
+	if err.Message != "Concurrency limit exceeded for user, please retry later" {
+		t.Fatalf("expected error message preserved, got %q", err.Message)
+	}
+	if err.Code != "rate_limit_exceeded" {
+		t.Fatalf("expected error code rate_limit_exceeded, got %v", err.Code)
+	}
+	// 确认没有任何数据被写入 response body（因为 header 还没发就返回了）
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("expected empty response body for failed first frame, got %d bytes", recorder.Body.Len())
+	}
+}
+
+func TestStreamResponsesHandler_ResponseFailedServerErrorMapsTo5xx(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stream := strings.Join([]string{
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_fail_2","model":"gpt-4o","status":"failed","output":[],"error":{"code":"server_error","message":"internal server error"}}}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, _ := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from response.failed event, got nil")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for server_error, got %d", err.StatusCode)
+	}
+}
+
+func TestStreamResponsesHandler_ResponseFailedInvalidRequestMapsTo4xx(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stream := strings.Join([]string{
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_fail_3","model":"gpt-4o","status":"failed","output":[],"error":{"code":"invalid_request_error","message":"invalid parameter"}}}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, _ := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from response.failed event, got nil")
+	}
+	if err.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for invalid_request, got %d", err.StatusCode)
+	}
+}
+
+func TestMapFailedErrorToStatusCode(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		errType  string
+		message  string
+		expected int
+	}{
+		{"rate_limit_exceeded code", "rate_limit_exceeded", "", "", http.StatusTooManyRequests},
+		{"rate limit in message", "", "", "Rate limit exceeded", http.StatusTooManyRequests},
+		{"concurrency limit", "", "", "Concurrency limit exceeded", http.StatusTooManyRequests},
+		{"too many requests", "", "", "too many requests", http.StatusTooManyRequests},
+		{"server_error code", "server_error", "", "", http.StatusBadGateway},
+		{"server_error type", "", "server_error", "", http.StatusBadGateway},
+		{"internal server error msg", "", "", "internal server error", http.StatusBadGateway},
+		{"request timeout msg", "", "", "request timeout", http.StatusBadGateway},
+		{"timed out msg", "", "", "timed out", http.StatusBadGateway},
+		{"deadline exceeded msg", "", "", "deadline exceeded", http.StatusBadGateway},
+		{"connection timeout msg", "", "", "connection timeout", http.StatusBadGateway},
+		{"unavailable type", "", "unavailable", "", http.StatusBadGateway},
+		{"service unavailable msg", "", "", "service unavailable", http.StatusBadGateway},
+		{"bad gateway msg", "", "", "bad gateway", http.StatusBadGateway},
+		{"internal_error type", "", "internal_error", "", http.StatusBadGateway},
+		// "timeout" 单独出现不是服务端错误，不应误匹配 502
+		{"bare timeout word no match", "", "", "timeout parameter is invalid", http.StatusBadRequest},
+		{"invalid_request", "invalid_request_error", "", "", http.StatusBadRequest},
+		{"unknown error", "unknown_code", "unknown_type", "some message", http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := mapFailedErrorToStatusCode(tt.code, tt.errType, tt.message)
+			if result != tt.expected {
+				t.Fatalf("expected %d, got %d", tt.expected, result)
+			}
+		})
+	}
+}

@@ -122,135 +122,94 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 		}
 	}
 
+	// 预读首帧：检测 response.failed 事件，若失败则直接返回错误让网关触发重试
+	var prereadLines []string
+	firstEventIsFailed := false
+	var failedStatusCode int
+	var failedErr *model.Error
+	{
+		eventName := ""
+		dataPayload := ""
+		eventComplete := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			prereadLines = append(prereadLines, line)
+			if line == "" {
+				if eventName != "" || dataPayload != "" {
+					eventComplete = true
+					break
+				}
+				continue
+			}
+			if strings.HasPrefix(line, eventPrefix) {
+				eventName = strings.TrimSpace(line[eventPrefixLength:])
+				continue
+			}
+			if strings.HasPrefix(line, dataPrefix) {
+				dataPayload = line[dataPrefixLength:]
+				continue
+			}
+		}
+		// 如果读到了 event 和 data，但还没遇到空行就到流末尾了，也认为事件完成
+		if !eventComplete && (eventName != "" || dataPayload != "") {
+			eventComplete = true
+		}
+		if eventComplete && eventName == "response.failed" && dataPayload != "" {
+			var streamResp model.ResponsesStreamEvent
+			if err := json.Unmarshal([]byte(dataPayload), &streamResp); err != nil {
+				logger.Log.Debugf("preread: failed to parse response.failed event: %v", err)
+			} else if streamResp.Response == nil || streamResp.Response.Status != "failed" {
+				logger.Log.Debugf("preread: response.failed event with unexpected structure")
+			} else {
+				firstEventIsFailed = true
+				resp := streamResp.Response
+				errMsg := "upstream response failed"
+				errType := "upstream_error"
+				errCode := "response_failed"
+				if resp.Error != nil {
+					if resp.Error.Message != "" {
+						errMsg = resp.Error.Message
+					}
+					if resp.Error.Type != "" {
+						errType = resp.Error.Type
+					}
+					if resp.Error.Code != "" {
+						errCode = resp.Error.Code
+					}
+				}
+				failedErr = &model.Error{
+					Message: errMsg,
+					Type:    errType,
+					Code:    errCode,
+				}
+				// 根据错误类型映射 HTTP 状态码，便于网关判断是否重试
+				failedStatusCode = mapFailedErrorToStatusCode(errCode, errType, errMsg)
+			}
+		}
+	}
+	if firstEventIsFailed && failedErr != nil {
+		if err := resp.Body.Close(); err != nil {
+			logger.Log.Warnf("failed to close response body on error path: %v", err)
+		}
+		return &model.ErrorWithStatusCode{
+			Error:      *failedErr,
+			StatusCode: failedStatusCode,
+		}, "", nil
+	}
+
+	// 首帧不是失败事件，开始正常流式转发
 	common.SetEventStreamHeaders(c)
 
 	doneRendered := false
 
+	// 先把预读的行回放出去，并走一遍状态机
+	for _, line := range prereadLines {
+		processStreamLine(line, &pendingEvent, &currentFrame, &deltaFrame, &deltaText, &capture, &usage, &outputItems, &outputItemByID, &skippedItemIDs, flushFrame, flushDeltaFrame, c, &doneRendered, &responseText)
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" {
-			flushFrame()
-			continue
-		}
-		if strings.HasPrefix(line, eventPrefix) {
-			flushFrame()
-			pendingEvent = strings.TrimSpace(line[eventPrefixLength:])
-			continue
-		}
-		if len(line) < dataPrefixLength || line[:dataPrefixLength] != dataPrefix {
-			continue
-		}
-
-		payload := line[dataPrefixLength:]
-		if strings.HasPrefix(payload, done) {
-			flushDeltaFrame()
-			if currentFrame == nil {
-				currentFrame = &model.ResponsesStreamFrame{Event: pendingEvent}
-			}
-			if currentFrame.Event == "" {
-				currentFrame.Event = pendingEvent
-			}
-			currentFrame.Data = json.RawMessage(`"[DONE]"`)
-			currentFrame.Done = true
-			pendingEvent = ""
-			render.StringData(c, line)
-			doneRendered = true
-			continue
-		}
-
-		var streamResponse model.ResponsesStreamEvent
-		err := json.Unmarshal([]byte(payload), &streamResponse)
-		if err != nil {
-			logger.Log.Errorf("error unmarshalling stream response: " + err.Error())
-			render.StringData(c, line)
-			continue
-		}
-		render.StringData(c, line)
-
-		if streamResponse.Type == "response.output_text.delta" {
-			if streamResponse.Delta != nil {
-				if s, ok := streamResponse.Delta.(string); ok {
-					deltaText.WriteString(s)
-				}
-			}
-			if deltaFrame == nil {
-				deltaFrame = &model.ResponsesStreamFrame{Event: streamResponse.Type}
-			}
-			pendingEvent = ""
-			continue
-		}
-		if strings.HasSuffix(streamResponse.Type, ".delta") {
-			pendingEvent = ""
-			continue
-		}
-
-		flushDeltaFrame()
-
-		if currentFrame == nil {
-			currentFrame = &model.ResponsesStreamFrame{Event: pendingEvent}
-		}
-		if currentFrame.Event == "" {
-			currentFrame.Event = pendingEvent
-		}
-		currentFrame.Data = json.RawMessage(payload)
-		pendingEvent = ""
-
-		if streamResponse.Type == "response.output_item.added" || streamResponse.Type == "response.output_item.done" {
-			if streamResponse.Item == nil {
-				continue
-			}
-			itemID := streamResponse.Item.ID
-			if itemID == "" {
-				itemID = streamResponse.Item.CallID
-			}
-			if itemID == "" {
-				logger.Log.Errorf("skip output item without id")
-				continue
-			}
-			if !shouldKeepResponsesOutputItem(streamResponse.Item.Type) {
-				skippedItemIDs[itemID] = struct{}{}
-				continue
-			}
-			if _, skipped := skippedItemIDs[itemID]; skipped {
-				continue
-			}
-			if streamResponse.Type == "response.output_item.added" {
-				outputItemByID[itemID] = len(outputItems)
-				outputItems = append(outputItems, *streamResponse.Item)
-			} else if idx, ok := outputItemByID[itemID]; ok && idx < len(outputItems) {
-				outputItems[idx] = *streamResponse.Item
-			} else {
-				outputItems = append(outputItems, *streamResponse.Item)
-			}
-		}
-
-		if streamResponse.Usage != nil {
-			capture.Usage = streamResponse.Usage
-			usage = &model.Usage{
-				PromptTokens:     streamResponse.Usage.InputTokens,
-				CompletionTokens: streamResponse.Usage.OutputTokens,
-				TotalTokens:      streamResponse.Usage.TotalTokens,
-			}
-		}
-
-		if streamResponse.Response != nil && streamResponse.Response.Usage.TotalTokens > 0 {
-			capture.Usage = &streamResponse.Response.Usage
-			usage = &model.Usage{
-				PromptTokens:     streamResponse.Response.Usage.InputTokens,
-				CompletionTokens: streamResponse.Response.Usage.OutputTokens,
-				TotalTokens:      streamResponse.Response.Usage.TotalTokens,
-			}
-		}
-
-		if streamResponse.Type == "response.completed" && streamResponse.Response != nil {
-			resp := streamResponse.Response
-			if len(resp.Output) == 0 && len(outputItems) > 0 {
-				resp.Output = outputItems
-			}
-			capture.Response = resp
-		}
-
-		// frame is flushed when the blank line arrives
+		processStreamLine(line, &pendingEvent, &currentFrame, &deltaFrame, &deltaText, &capture, &usage, &outputItems, &outputItemByID, &skippedItemIDs, flushFrame, flushDeltaFrame, c, &doneRendered, &responseText)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -284,6 +243,182 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 	}
 
 	return nil, responseText, usage
+}
+
+// mapFailedErrorToStatusCode 根据错误码/类型映射到 HTTP 状态码，便于网关重试逻辑判断
+func mapFailedErrorToStatusCode(code, errType, message string) int {
+	codeLower := strings.ToLower(code)
+	typeLower := strings.ToLower(errType)
+	msgLower := strings.ToLower(message)
+
+	// 429 - 限流相关，触发重试
+	if strings.Contains(codeLower, "rate_limit") ||
+		strings.Contains(codeLower, "rate-limit") ||
+		strings.Contains(msgLower, "rate limit") ||
+		strings.Contains(msgLower, "concurrency limit") ||
+		strings.Contains(msgLower, "too many requests") {
+		return http.StatusTooManyRequests
+	}
+
+	// 5xx - 服务端错误，触发重试
+	if strings.Contains(codeLower, "server_error") ||
+		strings.Contains(typeLower, "server_error") ||
+		strings.Contains(typeLower, "unavailable") ||
+		strings.Contains(typeLower, "internal_error") ||
+		strings.Contains(msgLower, "internal server error") ||
+		strings.Contains(msgLower, "service unavailable") ||
+		strings.Contains(msgLower, "bad gateway") ||
+		strings.Contains(msgLower, "request timeout") ||
+		strings.Contains(msgLower, "timed out") ||
+		strings.Contains(msgLower, "deadline exceeded") ||
+		strings.Contains(msgLower, "connection timeout") {
+		return http.StatusBadGateway
+	}
+
+	// 4xx - 客户端错误，默认不重试
+	return http.StatusBadRequest
+}
+
+// processStreamLine 处理单行 SSE 数据，抽取为函数以支持预读回放和正常循环复用
+func processStreamLine(
+	line string,
+	pendingEvent *string,
+	currentFrame **model.ResponsesStreamFrame,
+	deltaFrame **model.ResponsesStreamFrame,
+	deltaText *strings.Builder,
+	capture *model.ResponsesStreamCapture,
+	usage **model.Usage,
+	outputItems *[]model.ResponsesItem,
+	outputItemByID *map[string]int,
+	skippedItemIDs *map[string]struct{},
+	flushFrame func(),
+	flushDeltaFrame func(),
+	c *gin.Context,
+	doneRendered *bool,
+	responseText *string,
+) {
+	if line == "" {
+		flushFrame()
+		return
+	}
+	if strings.HasPrefix(line, eventPrefix) {
+		flushFrame()
+		*pendingEvent = strings.TrimSpace(line[eventPrefixLength:])
+		return
+	}
+	if len(line) < dataPrefixLength || line[:dataPrefixLength] != dataPrefix {
+		return
+	}
+
+	payload := line[dataPrefixLength:]
+	if strings.HasPrefix(payload, done) {
+		flushDeltaFrame()
+		if *currentFrame == nil {
+			*currentFrame = &model.ResponsesStreamFrame{Event: *pendingEvent}
+		}
+		if (*currentFrame).Event == "" {
+			(*currentFrame).Event = *pendingEvent
+		}
+		(*currentFrame).Data = json.RawMessage(`"[DONE]"`)
+		(*currentFrame).Done = true
+		*pendingEvent = ""
+		render.StringData(c, line)
+		*doneRendered = true
+		return
+	}
+
+	var streamResponse model.ResponsesStreamEvent
+	err := json.Unmarshal([]byte(payload), &streamResponse)
+	if err != nil {
+		logger.Log.Errorf("error unmarshalling stream response: " + err.Error())
+		render.StringData(c, line)
+		return
+	}
+	render.StringData(c, line)
+
+	if streamResponse.Type == "response.output_text.delta" {
+		if streamResponse.Delta != nil {
+			if s, ok := streamResponse.Delta.(string); ok {
+				deltaText.WriteString(s)
+				*responseText += s
+			}
+		}
+		if *deltaFrame == nil {
+			*deltaFrame = &model.ResponsesStreamFrame{Event: streamResponse.Type}
+		}
+		*pendingEvent = ""
+		return
+	}
+	if strings.HasSuffix(streamResponse.Type, ".delta") {
+		*pendingEvent = ""
+		return
+	}
+
+	flushDeltaFrame()
+
+	if *currentFrame == nil {
+		*currentFrame = &model.ResponsesStreamFrame{Event: *pendingEvent}
+	}
+	if (*currentFrame).Event == "" {
+		(*currentFrame).Event = *pendingEvent
+	}
+	(*currentFrame).Data = json.RawMessage(payload)
+	*pendingEvent = ""
+
+	if streamResponse.Type == "response.output_item.added" || streamResponse.Type == "response.output_item.done" {
+		if streamResponse.Item == nil {
+			return
+		}
+		itemID := streamResponse.Item.ID
+		if itemID == "" {
+			itemID = streamResponse.Item.CallID
+		}
+		if itemID == "" {
+			logger.Log.Errorf("skip output item without id")
+			return
+		}
+		if !shouldKeepResponsesOutputItem(streamResponse.Item.Type) {
+			(*skippedItemIDs)[itemID] = struct{}{}
+			return
+		}
+		if _, skipped := (*skippedItemIDs)[itemID]; skipped {
+			return
+		}
+		if streamResponse.Type == "response.output_item.added" {
+			(*outputItemByID)[itemID] = len(*outputItems)
+			*outputItems = append(*outputItems, *streamResponse.Item)
+		} else if idx, ok := (*outputItemByID)[itemID]; ok && idx < len(*outputItems) {
+			(*outputItems)[idx] = *streamResponse.Item
+		} else {
+			*outputItems = append(*outputItems, *streamResponse.Item)
+		}
+	}
+
+	if streamResponse.Usage != nil {
+		capture.Usage = streamResponse.Usage
+		*usage = &model.Usage{
+			PromptTokens:     streamResponse.Usage.InputTokens,
+			CompletionTokens: streamResponse.Usage.OutputTokens,
+			TotalTokens:      streamResponse.Usage.TotalTokens,
+		}
+	}
+
+	if streamResponse.Response != nil && streamResponse.Response.Usage.TotalTokens > 0 {
+		capture.Usage = &streamResponse.Response.Usage
+		*usage = &model.Usage{
+			PromptTokens:     streamResponse.Response.Usage.InputTokens,
+			CompletionTokens: streamResponse.Response.Usage.OutputTokens,
+			TotalTokens:      streamResponse.Response.Usage.TotalTokens,
+		}
+	}
+
+	if streamResponse.Type == "response.completed" && streamResponse.Response != nil {
+		resp := streamResponse.Response
+		if len(resp.Output) == 0 && len(*outputItems) > 0 {
+			resp.Output = *outputItems
+		}
+		capture.Response = resp
+	}
 }
 
 func shouldKeepResponsesOutputItem(itemType string) bool {

@@ -81,11 +81,14 @@ func RelayErrorHandler(resp *http.Response) (ErrorWithStatusCode *model.ErrorWit
 	}
 	err = resp.Body.Close()
 	if err != nil {
-		return
+		logger.Log.Warnf("failed to close response body: %v", err)
 	}
 	var errResponse GeneralErrorResponse
 	err = json.Unmarshal(responseBody, &errResponse)
 	if err != nil {
+		if config.DebugEnabled {
+			logger.Log.Debugf("failed to parse error response body: %v, body: %s", err, string(responseBody))
+		}
 		return
 	}
 	if errResponse.Error.Message != "" {

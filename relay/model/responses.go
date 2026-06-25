@@ -81,6 +81,14 @@ type ResponsesResponse struct {
 	PreviousID string          `json:"previous_id,omitempty"`
 	Usage      ResponsesUsage  `json:"usage"`
 	Created    int64           `json:"created,omitempty"`
+	Error      *ResponseError  `json:"error,omitempty"`
+}
+
+// ResponseError represents an error in a failed Responses API response
+type ResponseError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Type    string `json:"type,omitempty"`
 }
 
 // ResponsesStreamFrame preserves one SSE frame as emitted by the upstream stream.

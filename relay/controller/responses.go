@@ -290,7 +290,9 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 			}
 		}
 
-		_ = resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			logger.Log.Warnf("failed to close response body: %v", err)
+		}
 	} else {
 		// 非流式响应处理
 		respBody, err := io.ReadAll(resp.Body)
@@ -299,7 +301,9 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, ctxMeta.TokenId)
 			return openai.ErrorWrapper(err, "read response body failed", http.StatusInternalServerError)
 		}
-		_ = resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			logger.Log.Warnf("failed to close response body: %v", err)
+		}
 
 		if config.LogConsumeEnabled {
 			ctx = context.WithValue(ctx, CtxKeyResponseBody, string(respBody))
