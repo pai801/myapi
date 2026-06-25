@@ -146,6 +146,14 @@ type ResponsesStreamEvent struct {
 	Response   *ResponsesResponse `json:"response,omitempty"`
 }
 
+// ResponseStreamErrorEvent represents a streaming error event
+type ResponseStreamErrorEvent struct {
+	Type           string `json:"type"`
+	Code           string `json:"code"`
+	Message        string `json:"message"`
+	SequenceNumber int    `json:"sequence_number,omitempty"`
+}
+
 // ResponsesDelta is the streaming delta data
 type ResponsesDelta struct {
 	Type    string      `json:"type,omitempty"`

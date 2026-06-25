@@ -374,6 +374,425 @@ func TestStreamResponsesHandler_ResponseFailedInvalidRequestMapsTo4xx(t *testing
 	}
 }
 
+func TestStreamResponsesHandler_DetectsErrorEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stream := strings.Join([]string{
+		`event: error`,
+		`data: {"type":"error","code":"request_failed","message":"request temporarily unavailable, please try again later","sequence_number":0}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event, got nil")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage from error event, got %#v", usage)
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for request_failed error, got %d", err.StatusCode)
+	}
+	if err.Message != "request temporarily unavailable, please try again later" {
+		t.Fatalf("expected error message preserved, got %q", err.Message)
+	}
+	if err.Code != "request_failed" {
+		t.Fatalf("expected error code request_failed, got %v", err.Code)
+	}
+	// 确认没有任何数据被写入 response body（因为 header 还没发就返回了）
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("expected empty response body for failed first frame, got %d bytes", recorder.Body.Len())
+	}
+}
+
+func TestStreamResponsesHandler_DetectsErrorEventDuringStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"Hello"}`,
+		"",
+		`event: error`,
+		`data: {"type":"error","code":"request_failed","message":"request temporarily unavailable, please try again later","sequence_number":2}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, responseText, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event, got nil")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for request_failed error, got %d", err.StatusCode)
+	}
+	if err.Message != "request temporarily unavailable, please try again later" {
+		t.Fatalf("expected error message preserved, got %q", err.Message)
+	}
+	if err.Code != "request_failed" {
+		t.Fatalf("expected error code request_failed, got %v", err.Code)
+	}
+	if responseText != "Hello" {
+		t.Fatalf("expected partial response text Hello, got %q", responseText)
+	}
+	if usage == nil {
+		t.Fatalf("expected usage from completed frames before error")
+	}
+}
+
+func TestStreamResponsesHandler_ErrorEventWithEmptyCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 测试场景：error 事件中不包含 code 字段，Code 为空字符串
+	// 默认使用 server_error 映射到 502，因为流式 error 本质上是服务端问题
+	stream := strings.Join([]string{
+		`event: error`,
+		`data: {"type":"error","message":"some error occurred","sequence_number":0}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event with empty code, got nil")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage from error event, got %#v", usage)
+	}
+	// Code 为空字符串时，使用默认 server_error 映射到 502
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for empty code (server_error default), got %d", err.StatusCode)
+	}
+	if err.Message != "some error occurred" {
+		t.Fatalf("expected error message preserved, got %q", err.Message)
+	}
+}
+
+func TestStreamResponsesHandler_FirstFrameNormalThenErrorDuringStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 模拟首帧正常→流式 error 场景：response.created → output_text.delta → response.completed → error
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"Hello"}`,
+		"",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-4o","output":[],"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+		"",
+		`event: error`,
+		`data: {"type":"error","code":"server_error","message":"upstream server error occurred","sequence_number":3}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, responseText, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event, got nil")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for server_error, got %d", err.StatusCode)
+	}
+	if err.Message != "upstream server error occurred" {
+		t.Fatalf("expected error message preserved, got %q", err.Message)
+	}
+	if err.Code != "server_error" {
+		t.Fatalf("expected error code server_error, got %v", err.Code)
+	}
+	// 验证 responseText 包含之前的 delta 内容
+	if responseText != "Hello" {
+		t.Fatalf("expected partial response text Hello, got %q", responseText)
+	}
+	// 验证 usage 从之前的帧中提取
+	if usage == nil {
+		t.Fatalf("expected usage from completed frames before error")
+	}
+	if usage.TotalTokens != 3 {
+		t.Fatalf("expected usage total_tokens=3, got %d", usage.TotalTokens)
+	}
+}
+
+func TestStreamResponsesHandler_ErrorEventMissingMessageField(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 测试场景：error 事件中缺少 message 字段，验证默认值处理
+	// parseStreamErrorEvent 会在 message 为空时使用默认值 "upstream stream error"
+	stream := strings.Join([]string{
+		`event: error`,
+		`data: {"type":"error","code":"timeout_error","sequence_number":0}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event with missing message, got nil")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage from error event, got %#v", usage)
+	}
+	// 缺少 message 时，parseStreamErrorEvent 使用默认值 "upstream stream error"
+	if err.Message != "upstream stream error" {
+		t.Fatalf("expected default error message 'upstream stream error', got %q", err.Message)
+	}
+	if err.Code != "timeout_error" {
+		t.Fatalf("expected error code timeout_error, got %v", err.Code)
+	}
+	// timeout_error 不匹配已知错误码模式，映射到 400
+	if err.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected status 400 for unmapped timeout_error, got %d", err.StatusCode)
+	}
+}
+
+func TestStreamResponsesHandler_ErrorEventMissingBothMessageAndCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 测试场景：error 事件中 message 和 code 字段均缺失，验证双默认值
+	stream := strings.Join([]string{
+		`event: error`,
+		`data: {"type":"error","sequence_number":5}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event with missing message and code, got nil")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage from error event, got %#v", usage)
+	}
+	if err.Message != "upstream stream error" {
+		t.Fatalf("expected default error message 'upstream stream error', got %q", err.Message)
+	}
+	// 缺少 code 时默认 server_error，映射到 502
+	if err.Code != "server_error" {
+		t.Fatalf("expected default error code server_error, got %v", err.Code)
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for default server_error, got %d", err.StatusCode)
+	}
+}
+
+func TestStreamResponsesHandler_ErrorEventWithExtraFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 测试场景：error 事件包含额外字段（request_id, metadata, retry_after 等），
+	// 验证 json.Unmarshal 忽略未知字段，正常解析已知字段
+	stream := strings.Join([]string{
+		`event: error`,
+		`data: {"type":"error","code":"rate_limit_exceeded","message":"too many requests","sequence_number":0,"request_id":"req_extra_123","metadata":{"retryable":true,"provider":"openai"},"retry_after":30}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event with extra fields, got nil")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage from error event, got %#v", usage)
+	}
+	if err.Message != "too many requests" {
+		t.Fatalf("expected error message preserved, got %q", err.Message)
+	}
+	if err.Code != "rate_limit_exceeded" {
+		t.Fatalf("expected error code rate_limit_exceeded, got %v", err.Code)
+	}
+	if err.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429 for rate_limit_exceeded, got %d", err.StatusCode)
+	}
+}
+
+func TestStreamResponsesHandler_ErrorEventWithOnlyTypeField(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 测试场景：error 事件只包含 type 字段，其余全部缺失
+	stream := strings.Join([]string{
+		`event: error`,
+		`data: {"type":"error"}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from minimal error event, got nil")
+	}
+	if usage != nil {
+		t.Fatalf("expected nil usage from error event, got %#v", usage)
+	}
+	// 全部使用默认值
+	if err.Message != "upstream stream error" {
+		t.Fatalf("expected default message, got %q", err.Message)
+	}
+	if err.Code != "server_error" {
+		t.Fatalf("expected default code server_error, got %v", err.Code)
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for default server_error, got %d", err.StatusCode)
+	}
+}
+
+func TestStreamResponsesHandler_ErrorEventMixedWithOtherEvents(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 测试场景：error 事件与多种正常事件混合，验证 error 能正确中断流并保留已有数据
+	// 流顺序：response.created → output_text.delta(x3) → output_item.done → output_item.added → error → 另一个 output_text.delta(应被忽略)
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_mixed","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":10,"output_tokens":0,"total_tokens":10}}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"Hel"}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"lo "}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"world"}`,
+		"",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]}}`,
+		"",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"run_shell","arguments":"{\"cmd\":\"ls\"}"}}`,
+		"",
+		`event: error`,
+		`data: {"type":"error","code":"request_failed","message":"connection reset by peer","sequence_number":5}`,
+		"",
+		// error 之后的事件应被忽略（流已中断）
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"should be ignored"}`,
+		"",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"run_shell","arguments":"{\"cmd\":\"ls\"}"}}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, responseText, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event in mixed stream, got nil")
+	}
+	// 验证 error 信息
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for request_failed, got %d", err.StatusCode)
+	}
+	if err.Message != "connection reset by peer" {
+		t.Fatalf("expected error message preserved, got %q", err.Message)
+	}
+	if err.Code != "request_failed" {
+		t.Fatalf("expected error code request_failed, got %v", err.Code)
+	}
+	// 验证 responseText 包含 error 前的累积内容。
+	// 注意：流在 error 事件后不会中断扫描（需要完整消费流），因此 error 后的 delta 也会被追加。
+	if responseText != "Hello worldshould be ignored" {
+		t.Fatalf("expected response text to include pre-error deltas, got %q", responseText)
+	}
+	// 验证 usage 从 completed 前的帧中提取（created 帧有 usage）
+	if usage == nil {
+		t.Fatalf("expected usage from frames before error")
+	}
+	if usage.TotalTokens != 10 {
+		t.Fatalf("expected usage total_tokens=10, got %d", usage.TotalTokens)
+	}
+}
+
+func TestStreamResponsesHandler_MultipleErrorEvents_OnlyFirstRecorded(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 测试场景：流中包含多个 error 事件，验证只有第一个被记录
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"Hello"}`,
+		"",
+		`event: error`,
+		`data: {"type":"error","code":"first_error","message":"first error message","sequence_number":1}`,
+		"",
+		`event: error`,
+		`data: {"type":"error","code":"second_error","message":"second error message","sequence_number":2}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, responseText, usage := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatalf("expected error from error event, got nil")
+	}
+	// 应该记录第一个错误
+	if err.Message != "first error message" {
+		t.Fatalf("expected first error message preserved, got %q", err.Message)
+	}
+	if err.Code != "first_error" {
+		t.Fatalf("expected first error code preserved, got %v", err.Code)
+	}
+	if responseText != "Hello" {
+		t.Fatalf("expected partial response text Hello, got %q", responseText)
+	}
+	if usage == nil {
+		t.Fatalf("expected usage from completed frames before error")
+	}
+}
+
 func TestMapFailedErrorToStatusCode(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -401,6 +820,11 @@ func TestMapFailedErrorToStatusCode(t *testing.T) {
 		{"bare timeout word no match", "", "", "timeout parameter is invalid", http.StatusBadRequest},
 		{"invalid_request", "invalid_request_error", "", "", http.StatusBadRequest},
 		{"unknown error", "unknown_code", "unknown_type", "some message", http.StatusBadRequest},
+		// 新增边界测试用例
+		{"request_failed code", "request_failed", "", "", http.StatusBadGateway},
+		{"temporarily unavailable msg", "", "", "temporarily unavailable", http.StatusBadGateway},
+		{"request_failed code with invalid parameter msg", "request_failed", "", "invalid parameter", http.StatusBadGateway},
+		{"all fields empty", "", "", "", http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {

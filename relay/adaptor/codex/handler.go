@@ -122,7 +122,7 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 		}
 	}
 
-	// 预读首帧：检测 response.failed 事件，若失败则直接返回错误让网关触发重试
+	// 预读首帧：检测 response.failed 或 error 事件，若失败则直接返回错误让网关触发重试
 	var prereadLines []string
 	firstEventIsFailed := false
 	var failedStatusCode int
@@ -154,36 +154,49 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 		if !eventComplete && (eventName != "" || dataPayload != "") {
 			eventComplete = true
 		}
-		if eventComplete && eventName == "response.failed" && dataPayload != "" {
-			var streamResp model.ResponsesStreamEvent
-			if err := json.Unmarshal([]byte(dataPayload), &streamResp); err != nil {
-				logger.Log.Debugf("preread: failed to parse response.failed event: %v", err)
-			} else if streamResp.Response == nil || streamResp.Response.Status != "failed" {
-				logger.Log.Debugf("preread: response.failed event with unexpected structure")
-			} else {
-				firstEventIsFailed = true
-				resp := streamResp.Response
-				errMsg := "upstream response failed"
-				errType := "upstream_error"
-				errCode := "response_failed"
-				if resp.Error != nil {
-					if resp.Error.Message != "" {
-						errMsg = resp.Error.Message
+		if eventComplete && (eventName == "response.failed" || eventName == "error") && dataPayload != "" {
+			if eventName == "response.failed" {
+				var streamResp model.ResponsesStreamEvent
+				if err := json.Unmarshal([]byte(dataPayload), &streamResp); err != nil {
+					logger.Log.Debugf("preread: failed to parse response.failed event: %v", err)
+				} else if streamResp.Response == nil || streamResp.Response.Status != "failed" {
+					logger.Log.Debugf("preread: response.failed event with unexpected structure")
+				} else {
+					firstEventIsFailed = true
+					resp := streamResp.Response
+					errMsg := "upstream response failed"
+					errType := "upstream_error"
+					errCode := "response_failed"
+					if resp.Error != nil {
+						if resp.Error.Message != "" {
+							errMsg = resp.Error.Message
+						}
+						if resp.Error.Type != "" {
+							errType = resp.Error.Type
+						}
+						if resp.Error.Code != "" {
+							errCode = resp.Error.Code
+						}
 					}
-					if resp.Error.Type != "" {
-						errType = resp.Error.Type
+					failedErr = &model.Error{
+						Message: errMsg,
+						Type:    errType,
+						Code:    errCode,
 					}
-					if resp.Error.Code != "" {
-						errCode = resp.Error.Code
-					}
+					// 根据错误类型映射 HTTP 状态码，便于网关判断是否重试
+					failedStatusCode = mapFailedErrorToStatusCode(errCode, errType, errMsg)
 				}
-				failedErr = &model.Error{
-					Message: errMsg,
-					Type:    errType,
-					Code:    errCode,
+			} else if eventName == "error" {
+				if errEvent, ok := parseStreamErrorEvent(dataPayload); ok {
+					firstEventIsFailed = true
+					failedErr = &errEvent
+					// 根据错误类型映射 HTTP 状态码，便于网关判断是否重试
+					// model.Error.Code 是 any 类型，使用 fmt.Sprintf 进行防御性转换
+					errCode := fmt.Sprintf("%v", errEvent.Code)
+					failedStatusCode = mapFailedErrorToStatusCode(errCode, errEvent.Type, errEvent.Message)
+				} else {
+					logger.Log.Debugf("preread: failed to parse error event: event=%s", eventName)
 				}
-				// 根据错误类型映射 HTTP 状态码，便于网关判断是否重试
-				failedStatusCode = mapFailedErrorToStatusCode(errCode, errType, errMsg)
 			}
 		}
 	}
@@ -201,19 +214,35 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 	common.SetEventStreamHeaders(c)
 
 	doneRendered := false
+	var streamError model.Error
 
 	// 先把预读的行回放出去，并走一遍状态机
 	for _, line := range prereadLines {
-		processStreamLine(line, &pendingEvent, &currentFrame, &deltaFrame, &deltaText, &capture, &usage, &outputItems, &outputItemByID, &skippedItemIDs, flushFrame, flushDeltaFrame, c, &doneRendered, &responseText)
+		processStreamLine(line, &pendingEvent, &currentFrame, &deltaFrame, &deltaText, &capture, &usage, &outputItems, &outputItemByID, &skippedItemIDs, flushFrame, flushDeltaFrame, c, &doneRendered, &responseText, &streamError)
 	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		processStreamLine(line, &pendingEvent, &currentFrame, &deltaFrame, &deltaText, &capture, &usage, &outputItems, &outputItemByID, &skippedItemIDs, flushFrame, flushDeltaFrame, c, &doneRendered, &responseText)
+		processStreamLine(line, &pendingEvent, &currentFrame, &deltaFrame, &deltaText, &capture, &usage, &outputItems, &outputItemByID, &skippedItemIDs, flushFrame, flushDeltaFrame, c, &doneRendered, &responseText, &streamError)
 	}
 
 	if err := scanner.Err(); err != nil {
 		logger.Log.Errorf("error reading stream: " + err.Error())
+	}
+
+	// 流式过程中遇到 error 事件，记录错误并返回
+	if streamError.Message != "" {
+		if err := resp.Body.Close(); err != nil {
+			logger.Log.Warnf("failed to close response body on stream error path: %v", err)
+		}
+		// model.Error.Code 是 any 类型（可能为 string/int/float 等），
+		// 使用 fmt.Sprintf 进行防御性转换，确保任何类型都能被正确转换为字符串传给映射函数。
+		errCode := fmt.Sprintf("%v", streamError.Code)
+		statusCode := mapFailedErrorToStatusCode(errCode, streamError.Type, streamError.Message)
+		return &model.ErrorWithStatusCode{
+			Error:      streamError,
+			StatusCode: statusCode,
+		}, responseText, usage
 	}
 
 	if !doneRendered {
@@ -262,6 +291,8 @@ func mapFailedErrorToStatusCode(code, errType, message string) int {
 
 	// 5xx - 服务端错误，触发重试
 	if strings.Contains(codeLower, "server_error") ||
+		// Codex API 已知的临时性错误码，表示请求失败但非客户端问题，映射到 502 便于网关重试
+		strings.Contains(codeLower, "request_failed") ||
 		strings.Contains(typeLower, "server_error") ||
 		strings.Contains(typeLower, "unavailable") ||
 		strings.Contains(typeLower, "internal_error") ||
@@ -271,12 +302,36 @@ func mapFailedErrorToStatusCode(code, errType, message string) int {
 		strings.Contains(msgLower, "request timeout") ||
 		strings.Contains(msgLower, "timed out") ||
 		strings.Contains(msgLower, "deadline exceeded") ||
-		strings.Contains(msgLower, "connection timeout") {
+		strings.Contains(msgLower, "connection timeout") ||
+		// 服务暂时不可用的通用消息模式，属于服务端临时故障，映射到 502 便于网关重试
+		strings.Contains(msgLower, "temporarily unavailable") {
 		return http.StatusBadGateway
 	}
 
 	// 4xx - 客户端错误，默认不重试
 	return http.StatusBadRequest
+}
+
+// parseStreamErrorEvent 从 SSE payload 中解析 error 事件，返回构造好的 Error 对象。
+// 若 payload 解析失败则返回零值和 false。
+func parseStreamErrorEvent(payload string) (model.Error, bool) {
+	var errEvent model.ResponseStreamErrorEvent
+	if err := json.Unmarshal([]byte(payload), &errEvent); err != nil {
+		return model.Error{}, false
+	}
+	errMsg := "upstream stream error"
+	errCode := "server_error"
+	if errEvent.Message != "" {
+		errMsg = errEvent.Message
+	}
+	if errEvent.Code != "" {
+		errCode = errEvent.Code
+	}
+	return model.Error{
+		Message: errMsg,
+		Type:    "upstream_error",
+		Code:    errCode,
+	}, true
 }
 
 // processStreamLine 处理单行 SSE 数据，抽取为函数以支持预读回放和正常循环复用
@@ -296,6 +351,7 @@ func processStreamLine(
 	c *gin.Context,
 	doneRendered *bool,
 	responseText *string,
+	streamError *model.Error,
 ) {
 	if line == "" {
 		flushFrame()
@@ -335,6 +391,22 @@ func processStreamLine(
 		return
 	}
 	render.StringData(c, line)
+
+	if *pendingEvent == "error" || streamResponse.Type == "error" {
+		// 设计意图：仅记录第一个 error 事件。后续错误事件不再覆盖，避免丢失首次错误信息。
+		if streamError != nil && *streamError == (model.Error{}) {
+			// 注意：streamResponse 已在上方解析，但 ResponsesStreamEvent 不包含 error 事件的 Message/Code 字段，
+			// 必须使用 ResponseStreamErrorEvent 重新解析以获取错误详情。
+			if errEvent, ok := parseStreamErrorEvent(payload); ok {
+				*streamError = errEvent
+				// model.Error.Code 是 any 类型，使用 fmt.Sprintf 进行防御性转换
+				errCode := fmt.Sprintf("%v", errEvent.Code)
+				logger.Log.Warnf("stream error event detected: event=%s code=%s message=%s", *pendingEvent, errCode, errEvent.Message)
+			}
+		}
+		*pendingEvent = ""
+		return
+	}
 
 	if streamResponse.Type == "response.output_text.delta" {
 		if streamResponse.Delta != nil {
