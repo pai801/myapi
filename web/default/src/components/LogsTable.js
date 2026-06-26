@@ -614,7 +614,7 @@ const LogsTable = () => {
 
                   {isAdminUser ? (
                     <Table.Cell>
-                      <Button size='mini' onClick={() => handleDetailClick(log)}>详情</Button>
+                      <Button size='mini' onClick={() => handleDetailClick(log)} disabled={!log.request_body && !log.response_body && !log.request_header}>详情</Button>
                     </Table.Cell>
                   ) : (
                     <Table.Cell>{renderDetail(log)}</Table.Cell>
