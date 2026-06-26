@@ -125,6 +125,12 @@ const LogsTable = () => {
       </div> : <></>);
     }
   }, {
+    title: '缓存', dataIndex: 'cached_tokens', render: (text, record, index) => {
+      return (parseInt(text) > 0 && (record.type === 0 || record.type === 2) ? <div>
+        {<span> {text} </span>}
+      </div> : <></>);
+    }
+  }, {
     title: '花费', dataIndex: 'quota', render: (text, record, index) => {
       return (record.type === 0 || record.type === 2 ? <div>
         {renderQuota(text, 6)}

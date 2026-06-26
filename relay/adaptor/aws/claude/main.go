@@ -93,6 +93,12 @@ func Handler(c *gin.Context, awsCli *bedrockruntime.Client, modelName string) (*
 		CompletionTokens: claudeResponse.Usage.OutputTokens,
 		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
 	}
+	// 如果有缓存读取的token，设置到 PromptTokensDetails 中
+	if claudeResponse.Usage.CacheReadInputTokens > 0 {
+		usage.PromptTokensDetails = &relaymodel.PromptTokensDetails{
+			CachedTokens: claudeResponse.Usage.CacheReadInputTokens,
+		}
+	}
 	openaiResp.Usage = usage
 
 	c.JSON(http.StatusOK, openaiResp)
@@ -161,6 +167,12 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 			if meta != nil {
 				usage.PromptTokens += meta.Usage.InputTokens
 				usage.CompletionTokens += meta.Usage.OutputTokens
+				// 如果有缓存读取的token，设置到 PromptTokensDetails 中（在 message_start 事件中）
+				if meta.Usage.CacheReadInputTokens > 0 {
+					usage.PromptTokensDetails = &relaymodel.PromptTokensDetails{
+						CachedTokens: meta.Usage.CacheReadInputTokens,
+					}
+				}
 				if len(meta.Id) > 0 { // only message_start has an id, otherwise it's a finish_reason event.
 					id = fmt.Sprintf("chatcmpl-%s", meta.Id)
 					return true

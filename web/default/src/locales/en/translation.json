@@ -326,6 +326,7 @@
       "username_placeholder": "Optional",
       "prompt_tokens": "Prompt Tokens",
       "completion_tokens": "Completion Tokens",
+      "cached_tokens": "Cached Tokens",
       "quota": "Quota",
       "detail": "Detail"
     },

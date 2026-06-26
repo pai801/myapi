@@ -441,6 +441,11 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 	completionRatio := billingratio.GetCompletionRatio(meta.ActualModelName, meta.ChannelType)
 	promptTokens := usage.PromptTokens
 	completionTokens := usage.CompletionTokens
+	// 从 usage 中提取缓存命中的token数
+	cachedTokens := 0
+	if usage.PromptTokensDetails != nil {
+		cachedTokens = usage.PromptTokensDetails.CachedTokens
+	}
 	quota = int64(math.Ceil((float64(promptTokens) + float64(completionTokens)*completionRatio) * ratio))
 
 	if ratio != 0 && quota <= 0 {
@@ -470,6 +475,7 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 		ChannelId:         meta.ChannelId,
 		PromptTokens:      promptTokens,
 		CompletionTokens:  completionTokens,
+		CachedTokens:      cachedTokens,
 		ModelName:         meta.ActualModelName,
 		TokenName:         meta.TokenName,
 		Quota:             int(quota),

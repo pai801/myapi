@@ -525,6 +525,15 @@ const LogsTable = () => {
                 <Table.HeaderCell
                   style={{ cursor: 'pointer' }}
                   onClick={() => {
+                    sortLog('cached_tokens');
+                  }}
+                  width={1}
+                >
+                  {t('log.table.cached_tokens')}
+                </Table.HeaderCell>
+                <Table.HeaderCell
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => {
                     sortLog('quota');
                   }}
                   width={1}
@@ -605,6 +614,9 @@ const LogsTable = () => {
                       </Table.Cell>
                       <Table.Cell>
                         {log.completion_tokens ? log.completion_tokens : ''}
+                      </Table.Cell>
+                      <Table.Cell>
+                        {log.cached_tokens ? log.cached_tokens : ''}
                       </Table.Cell>
                       <Table.Cell>
                         {log.quota ? renderQuota(log.quota, t, 6) : ''}

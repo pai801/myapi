@@ -81,6 +81,12 @@ func DoResponsesResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (
 		CompletionTokens: textResponse.Usage.OutputTokens,
 		TotalTokens:      textResponse.Usage.TotalTokens,
 	}
+	// 如果有缓存命中的token，设置到 PromptTokensDetails 中
+	if textResponse.Usage.InputTokensDetails != nil && textResponse.Usage.InputTokensDetails.CachedTokens > 0 {
+		usage.PromptTokensDetails = &model.PromptTokensDetails{
+			CachedTokens: textResponse.Usage.InputTokensDetails.CachedTokens,
+		}
+	}
 
 	c.Set(ctxkey.ResponseBody, string(responseBody))
 	return usage, nil
@@ -473,6 +479,12 @@ func processStreamLine(
 			CompletionTokens: streamResponse.Usage.OutputTokens,
 			TotalTokens:      streamResponse.Usage.TotalTokens,
 		}
+		// 如果有缓存命中的token，设置到 PromptTokensDetails 中
+		if streamResponse.Usage.InputTokensDetails != nil && streamResponse.Usage.InputTokensDetails.CachedTokens > 0 {
+			(*usage).PromptTokensDetails = &model.PromptTokensDetails{
+				CachedTokens: streamResponse.Usage.InputTokensDetails.CachedTokens,
+			}
+		}
 	}
 
 	if streamResponse.Response != nil && streamResponse.Response.Usage.TotalTokens > 0 {
@@ -481,6 +493,12 @@ func processStreamLine(
 			PromptTokens:     streamResponse.Response.Usage.InputTokens,
 			CompletionTokens: streamResponse.Response.Usage.OutputTokens,
 			TotalTokens:      streamResponse.Response.Usage.TotalTokens,
+		}
+		// 如果有缓存命中的token，设置到 PromptTokensDetails 中
+		if streamResponse.Response.Usage.InputTokensDetails != nil && streamResponse.Response.Usage.InputTokensDetails.CachedTokens > 0 {
+			(*usage).PromptTokensDetails = &model.PromptTokensDetails{
+				CachedTokens: streamResponse.Response.Usage.InputTokensDetails.CachedTokens,
+			}
 		}
 	}
 

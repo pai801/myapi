@@ -328,6 +328,7 @@
       "username_placeholder": "可选值",
       "prompt_tokens": "请求消耗",
       "completion_tokens": "补全消耗",
+      "cached_tokens": "缓存命中",
       "quota": "额度",
       "detail": "详情"
     },
