@@ -277,10 +277,16 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 
 		// 从流状态中提取 usage 和完整的响应体用于日志记录
 		if converterState != nil {
-			pt, ct, tt := codex.GetStreamUsage(converterState)
+			pt, ct, tt, cachedT := codex.GetStreamUsage(converterState)
 			finalUsage.PromptTokens = pt
 			finalUsage.CompletionTokens = ct
 			finalUsage.TotalTokens = tt
+			// 如果有缓存命中的token，设置到 PromptTokensDetails 中
+			if cachedT > 0 {
+				finalUsage.PromptTokensDetails = &model.PromptTokensDetails{
+					CachedTokens: cachedT,
+				}
+			}
 
 			if config.LogConsumeEnabled {
 				completedBody := codex.GetStreamCompletedBody(converterState, requestBody)
@@ -324,6 +330,14 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 				}
 				if tt, ok := usage["total_tokens"].(float64); ok {
 					finalUsage.TotalTokens = int(tt)
+				}
+				// 解析 prompt_tokens_details.cached_tokens
+				if promptTokensDetails, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
+					if cachedTokens, ok := promptTokensDetails["cached_tokens"].(float64); ok && int(cachedTokens) > 0 {
+						finalUsage.PromptTokensDetails = &model.PromptTokensDetails{
+							CachedTokens: int(cachedTokens),
+						}
+					}
 				}
 			}
 		}

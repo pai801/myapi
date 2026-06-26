@@ -225,12 +225,12 @@ func emitResponsesEvent(event string, payload string) string {
 	return fmt.Sprintf("event: %s\ndata: %s\n\n", event, payload)
 }
 
-func GetStreamUsage(param interface{}) (promptTokens, completionTokens, totalTokens int) {
+func GetStreamUsage(param interface{}) (promptTokens, completionTokens, totalTokens, cachedTokens int) {
 	st, ok := param.(*chatToResponsesState)
 	if !ok || st == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
-	return int(st.InputTokens), int(st.OutputTokens), int(st.TotalTokens)
+	return int(st.InputTokens), int(st.OutputTokens), int(st.TotalTokens), int(st.CachedTokens)
 }
 
 func GetStreamCompletedBody(param interface{}, originalRequestRawJSON []byte) []byte {
