@@ -99,7 +99,7 @@ func RecordTestLog(ctx context.Context, log *Log) {
 	recordLogHelper(ctx, log)
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int) (logs []*Log, err error) {
+func buildAllLogsQuery(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int) *gorm.DB {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
@@ -124,11 +124,22 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if channel != 0 {
 		tx = tx.Where("channel_id = ?", channel)
 	}
+	return tx
+}
+
+func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int) (logs []*Log, err error) {
+	tx := buildAllLogsQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel)
 	err = tx.Order("id desc").Limit(num).Offset(startIdx).Find(&logs).Error
 	return logs, err
 }
 
-func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int) (logs []*Log, err error) {
+func GetAllLogsCount(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int) (total int64, err error) {
+	tx := buildAllLogsQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel)
+	err = tx.Model(&Log{}).Count(&total).Error
+	return total, err
+}
+
+func buildUserLogsQuery(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string) *gorm.DB {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB.Where("user_id = ?", userId)
@@ -147,8 +158,19 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if endTimestamp != 0 {
 		tx = tx.Where("created_at <= ?", endTimestamp)
 	}
+	return tx
+}
+
+func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int) (logs []*Log, err error) {
+	tx := buildUserLogsQuery(userId, logType, startTimestamp, endTimestamp, modelName, tokenName)
 	err = tx.Order("id desc").Limit(num).Offset(startIdx).Omit("id").Find(&logs).Error
 	return logs, err
+}
+
+func GetUserLogsCount(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string) (total int64, err error) {
+	tx := buildUserLogsQuery(userId, logType, startTimestamp, endTimestamp, modelName, tokenName)
+	err = tx.Model(&Log{}).Count(&total).Error
+	return total, err
 }
 
 func SearchAllLogs(keyword string) (logs []*Log, err error) {

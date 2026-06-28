@@ -133,9 +133,12 @@ function renderDetail(log) {
 const LogsTable = () => {
   const { t } = useTranslation();
   const [logs, setLogs] = useState([]);
+  const [pageData, setPageData] = useState([]);
   const [showStat, setShowStat] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
+  const [totalLogs, setTotalLogs] = useState(0);
+  const [jumpPage, setJumpPage] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
   const [logType, setLogType] = useState(0);
@@ -240,14 +243,14 @@ const LogsTable = () => {
       url = `/api/log/self/?p=${startIdx}&type=${logType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
     }
     const res = await API.get(url);
-    const { success, message, data } = res.data;
+    const { success, message, data, total } = res.data;
     if (success) {
       if (startIdx === 0) {
         setLogs(data);
-      } else {
-        let newLogs = [...logs];
-        newLogs.splice(startIdx * ITEMS_PER_PAGE, data.length, ...data);
-        setLogs(newLogs);
+      }
+      setPageData(data || []);
+      if (total !== undefined) {
+        setTotalLogs(total);
       }
     } else {
       showError(message);
@@ -256,18 +259,29 @@ const LogsTable = () => {
   };
 
   const onPaginationChange = (e, { activePage }) => {
-    (async () => {
-      if (activePage === Math.ceil(logs.length / ITEMS_PER_PAGE) + 1) {
-        // In this case we have to load more data and then append them.
-        await loadLogs(activePage - 1);
-      }
-      setActivePage(activePage);
-    })();
+    setActivePage(activePage);
+    setLoading(true);
+    loadLogs(activePage - 1);
+  };
+
+  const handleJumpPage = () => {
+    const pageNum = parseInt(jumpPage, 10);
+    const total = Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE));
+    if (isNaN(pageNum) || pageNum < 1 || pageNum > total) {
+      showError(`请输入 1-${total} 之间的页码`);
+      return;
+    }
+    setJumpPage('');
+    setActivePage(pageNum);
+    setLoading(true);
+    loadLogs(pageNum - 1);
   };
 
   const refresh = async () => {
     setLoading(true);
     setActivePage(1);
+    setTotalLogs(0);
+    setPageData([]);
     await loadLogs(0);
   };
 
@@ -278,8 +292,9 @@ const LogsTable = () => {
   const searchLogs = async () => {
     if (searchKeyword === '') {
       // if keyword is blank, load files instead.
-      await loadLogs(0);
       setActivePage(1);
+      setLoading(true);
+      loadLogs(0);
       return;
     }
     setSearching(true);
@@ -287,6 +302,8 @@ const LogsTable = () => {
     const { success, message, data } = res.data;
     if (success) {
       setLogs(data);
+      setPageData(data);
+      setTotalLogs(data.length);
       setActivePage(1);
     } else {
       showError(message);
@@ -299,9 +316,9 @@ const LogsTable = () => {
   };
 
   const sortLog = (key) => {
-    if (logs.length === 0) return;
+    if (pageData.length === 0) return;
     setLoading(true);
-    let sortedLogs = [...logs];
+    let sortedLogs = [...pageData];
     if (typeof sortedLogs[0][key] === 'string') {
       sortedLogs.sort((a, b) => {
         return ('' + a[key]).localeCompare(b[key]);
@@ -313,10 +330,10 @@ const LogsTable = () => {
         if (a[key] < b[key]) return 1;
       });
     }
-    if (sortedLogs[0].id === logs[0].id) {
+    if (sortedLogs[0].id === pageData[0].id) {
       sortedLogs.reverse();
     }
-    setLogs(sortedLogs);
+    setPageData(sortedLogs);
     setLoading(false);
   };
 
@@ -547,11 +564,8 @@ const LogsTable = () => {
         </Table.Header>
 
         <Table.Body>
-          {logs
-            .slice(
-              (activePage - 1) * ITEMS_PER_PAGE,
-              activePage * ITEMS_PER_PAGE
-            )
+          {pageData
+            .filter(log => log != null)
             .map((log, idx) => {
               if (log.deleted) return <></>;
               return (
@@ -652,15 +666,49 @@ const LogsTable = () => {
               <Button size='small' onClick={refresh} loading={loading}>
                 {t('log.buttons.refresh')}
               </Button>
+              <span style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                跳至
+                <input
+                  type='text'
+                  value={jumpPage}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '' || /^\d+$/.test(val)) {
+                      setJumpPage(val);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleJumpPage();
+                  }}
+                  placeholder='页码'
+                  style={{
+                    width: '48px',
+                    padding: '4px 6px',
+                    border: '1px solid rgba(34,36,38,.15)',
+                    borderRadius: '4px',
+                    textAlign: 'center',
+                    fontSize: '13px',
+                  }}
+                />
+                页
+                <Button
+                  size='mini'
+                  onClick={handleJumpPage}
+                  disabled={loading}
+                >
+                  GO
+                </Button>
+              </span>
               <Pagination
                 floated='right'
                 activePage={activePage}
                 onPageChange={onPaginationChange}
                 size='small'
                 siblingRange={1}
+                firstItem={{ content: '首页', 'aria-label': '第一页' }}
+                lastItem={{ content: '末页', 'aria-label': '最后一页' }}
                 totalPages={
-                  Math.ceil(logs.length / ITEMS_PER_PAGE) +
-                  (logs.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
+                  Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
                 }
               />
             </Table.HeaderCell>
