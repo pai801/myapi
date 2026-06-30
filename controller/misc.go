@@ -34,7 +34,6 @@ func GetStatus(c *gin.Context) {
 			"server_address":              config.ServerAddress,
 			"turnstile_check":             config.TurnstileCheckEnabled,
 			"turnstile_site_key":          config.TurnstileSiteKey,
-			"top_up_link":                 config.TopUpLink,
 			"chat_link":                   config.ChatLink,
 			"quota_per_unit":              config.QuotaPerUnit,
 			"display_in_currency":         config.DisplayInCurrencyEnabled,

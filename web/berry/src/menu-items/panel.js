@@ -3,16 +3,14 @@ import {
   IconDashboard,
   IconSitemap,
   IconArticle,
-  IconCoin,
   IconAdjustments,
   IconKey,
-  IconGardenCart,
   IconUser,
   IconUserScan
 } from '@tabler/icons-react';
 
 // constant
-const icons = { IconDashboard, IconSitemap, IconArticle, IconCoin, IconAdjustments, IconKey, IconGardenCart, IconUser, IconUserScan };
+const icons = { IconDashboard, IconSitemap, IconArticle, IconAdjustments, IconKey, IconUser, IconUserScan };
 
 // ==============================|| DASHBOARD MENU ITEMS ||============================== //
 
@@ -52,23 +50,6 @@ const panel = {
       type: 'item',
       url: '/panel/log',
       icon: icons.IconArticle,
-      breadcrumbs: false
-    },
-    {
-      id: 'redemption',
-      title: '兑换',
-      type: 'item',
-      url: '/panel/redemption',
-      icon: icons.IconCoin,
-      breadcrumbs: false,
-      isAdmin: true
-    },
-    {
-      id: 'topup',
-      title: '充值',
-      type: 'item',
-      url: '/panel/topup',
-      icon: icons.IconGardenCart,
       breadcrumbs: false
     },
     {

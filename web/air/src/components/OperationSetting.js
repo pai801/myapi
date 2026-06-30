@@ -14,7 +14,6 @@ const OperationSetting = () => {
     CompletionRatio: '',
     GroupRatio: '',
     ModelEndpointTypes: '',
-    TopUpLink: '',
     ChatLink: '',
     QuotaPerUnit: 0,
     AutomaticDisableChannelEnabled: '',
@@ -136,9 +135,6 @@ const OperationSetting = () => {
         }
         break;
       case 'general':
-        if (originInputs['TopUpLink'] !== inputs.TopUpLink) {
-          await updateOption('TopUpLink', inputs.TopUpLink);
-        }
         if (originInputs['ChatLink'] !== inputs.ChatLink) {
           await updateOption('ChatLink', inputs.ChatLink);
         }
@@ -170,16 +166,7 @@ const OperationSetting = () => {
           <Header as='h3'>
             通用设置
           </Header>
-          <Form.Group widths={4}>
-            <Form.Input
-              label='充值链接'
-              name='TopUpLink'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.TopUpLink}
-              type='link'
-              placeholder='例如发卡网站的购买链接'
-            />
+          <Form.Group widths={3}>
             <Form.Input
               label='聊天页面链接'
               name='ChatLink'

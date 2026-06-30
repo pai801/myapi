@@ -3,8 +3,6 @@
     "home": "首页",
     "channel": "渠道",
     "token": "令牌",
-    "redemption": "兑换",
-    "topup": "充值",
     "user": "用户",
     "dashboard": "总览",
     "log": "日志",
@@ -14,26 +12,6 @@
     "login": "登录",
     "logout": "注销",
     "register": "注册"
-  },
-  "topup": {
-    "title": "充值中心",
-    "get_code": {
-      "title": "获取兑换码",
-      "current_quota": "当前可用额度",
-      "button": "立即获取兑换码"
-    },
-    "redeem_code": {
-      "title": "兑换码充值",
-      "placeholder": "请输入兑换码",
-      "paste": "粘贴",
-      "paste_error": "无法访问剪贴板，请手动粘贴",
-      "submit": "立即兑换",
-      "submitting": "兑换中...",
-      "empty_code": "请输入兑换码！",
-      "success": "充值成功！",
-      "request_failed": "请求失败",
-      "no_link": "超级管理员未设置充值链接！"
-    }
   },
   "channel": {
     "title": "管理渠道",
@@ -247,55 +225,6 @@
       "unit": "$"
     }
   },
-  "redemption": {
-    "title": "兑换管理",
-    "search": "搜索兑换码的 ID 和名称 ...",
-    "table": {
-      "id": "ID",
-      "name": "名称",
-      "status": "状态",
-      "quota": "额度",
-      "created_time": "创建时间",
-      "redeemed_time": "兑换时间",
-      "actions": "操作",
-      "no_name": "无",
-      "not_redeemed": "尚未兑换"
-    },
-    "buttons": {
-      "copy": "复制",
-      "delete": "删除",
-      "confirm_delete": "确认删除",
-      "enable": "启用",
-      "disable": "禁用",
-      "edit": "编辑",
-      "add": "添加新的兑换码",
-      "refresh": "刷新"
-    },
-    "status": {
-      "unused": "未使用",
-      "disabled": "已禁用",
-      "used": "已使用",
-      "unknown": "未知状态"
-    },
-    "edit": {
-      "title_edit": "更新兑换码信息",
-      "title_create": "创建新的兑换码",
-      "name": "名称",
-      "name_placeholder": "请输入名称",
-      "quota": "额度",
-      "quota_placeholder": "请输入单个兑换码中包含的额度",
-      "count": "生成数量",
-      "count_placeholder": "请输入生成数量",
-      "buttons": {
-        "submit": "提交",
-        "cancel": "取消"
-      }
-    },
-    "messages": {
-      "update_success": "兑换码更新成功！",
-      "create_success": "兑换码创建成功！"
-    }
-  },
   "log": {
     "title": "操作日志",
     "search": "搜索日志...",
@@ -305,7 +234,7 @@
     "type": {
       "select": "选择明细分类",
       "all": "全部",
-      "topup": "充值",
+      "topup": "额度变更",
       "usage": "消费",
       "admin": "管理",
       "system": "系统",
@@ -663,8 +592,6 @@
       },
       "general": {
         "title": "通用设置",
-        "topup_link": "充值链接",
-        "topup_link_placeholder": "例如发卡网站的购买链接",
         "chat_link": "聊天页面链接",
         "chat_link_placeholder": "例如 ChatGPT Next Web 的部署地址",
         "quota_per_unit": "单位美元额度",

@@ -19,9 +19,6 @@ import Channel from './pages/Channel';
 import Token from './pages/Token';
 import EditToken from './pages/Token/EditToken';
 import EditChannel from './pages/Channel/EditChannel';
-import Redemption from './pages/Redemption';
-import EditRedemption from './pages/Redemption/EditRedemption';
-import TopUp from './pages/TopUp';
 import Log from './pages/Log';
 import Chat from './pages/Chat';
 import LarkOAuth from './components/LarkOAuth';
@@ -151,30 +148,6 @@ function App() {
         }
       />
       <Route
-        path='/redemption'
-        element={
-          <PrivateRoute>
-            <Redemption />
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path='/redemption/edit/:id'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditRedemption />
-          </Suspense>
-        }
-      />
-      <Route
-        path='/redemption/add'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditRedemption />
-          </Suspense>
-        }
-      />
-      <Route
         path='/user'
         element={
           <PrivateRoute>
@@ -260,16 +233,6 @@ function App() {
           <PrivateRoute>
             <Suspense fallback={<Loading></Loading>}>
               <Setting />
-            </Suspense>
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path='/topup'
-        element={
-          <PrivateRoute>
-            <Suspense fallback={<Loading></Loading>}>
-              <TopUp />
             </Suspense>
           </PrivateRoute>
         }

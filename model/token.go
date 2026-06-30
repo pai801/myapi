@@ -280,19 +280,14 @@ func PreConsumeTokenQuota(tokenId int, quota int64) (err error) {
 				contentText = "您的额度即将用尽"
 			}
 			if email != "" {
-				topUpLink := fmt.Sprintf("%s/topup", config.ServerAddress)
 				content := message.EmailTemplate(
 					prompt,
 					fmt.Sprintf(`
 						<p>您好！</p>
 						<p>%s，当前剩余额度为 <strong>%d</strong>。</p>
-						<p>为了不影响您的使用，请及时充值。</p>
-						<p style="text-align: center; margin: 30px 0;">
-							<a href="%s" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block;">立即充值</a>
-						</p>
-						<p style="color: #666;">如果按钮无法点击，请复制以下链接到浏览器中打开：</p>
-						<p style="background-color: #f8f8f8; padding: 10px; border-radius: 4px; word-break: break-all;">%s</p>
-					`, contentText, userQuota, topUpLink, topUpLink),
+						<p>您的额度即将用尽，请联系管理员。</p>
+						<p>请联系管理员获取更多额度。</p>
+					`, contentText, userQuota),
 				)
 				err = message.SendEmail(prompt, email, content)
 				if err != nil {

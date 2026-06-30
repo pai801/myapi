@@ -16,8 +16,6 @@ import { UserContext } from './context/User';
 import Channel from './pages/Channel';
 import Token from './pages/Token';
 import EditChannel from './pages/Channel/EditChannel';
-import Redemption from './pages/Redemption';
-import TopUp from './pages/TopUp';
 import Log from './pages/Log';
 import Chat from './pages/Chat';
 import { Layout } from '@douyinfe/semi-ui';
@@ -99,14 +97,6 @@ function App() {
             }
           />
           <Route
-            path="/redemption"
-            element={
-              <PrivateRoute>
-                <Redemption />
-              </PrivateRoute>
-            }
-          />
-          <Route
             path="/user"
             element={
               <PrivateRoute>
@@ -176,16 +166,6 @@ function App() {
               <PrivateRoute>
                 <Suspense fallback={<Loading></Loading>}>
                   <Setting />
-                </Suspense>
-              </PrivateRoute>
-            }
-          />
-          <Route
-            path="/topup"
-            element={
-              <PrivateRoute>
-                <Suspense fallback={<Loading></Loading>}>
-                  <TopUp />
                 </Suspense>
               </PrivateRoute>
             }

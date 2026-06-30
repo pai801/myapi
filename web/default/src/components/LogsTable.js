@@ -48,12 +48,12 @@ const MODE_OPTIONS = [
   { key: 'self', text: '当前用户', value: 'self' },
 ];
 
-function renderType(type) {
+function renderType(type, t) {
   switch (type) {
     case 1:
       return (
         <Label basic color='green'>
-          充值
+          {t('log.type.topup')}
         </Label>
       );
     case 2:
@@ -608,7 +608,7 @@ const LogsTable = () => {
                       {log.channel_name || ''}
                     </Table.Cell>
                   )}
-                  <Table.Cell>{renderType(log.type)}</Table.Cell>
+                  <Table.Cell>{renderType(log.type, t)}</Table.Cell>
                   <Table.Cell>
                     {log.model_name ? renderColorLabel(log.model_name) : ''}
                   </Table.Cell>

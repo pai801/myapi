@@ -254,8 +254,6 @@ const TokensTable = () => {
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searchToken, setSearchToken] = useState('');
   const [searching, setSearching] = useState(false);
-  const [showTopUpModal, setShowTopUpModal] = useState(false);
-  const [targetTokenIdx, setTargetTokenIdx] = useState(0);
   const [editingToken, setEditingToken] = useState({
     id: undefined
   });

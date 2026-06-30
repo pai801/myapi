@@ -21,7 +21,7 @@ const colors = ['amber', 'blue', 'cyan', 'green', 'grey', 'indigo', 'light-blue'
 function renderType(type) {
   switch (type) {
     case 1:
-      return <Tag color="cyan" size="large"> 充值 </Tag>;
+      return <Tag color="cyan" size="large"> 额度变更 </Tag>;
     case 2:
       return <Tag color="lime" size="large"> 消费 </Tag>;
     case 3:
@@ -405,7 +405,7 @@ const LogsTable = () => {
         refresh(parseInt(value)).then();
       }}>
         <Select.Option value="0">全部</Select.Option>
-        <Select.Option value="1">充值</Select.Option>
+        <Select.Option value="1">额度变更</Select.Option>
         <Select.Option value="2">消费</Select.Option>
         <Select.Option value="3">管理</Select.Option>
         <Select.Option value="4">系统</Select.Option>

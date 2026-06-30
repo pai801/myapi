@@ -17,7 +17,6 @@ const config = {
     server_address: '',
     start_time: 0,
     system_name: 'One API',
-    top_up_link: '',
     turnstile_check: false,
     turnstile_site_key: '',
     version: '',

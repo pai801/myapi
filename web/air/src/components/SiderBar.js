@@ -9,8 +9,6 @@ import '../index.css';
 import {
   IconCalendarClock,
   IconComment,
-  IconCreditCard,
-  IconGift,
   IconHistogram,
   IconHome,
   IconImage,
@@ -60,19 +58,6 @@ const SiderBar = () => {
       itemKey: 'token',
       to: '/token',
       icon: <IconKey />
-    },
-    {
-      text: '兑换',
-      itemKey: 'redemption',
-      to: '/redemption',
-      icon: <IconGift />,
-      className: isAdmin() ? 'semi-navigation-item-normal' : 'tableHiddle'
-    },
-    {
-      text: '充值',
-      itemKey: 'topup',
-      to: '/topup',
-      icon: <IconCreditCard />
     },
     {
       text: '用户',
@@ -170,8 +155,6 @@ const SiderBar = () => {
                 home: '/',
                 channel: '/channel',
                 token: '/token',
-                redemption: '/redemption',
-                topup: '/topup',
                 user: '/user',
                 log: '/log',
                 midjourney: '/midjourney',
