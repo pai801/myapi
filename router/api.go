@@ -2,7 +2,6 @@ package router
 
 import (
 	"github.com/songquanpeng/one-api/controller"
-	"github.com/songquanpeng/one-api/controller/auth"
 	"github.com/songquanpeng/one-api/middleware"
 
 	"github.com/gin-contrib/gzip"
@@ -16,23 +15,11 @@ func SetApiRouter(router *gin.Engine) {
 	{
 		apiRouter.GET("/status", controller.GetStatus)
 		apiRouter.GET("/models", middleware.UserAuth(), controller.DashboardListModels)
-		apiRouter.GET("/notice", controller.GetNotice)
 		apiRouter.GET("/about", controller.GetAbout)
 		apiRouter.GET("/home_page_content", controller.GetHomePageContent)
-		apiRouter.GET("/verification", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendEmailVerification)
-		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
-		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), controller.ResetPassword)
-		apiRouter.GET("/oauth/github", middleware.CriticalRateLimit(), auth.GitHubOAuth)
-		apiRouter.GET("/oauth/oidc", middleware.CriticalRateLimit(), auth.OidcAuth)
-		apiRouter.GET("/oauth/lark", middleware.CriticalRateLimit(), auth.LarkOAuth)
-		apiRouter.GET("/oauth/state", middleware.CriticalRateLimit(), auth.GenerateOAuthCode)
-		apiRouter.GET("/oauth/wechat", middleware.CriticalRateLimit(), auth.WeChatAuth)
-		apiRouter.GET("/oauth/wechat/bind", middleware.CriticalRateLimit(), middleware.UserAuth(), auth.WeChatBind)
-		apiRouter.GET("/oauth/email/bind", middleware.CriticalRateLimit(), middleware.UserAuth(), controller.EmailBind)
 
 		userRoute := apiRouter.Group("/user")
 		{
-			userRoute.POST("/register", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.Register)
 			userRoute.POST("/login", middleware.CriticalRateLimit(), controller.Login)
 			userRoute.GET("/logout", controller.Logout)
 
@@ -44,7 +31,6 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.PUT("/self", controller.UpdateSelf)
 				selfRoute.DELETE("/self", controller.DeleteSelf)
 				selfRoute.GET("/token", controller.GenerateAccessToken)
-				selfRoute.GET("/aff", controller.GetAffCode)
 				selfRoute.GET("/available_models", controller.GetUserAvailableModels)
 			}
 

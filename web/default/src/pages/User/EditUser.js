@@ -14,9 +14,6 @@ const EditUser = () => {
     username: '',
     display_name: '',
     password: '',
-    github_id: '',
-    wechat_id: '',
-    email: '',
     quota: 0,
     group: 'default',
   });
@@ -25,9 +22,6 @@ const EditUser = () => {
     username,
     display_name,
     password,
-    github_id,
-    wechat_id,
-    email,
     quota,
     group,
   } = inputs;
@@ -165,36 +159,6 @@ const EditUser = () => {
                 </Form.Field>
               </>
             )}
-            <Form.Field>
-              <Form.Input
-                label={t('user.edit.github_id')}
-                name='github_id'
-                value={github_id}
-                autoComplete='new-password'
-                placeholder={t('user.edit.github_id_placeholder')}
-                readOnly
-              />
-            </Form.Field>
-            <Form.Field>
-              <Form.Input
-                label={t('user.edit.wechat_id')}
-                name='wechat_id'
-                value={wechat_id}
-                autoComplete='new-password'
-                placeholder={t('user.edit.wechat_id_placeholder')}
-                readOnly
-              />
-            </Form.Field>
-            <Form.Field>
-              <Form.Input
-                label={t('user.edit.email')}
-                name='email'
-                value={email}
-                autoComplete='new-password'
-                placeholder={t('user.edit.email_placeholder')}
-                readOnly
-              />
-            </Form.Field>
             <Button onClick={handleCancel}>
               {t('user.edit.buttons.cancel')}
             </Button>

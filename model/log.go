@@ -70,7 +70,6 @@ func (LogListItem) TableName() string {
 
 const (
 	LogTypeUnknown = iota
-	LogTypeTopup
 	LogTypeConsume
 	LogTypeManage
 	LogTypeSystem
@@ -98,18 +97,6 @@ func RecordLog(ctx context.Context, userId int, logType int, content string) {
 		CreatedAt: helper.GetTimestamp(),
 		Type:      logType,
 		Content:   content,
-	}
-	recordLogHelper(ctx, log)
-}
-
-func RecordTopupLog(ctx context.Context, userId int, content string, quota int) {
-	log := &Log{
-		UserId:    userId,
-		Username:  GetUsernameById(userId),
-		CreatedAt: helper.GetTimestamp(),
-		Type:      LogTypeTopup,
-		Content:   content,
-		Quota:     quota,
 	}
 	recordLogHelper(ctx, log)
 }

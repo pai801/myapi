@@ -124,80 +124,6 @@ func Logout(c *gin.Context) {
 	})
 }
 
-func Register(c *gin.Context) {
-	ctx := c.Request.Context()
-	if !config.RegisterEnabled {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "管理员关闭了新用户注册",
-			"success": false,
-		})
-		return
-	}
-	if !config.PasswordRegisterEnabled {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "管理员关闭了通过密码进行注册，请使用第三方账户验证的形式进行注册",
-			"success": false,
-		})
-		return
-	}
-	var user model.User
-	err := json.NewDecoder(c.Request.Body).Decode(&user)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
-		})
-		return
-	}
-	if err := common.Validate.Struct(&user); err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": i18n.Translate(c, "invalid_input"),
-		})
-		return
-	}
-	if config.EmailVerificationEnabled {
-		if user.Email == "" || user.VerificationCode == "" {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "管理员开启了邮箱验证，请输入邮箱地址和验证码",
-			})
-			return
-		}
-		if !common.VerifyCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose) {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "验证码错误或已过期",
-			})
-			return
-		}
-	}
-	affCode := user.AffCode // this code is the inviter's code, not the user's own code
-	inviterId, _ := model.GetUserIdByAffCode(affCode)
-	cleanUser := model.User{
-		Username:    user.Username,
-		Password:    user.Password,
-		DisplayName: user.Username,
-		InviterId:   inviterId,
-	}
-	if config.EmailVerificationEnabled {
-		cleanUser.Email = user.Email
-	}
-	if err := cleanUser.Insert(ctx, inviterId); err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-	})
-	return
-}
-
 func GetAllUsers(c *gin.Context) {
 	p, _ := strconv.Atoi(c.Query("p"))
 	if p < 0 {
@@ -328,34 +254,6 @@ func GenerateAccessToken(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    user.AccessToken,
-	})
-	return
-}
-
-func GetAffCode(c *gin.Context) {
-	id := c.GetInt(ctxkey.Id)
-	user, err := model.GetUserById(id, true)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	if user.AffCode == "" {
-		user.AffCode = random.GetRandomString(4)
-		if err := user.Update(false); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    user.AffCode,
 	})
 	return
 }
@@ -587,7 +485,7 @@ func CreateUser(c *gin.Context) {
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
 	}
-	if err := cleanUser.Insert(ctx, 0); err != nil {
+	if err := cleanUser.Insert(ctx); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
@@ -715,48 +613,6 @@ func ManageUser(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    clearUser,
-	})
-	return
-}
-
-func EmailBind(c *gin.Context) {
-	email := c.Query("email")
-	code := c.Query("code")
-	if !common.VerifyCodeWithKey(email, code, common.EmailVerificationPurpose) {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "验证码错误或已过期",
-		})
-		return
-	}
-	id := c.GetInt("id")
-	user := model.User{
-		Id: id,
-	}
-	err := user.FillUserById()
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	user.Email = email
-	// no need to check if this email already taken, because we have used verification code to check it
-	err = user.Update(false)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	if user.Role == model.RoleRootUser {
-		config.RootUserEmail = email
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
 	})
 	return
 }

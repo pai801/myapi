@@ -129,15 +129,7 @@ const TokensTable = () => {
       serverAddress = window.location.origin;
     }
     let encodedServerAddress = encodeURIComponent(serverAddress);
-    const nextLink = localStorage.getItem('chat_link');
-    let nextUrl;
-
-    if (nextLink) {
-      nextUrl =
-        nextLink + `/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
-    } else {
-      nextUrl = `https://app.nextchat.dev/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
-    }
+    let nextUrl = `https://app.nextchat.dev/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
 
     let url;
     switch (type) {
@@ -152,8 +144,7 @@ const TokensTable = () => {
         break;
       case 'lobechat':
         url =
-          nextLink +
-          `/?settings={"keyVaults":{"openai":{"apiKey":"sk-${key}","baseURL":"${serverAddress}/v1"}}}`;
+          `https://app.nextchat.dev/?settings={"keyVaults":{"openai":{"apiKey":"sk-${key}","baseURL":"${serverAddress}/v1"}}}`;
         break;
       default:
         url = `sk-${key}`;
@@ -177,15 +168,7 @@ const TokensTable = () => {
       serverAddress = window.location.origin;
     }
     let encodedServerAddress = encodeURIComponent(serverAddress);
-    const chatLink = localStorage.getItem('chat_link');
-    let defaultUrl;
-
-    if (chatLink) {
-      defaultUrl =
-        chatLink + `/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
-    } else {
-      defaultUrl = `https://app.nextchat.dev/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
-    }
+    let defaultUrl = `https://app.nextchat.dev/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
     let url;
     switch (type) {
       case 'ama':
@@ -198,8 +181,7 @@ const TokensTable = () => {
 
       case 'lobechat':
         url =
-          chatLink +
-          `/?settings={"keyVaults":{"openai":{"apiKey":"sk-${key}","baseURL":"${serverAddress}/v1"}}}`;
+          `https://app.nextchat.dev/?settings={"keyVaults":{"openai":{"apiKey":"sk-${key}","baseURL":"${serverAddress}/v1"}}}`;
         break;
 
       default:

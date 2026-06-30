@@ -61,14 +61,6 @@ let headerButtons = [
   },
 ];
 
-if (localStorage.getItem('chat_link')) {
-  headerButtons.splice(1, 0, {
-    name: 'header.chat',
-    to: '/chat',
-    icon: 'comments',
-  });
-}
-
 const Header = () => {
   const { t, i18n } = useTranslation();
   const [userState, userDispatch] = useContext(UserContext);
@@ -208,14 +200,6 @@ const Header = () => {
                       }}
                     >
                       {t('header.login')}
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setShowSidebar(false);
-                        navigate('/register');
-                      }}
-                    >
-                      {t('header.register')}
                     </Button>
                   </>
                 )}

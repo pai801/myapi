@@ -16,7 +16,6 @@ var SystemName = "One API"
 var ServerAddress = "http://localhost:3000"
 var Footer = ""
 var Logo = ""
-var ChatLink = ""
 var QuotaPerUnit = 500 * 1000.0 // $0.002 / 1K tokens
 var DisplayInCurrencyEnabled = true
 var DisplayTokenStatEnabled = true
@@ -34,55 +33,13 @@ var ItemsPerPage = 10
 var MaxRecentItems = 100
 
 var PasswordLoginEnabled = true
-var PasswordRegisterEnabled = true
-var EmailVerificationEnabled = false
-var GitHubOAuthEnabled = false
-var OidcEnabled = false
-var WeChatAuthEnabled = false
 var TurnstileCheckEnabled = false
-var RegisterEnabled = true
-
-var EmailDomainRestrictionEnabled = false
-var EmailDomainWhitelist = []string{
-	"gmail.com",
-	"163.com",
-	"126.com",
-	"qq.com",
-	"outlook.com",
-	"hotmail.com",
-	"icloud.com",
-	"yahoo.com",
-	"foxmail.com",
-}
 
 var DebugEnabled = strings.ToLower(os.Getenv("DEBUG")) == "true"
 var DebugSQLEnabled = strings.ToLower(os.Getenv("DEBUG_SQL")) == "true"
 var MemoryCacheEnabled = strings.ToLower(os.Getenv("MEMORY_CACHE_ENABLED")) == "true"
 
 var LogConsumeEnabled = true
-
-var SMTPServer = ""
-var SMTPPort = 587
-var SMTPAccount = ""
-var SMTPFrom = ""
-var SMTPToken = ""
-
-var GitHubClientId = ""
-var GitHubClientSecret = ""
-
-var LarkClientId = ""
-var LarkClientSecret = ""
-
-var OidcClientId = ""
-var OidcClientSecret = ""
-var OidcWellKnown = ""
-var OidcAuthorizationEndpoint = ""
-var OidcTokenEndpoint = ""
-var OidcUserinfoEndpoint = ""
-
-var WeChatServerAddress = ""
-var WeChatServerToken = ""
-var WeChatAccountQRCodeImageURL = ""
 
 var MessagePusherAddress = ""
 var MessagePusherToken = ""
@@ -91,8 +48,6 @@ var TurnstileSiteKey = ""
 var TurnstileSecretKey = ""
 
 var QuotaForNewUser int64 = 0
-var QuotaForInviter int64 = 0
-var QuotaForInvitee int64 = 0
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false
@@ -116,13 +71,6 @@ var BatchUpdateInterval = env.Int("BATCH_UPDATE_INTERVAL", 5)
 var RelayTimeout = env.Int("RELAY_TIMEOUT", 0) // unit is second
 
 var GeminiSafetySetting = env.String("GEMINI_SAFETY_SETTING", "BLOCK_NONE")
-
-var Theme = env.String("THEME", "default")
-var ValidThemes = map[string]bool{
-	"default": true,
-	"berry":   true,
-	"air":     true,
-}
 
 // All duration's unit is seconds
 // Shouldn't larger then RateLimitKeyExpirationDuration

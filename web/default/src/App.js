@@ -3,16 +3,12 @@ import { Route, Routes } from 'react-router-dom';
 import Loading from './components/Loading';
 import User from './pages/User';
 import { PrivateRoute } from './components/PrivateRoute';
-import RegisterForm from './components/RegisterForm';
 import LoginForm from './components/LoginForm';
 import NotFound from './pages/NotFound';
 import Setting from './pages/Setting';
 import EditUser from './pages/User/EditUser';
 import AddUser from './pages/User/AddUser';
-import { API, getLogo, getSystemName, showError, showNotice } from './helpers';
-import PasswordResetForm from './components/PasswordResetForm';
-import GitHubOAuth from './components/GitHubOAuth';
-import PasswordResetConfirm from './components/PasswordResetConfirm';
+import { API, getLogo, getSystemName, showError } from './helpers';
 import { UserContext } from './context/User';
 import { StatusContext } from './context/Status';
 import Channel from './pages/Channel';
@@ -20,8 +16,6 @@ import Token from './pages/Token';
 import EditToken from './pages/Token/EditToken';
 import EditChannel from './pages/Channel/EditChannel';
 import Log from './pages/Log';
-import Chat from './pages/Chat';
-import LarkOAuth from './components/LarkOAuth';
 import Dashboard from './pages/Dashboard';
 
 const Home = lazy(() => import('./pages/Home'));
@@ -51,20 +45,6 @@ function App() {
         localStorage.setItem('footer_html', data.footer_html);
         localStorage.setItem('quota_per_unit', data.quota_per_unit);
         localStorage.setItem('display_in_currency', data.display_in_currency);
-        if (data.chat_link) {
-          localStorage.setItem('chat_link', data.chat_link);
-        } else {
-          localStorage.removeItem('chat_link');
-        }
-        if (
-          data.version !== process.env.REACT_APP_VERSION &&
-          data.version !== 'v0.0.0' &&
-          process.env.REACT_APP_VERSION !== ''
-        ) {
-          showNotice(
-            `新版本可用：${data.version}，请使用快捷键 Shift + F5 刷新页面`
-          );
-        }
       } else {
         showError(message || '无法正常连接至服务器！');
       }
@@ -180,14 +160,6 @@ function App() {
         }
       />
       <Route
-        path='/user/reset'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <PasswordResetConfirm />
-          </Suspense>
-        }
-      />
-      <Route
         path='/login'
         element={
           <Suspense fallback={<Loading></Loading>}>
@@ -196,34 +168,10 @@ function App() {
         }
       />
       <Route
-        path='/register'
+        path='/about'
         element={
           <Suspense fallback={<Loading></Loading>}>
-            <RegisterForm />
-          </Suspense>
-        }
-      />
-      <Route
-        path='/reset'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <PasswordResetForm />
-          </Suspense>
-        }
-      />
-      <Route
-        path='/oauth/github'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <GitHubOAuth />
-          </Suspense>
-        }
-      />
-      <Route
-        path='/oauth/lark'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <LarkOAuth />
+            <About />
           </Suspense>
         }
       />
@@ -243,22 +191,6 @@ function App() {
           <PrivateRoute>
             <Log />
           </PrivateRoute>
-        }
-      />
-      <Route
-        path='/about'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <About />
-          </Suspense>
-        }
-      />
-      <Route
-        path='/chat'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <Chat />
-          </Suspense>
         }
       />
       <Route

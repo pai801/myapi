@@ -1,12 +1,6 @@
 import {toast} from 'react-toastify';
 import {toastConstants} from '../constants';
-import React from 'react';
 import {API} from './api';
-
-const HTMLToastContent = ({ htmlContent }) => {
-  return <div dangerouslySetInnerHTML={{ __html: htmlContent }} />;
-};
-export default HTMLToastContent;
 
 export function isAdmin() {
   let user = localStorage.getItem('user');
@@ -57,7 +51,6 @@ let showErrorOptions = { autoClose: toastConstants.ERROR_TIMEOUT };
 let showWarningOptions = { autoClose: toastConstants.WARNING_TIMEOUT };
 let showSuccessOptions = { autoClose: toastConstants.SUCCESS_TIMEOUT };
 let showInfoOptions = { autoClose: toastConstants.INFO_TIMEOUT };
-let showNoticeOptions = { autoClose: false };
 
 if (isMobile()) {
   showErrorOptions.position = 'top-center';
@@ -68,9 +61,6 @@ if (isMobile()) {
 
   showInfoOptions.position = 'top-center';
   // showInfoOptions.transition = 'flip';
-
-  showNoticeOptions.position = 'top-center';
-  // showNoticeOptions.transition = 'flip';
 }
 
 export function showError(error) {
@@ -113,14 +103,6 @@ export function showSuccess(message) {
 
 export function showInfo(message) {
   toast.info(message, showInfoOptions);
-}
-
-export function showNotice(message, isHTML = false) {
-  if (isHTML) {
-    toast(<HTMLToastContent htmlContent={message} />, showNoticeOptions);
-  } else {
-    toast.info(message, showNoticeOptions);
-  }
 }
 
 export function openPage(url) {

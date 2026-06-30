@@ -14,16 +14,7 @@ func notifyRootUser(subject string, content string) {
 		err := message.SendMessage(subject, content, content)
 		if err != nil {
 			logger.Log.Errorf("failed to send message: %s", err.Error())
-		} else {
-			return
 		}
-	}
-	if config.RootUserEmail == "" {
-		config.RootUserEmail = model.GetRootUserEmail()
-	}
-	err := message.SendEmail(subject, config.RootUserEmail, content)
-	if err != nil {
-		logger.Log.Errorf("failed to send email: %s", err.Error())
 	}
 }
 
@@ -32,15 +23,8 @@ func DisableChannel(channelId int, channelName string, reason string) {
 	model.UpdateChannelStatusById(channelId, model.ChannelStatusAutoDisabled)
 	logger.Log.Infof("channel #%d (%s) has been disabled by rule match: %s", channelId, channelName, reason)
 	subject := fmt.Sprintf("渠道状态变更提醒")
-	content := message.EmailTemplate(
-		subject,
-		fmt.Sprintf(`
-			<p>您好！</p>
-			<p>渠道「<strong>%s</strong>」（#%d）已被禁用。</p>
-			<p>禁用原因：</p>
-			<p style="background-color: #f8f8f8; padding: 10px; border-radius: 4px;">%s</p>
-		`, channelName, channelId, reason),
-	)
+	content := fmt.Sprintf(`渠道「%s」（#%d）已被禁用。
+禁用原因：%s`, channelName, channelId, reason)
 	notifyRootUser(subject, content)
 }
 
@@ -48,15 +32,9 @@ func MetricDisableChannel(channelId int, successRate float64) {
 	model.UpdateChannelStatusById(channelId, model.ChannelStatusAutoDisabled)
 	logger.Log.Infof("channel #%d has been disabled due to low success rate: %.2f", channelId, successRate*100)
 	subject := fmt.Sprintf("渠道状态变更提醒")
-	content := message.EmailTemplate(
-		subject,
-		fmt.Sprintf(`
-			<p>您好！</p>
-			<p>渠道 #%d 已被系统自动禁用。</p>
-			<p>禁用原因：</p>
-			<p style="background-color: #f8f8f8; padding: 10px; border-radius: 4px;">该渠道在最近 %d 次调用中成功率为 <strong>%.2f%%</strong>，低于系统阈值 <strong>%.2f%%</strong>。</p>
-		`, channelId, config.MetricQueueSize, successRate*100, config.MetricSuccessRateThreshold*100),
-	)
+	content := fmt.Sprintf(`渠道 #%d 已被系统自动禁用。
+禁用原因：该渠道在最近 %d 次调用中成功率为 %.2f%%，低于系统阈值 %.2f%%。`,
+		channelId, config.MetricQueueSize, successRate*100, config.MetricSuccessRateThreshold*100)
 	notifyRootUser(subject, content)
 }
 
@@ -65,13 +43,7 @@ func EnableChannel(channelId int, channelName string) {
 	model.UpdateChannelStatusById(channelId, model.ChannelStatusEnabled)
 	logger.Log.Infof("channel #%d has been enabled", channelId)
 	subject := fmt.Sprintf("渠道状态变更提醒")
-	content := message.EmailTemplate(
-		subject,
-		fmt.Sprintf(`
-			<p>您好！</p>
-			<p>渠道「<strong>%s</strong>」（#%d）已被重新启用。</p>
-			<p>您现在可以继续使用该渠道了。</p>
-		`, channelName, channelId),
-	)
+	content := fmt.Sprintf(`渠道「%s」（#%d）已被重新启用。
+您现在可以继续使用该渠道了。`, channelName, channelId)
 	notifyRootUser(subject, content)
 }

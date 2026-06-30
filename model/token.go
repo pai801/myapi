@@ -12,7 +12,6 @@ import (
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/message"
 )
 
 const (
@@ -267,34 +266,6 @@ func PreConsumeTokenQuota(tokenId int, quota int64) (err error) {
 	quotaTooLow := userQuota >= config.QuotaRemindThreshold && userQuota-quota < config.QuotaRemindThreshold
 	noMoreQuota := userQuota-quota <= 0
 	if quotaTooLow || noMoreQuota {
-		go func() {
-			email, err := GetUserEmail(token.UserId)
-			if err != nil {
-				logger.Log.Errorf("failed to fetch user email: " + err.Error())
-			}
-			prompt := "额度提醒"
-			var contentText string
-			if noMoreQuota {
-				contentText = "您的额度已用尽"
-			} else {
-				contentText = "您的额度即将用尽"
-			}
-			if email != "" {
-				content := message.EmailTemplate(
-					prompt,
-					fmt.Sprintf(`
-						<p>您好！</p>
-						<p>%s，当前剩余额度为 <strong>%d</strong>。</p>
-						<p>您的额度即将用尽，请联系管理员。</p>
-						<p>请联系管理员获取更多额度。</p>
-					`, contentText, userQuota),
-				)
-				err = message.SendEmail(prompt, email, content)
-				if err != nil {
-					logger.Log.Errorf("failed to send email: " + err.Error())
-				}
-			}
-		}()
 	}
 	if !token.UnlimitedQuota {
 		err = DecreaseTokenQuota(tokenId, quota)

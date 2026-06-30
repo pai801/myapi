@@ -51,3 +51,14 @@ func SendMessage(title string, description string, content string) error {
 	}
 	return nil
 }
+
+// Notify sends a notification via MessagePusher.
+// notifyMethod is kept for API compatibility but ignored (only MessagePusher is supported).
+func Notify(notifyMethod string, title string, description string, content string) error {
+	return SendMessage(title, description, content)
+}
+
+const (
+	ByAll           = "all"
+	ByMessagePusher = "message_pusher"
+)
