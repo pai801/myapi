@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useContext, useEffect } from 'react';
+import React, { lazy, Suspense, useContext, useEffect, useRef } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import Loading from './components/Loading';
 import User from './pages/User';
@@ -52,7 +52,11 @@ function App() {
     }
   };
 
+  const initRef = useRef(false);
+
   useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
     loadUser();
     loadStatus().then();
     let systemName = getSystemName();

@@ -3,12 +3,14 @@ package xai
 //https://console.x.ai/
 
 var ModelList = []string{
-	"grok-2",
-	"grok-vision-beta",
-	"grok-2-vision-1212",
-	"grok-2-vision",
-	"grok-2-vision-latest",
-	"grok-2-1212",
-	"grok-2-latest",
-	"grok-beta",
+	// Grok 4.x (current as of mid-2026)
+	"grok-4.3",
+	"grok-build-0.1",
+	// Grok 4.x legacy (retired May 2026)
+	"grok-4-1-fast-reasoning",
+	"grok-4-1-fast-non-reasoning",
+	"grok-4-fast-reasoning",
+	"grok-4-fast-non-reasoning",
+	// Image generation
+	"grok-imagine-image",
 }

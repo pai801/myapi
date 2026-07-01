@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useState } from 'react';
+import React, { useContext, useEffect, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Grid, Header } from 'semantic-ui-react';
 import { API, showError, timestamp2string } from '../../helpers';
@@ -30,7 +30,11 @@ const Home = () => {
     setHomePageContentLoaded(true);
   };
 
+  const initRef = useRef(false);
+
   useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
     displayHomePageContent().then();
   }, []);
 

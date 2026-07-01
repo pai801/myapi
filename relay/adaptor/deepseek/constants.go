@@ -1,6 +1,7 @@
 package deepseek
 
 var ModelList = []string{
-	"deepseek-chat",
-	"deepseek-reasoner",
+	// Latest V4 family
+	"deepseek-v4-pro",
+	"deepseek-v4-flash",
 }
