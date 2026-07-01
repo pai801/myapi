@@ -109,14 +109,11 @@ func (user *User) Insert(ctx context.Context) error {
 			return err
 		}
 	}
-	user.Quota = config.QuotaForNewUser
+	user.Quota = 0
 	user.AccessToken = random.GetUUID()
 	result := DB.Create(user)
 	if result.Error != nil {
 		return result.Error
-	}
-	if config.QuotaForNewUser > 0 {
-		RecordLog(ctx, user.Id, LogTypeSystem, fmt.Sprintf("新用户注册赠送 %s", common.LogQuota(config.QuotaForNewUser)))
 	}
 	// create default token
 	cleanToken := Token{

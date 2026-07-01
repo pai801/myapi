@@ -44,9 +44,6 @@ func GetSubscription(c *gin.Context) {
 	}
 	quota := remainQuota + usedQuota
 	amount := float64(quota)
-	if config.DisplayInCurrencyEnabled {
-		amount /= config.QuotaPerUnit
-	}
 	if token != nil && token.UnlimitedQuota {
 		amount = 100000000
 	}
@@ -85,9 +82,6 @@ func GetUsage(c *gin.Context) {
 		return
 	}
 	amount := float64(quota)
-	if config.DisplayInCurrencyEnabled {
-		amount /= config.QuotaPerUnit
-	}
 	usage := OpenAIUsageResponse{
 		Object:     "list",
 		TotalUsage: amount * 100,

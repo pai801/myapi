@@ -550,10 +550,10 @@ func preConsumeQuotaForResponses(ctx context.Context, promptTokens int, ratio fl
 
 	// 对于流式请求，预扣费可以设置一个较小的值
 	if meta.IsStream {
-		preConsumedQuota = config.PreConsumedQuota
+		preConsumedQuota = 500
 	} else {
 		// 非流式请求：基于 prompt tokens 计算预扣费
-		preConsumedTokens := config.PreConsumedQuota + int64(promptTokens)
+		preConsumedTokens := 500 + int64(promptTokens)
 		preConsumedQuota = int64(math.Ceil(float64(preConsumedTokens) * ratio))
 	}
 

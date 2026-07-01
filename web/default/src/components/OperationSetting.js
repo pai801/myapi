@@ -5,17 +5,13 @@ import {
   API,
   showError,
   showSuccess,
-  timestamp2string,
   verifyJSON,
 } from '../helpers';
 
 const OperationSetting = () => {
   const { t } = useTranslation();
-  let now = new Date();
   let [inputs, setInputs] = useState({
-    QuotaForNewUser: 0,
     QuotaRemindThreshold: 0,
-    PreConsumedQuota: 0,
     ModelRatio: '',
     CompletionRatio: '',
     GroupRatio: '',
@@ -25,16 +21,12 @@ const OperationSetting = () => {
     AutomaticEnableChannelEnabled: '',
     ChannelDisableThreshold: 0,
     LogConsumeEnabled: '',
-    DisplayInCurrencyEnabled: '',
     DisplayTokenStatEnabled: '',
     ApproximateTokenEnabled: '',
     RetryTimes: 0,
   });
   const [originInputs, setOriginInputs] = useState({});
   let [loading, setLoading] = useState(false);
-  let [historyTimestamp, setHistoryTimestamp] = useState(
-    timestamp2string(now.getTime() / 1000 - 30 * 24 * 3600)
-  ); // a month ago
 
   const getOptions = async () => {
     const res = await API.get('/api/option/');
@@ -143,14 +135,6 @@ const OperationSetting = () => {
           await updateOption('ModelEndpointTypes', inputs.ModelEndpointTypes);
         }
         break;
-      case 'quota':
-        if (originInputs['QuotaForNewUser'] !== inputs.QuotaForNewUser) {
-          await updateOption('QuotaForNewUser', inputs.QuotaForNewUser);
-        }
-        if (originInputs['PreConsumedQuota'] !== inputs.PreConsumedQuota) {
-          await updateOption('PreConsumedQuota', inputs.PreConsumedQuota);
-        }
-        break;
       case 'general':
         if (originInputs['QuotaPerUnit'] !== inputs.QuotaPerUnit) {
           await updateOption('QuotaPerUnit', inputs.QuotaPerUnit);
@@ -162,54 +146,10 @@ const OperationSetting = () => {
     }
   };
 
-  const deleteHistoryLogs = async () => {
-    console.log(inputs);
-    const res = await API.delete(
-      `/api/log/?target_timestamp=${Date.parse(historyTimestamp) / 1000}`
-    );
-    const { success, message, data } = res.data;
-    if (success) {
-      showSuccess(`${data} 条日志已清理！`);
-      return;
-    }
-    showError('日志清理失败：' + message);
-  };
-
   return (
     <Grid columns={1}>
       <Grid.Column>
         <Form loading={loading}>
-          <Header as='h3'>{t('setting.operation.quota.title')}</Header>
-          <Form.Group widths='equal'>
-            <Form.Input
-              label={t('setting.operation.quota.new_user')}
-              name='QuotaForNewUser'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.QuotaForNewUser}
-              type='number'
-              min='0'
-              placeholder={t('setting.operation.quota.new_user_placeholder')}
-            />
-            <Form.Input
-              label={t('setting.operation.quota.pre_consume')}
-              name='PreConsumedQuota'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.PreConsumedQuota}
-              type='number'
-              min='0'
-              placeholder={t('setting.operation.quota.pre_consume_placeholder')}
-            />
-          </Form.Group>
-          <Form.Button
-            onClick={() => {
-              submitConfig('quota').then();
-            }}
-          >
-            {t('setting.operation.quota.buttons.save')}
-          </Form.Button>
-          <Divider />
           <Header as='h3'>{t('setting.operation.ratio.title')}</Header>
           <Form.Group widths='equal'>
             <Form.TextArea
@@ -272,24 +212,6 @@ const OperationSetting = () => {
               onChange={handleInputChange}
             />
           </Form.Group>
-          <Form.Group widths={4}>
-            <Form.Input
-              label={t('setting.operation.log.target_time')}
-              value={historyTimestamp}
-              type='datetime-local'
-              name='history_timestamp'
-              onChange={(e, { name, value }) => {
-                setHistoryTimestamp(value);
-              }}
-            />
-          </Form.Group>
-          <Form.Button
-            onClick={() => {
-              deleteHistoryLogs().then();
-            }}
-          >
-            {t('setting.operation.log.buttons.clean')}
-          </Form.Button>
 
           <Divider />
           <Header as='h3'>{t('setting.operation.monitor.title')}</Header>
@@ -371,12 +293,6 @@ const OperationSetting = () => {
             />
           </Form.Group>
           <Form.Group inline>
-            <Form.Checkbox
-              checked={inputs.DisplayInCurrencyEnabled === 'true'}
-              label={t('setting.operation.general.display_in_currency')}
-              name='DisplayInCurrencyEnabled'
-              onChange={handleInputChange}
-            />
             <Form.Checkbox
               checked={inputs.DisplayTokenStatEnabled === 'true'}
               label={t('setting.operation.general.display_token_stat')}

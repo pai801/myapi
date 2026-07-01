@@ -17,7 +17,6 @@ var ServerAddress = "http://localhost:3000"
 var Footer = ""
 var Logo = ""
 var QuotaPerUnit = 500 * 1000.0 // $0.002 / 1K tokens
-var DisplayInCurrencyEnabled = true
 var DisplayTokenStatEnabled = true
 
 // Any options with "Secret", "Token" in its key won't be return by GetOptions
@@ -47,12 +46,10 @@ var MessagePusherToken = ""
 var TurnstileSiteKey = ""
 var TurnstileSecretKey = ""
 
-var QuotaForNewUser int64 = 0
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false
 var QuotaRemindThreshold int64 = 1000
-var PreConsumedQuota int64 = 500
 var ApproximateTokenEnabled = false
 var RetryTimes = 0
 

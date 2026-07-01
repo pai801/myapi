@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
@@ -67,7 +66,7 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		preConsumedQuota = int64(float64(len(ttsRequest.Input)) * ratio)
 		quota = preConsumedQuota
 	default:
-		preConsumedQuota = int64(float64(config.PreConsumedQuota) * ratio)
+		preConsumedQuota = int64(float64(500) * ratio)
 	}
 	userQuota, err := model.CacheGetUserQuota(ctx, userId)
 	if err != nil {

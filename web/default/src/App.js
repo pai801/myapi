@@ -44,7 +44,6 @@ function App() {
         localStorage.setItem('logo', data.logo);
         localStorage.setItem('footer_html', data.footer_html);
         localStorage.setItem('quota_per_unit', data.quota_per_unit);
-        localStorage.setItem('display_in_currency', data.display_in_currency);
       } else {
         showError(message || '无法正常连接至服务器！');
       }

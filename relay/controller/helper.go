@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
@@ -66,7 +65,7 @@ func getPromptTokens(textRequest *relaymodel.GeneralOpenAIRequest, relayMode int
 }
 
 func getPreConsumedQuota(textRequest *relaymodel.GeneralOpenAIRequest, promptTokens int, ratio float64) int64 {
-	preConsumedTokens := config.PreConsumedQuota + int64(promptTokens)
+	preConsumedTokens := 500 + int64(promptTokens)
 	if textRequest.MaxTokens != 0 {
 		preConsumedTokens += int64(textRequest.MaxTokens)
 	}

@@ -23,7 +23,6 @@ func GetStatus(c *gin.Context) {
 			"turnstile_check":     config.TurnstileCheckEnabled,
 			"turnstile_site_key":  config.TurnstileSiteKey,
 			"quota_per_unit":      config.QuotaPerUnit,
-			"display_in_currency": config.DisplayInCurrencyEnabled,
 		},
 	})
 	return

@@ -40,7 +40,6 @@ func InitOptionMap() {
 	config.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(config.AutomaticEnableChannelEnabled)
 	config.OptionMap["ApproximateTokenEnabled"] = strconv.FormatBool(config.ApproximateTokenEnabled)
 	config.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(config.LogConsumeEnabled)
-	config.OptionMap["DisplayInCurrencyEnabled"] = strconv.FormatBool(config.DisplayInCurrencyEnabled)
 	config.OptionMap["DisplayTokenStatEnabled"] = strconv.FormatBool(config.DisplayTokenStatEnabled)
 	config.OptionMap["ChannelDisableThreshold"] = strconv.FormatFloat(config.ChannelDisableThreshold, 'f', -1, 64)
 	config.OptionMap["About"] = ""
@@ -53,9 +52,7 @@ func InitOptionMap() {
 	config.OptionMap["MessagePusherToken"] = ""
 	config.OptionMap["TurnstileSiteKey"] = ""
 	config.OptionMap["TurnstileSecretKey"] = ""
-	config.OptionMap["QuotaForNewUser"] = strconv.FormatInt(config.QuotaForNewUser, 10)
 	config.OptionMap["QuotaRemindThreshold"] = strconv.FormatInt(config.QuotaRemindThreshold, 10)
-	config.OptionMap["PreConsumedQuota"] = strconv.FormatInt(config.PreConsumedQuota, 10)
 	config.OptionMap["ModelRatio"] = billingratio.ModelRatio2JSONString()
 	config.OptionMap["GroupRatio"] = billingratio.GroupRatio2JSONString()
 	config.OptionMap["CompletionRatio"] = billingratio.CompletionRatio2JSONString()
@@ -121,8 +118,6 @@ func updateOptionMap(key string, value string) (err error) {
 			config.ApproximateTokenEnabled = boolValue
 		case "LogConsumeEnabled":
 			config.LogConsumeEnabled = boolValue
-		case "DisplayInCurrencyEnabled":
-			config.DisplayInCurrencyEnabled = boolValue
 		case "DisplayTokenStatEnabled":
 			config.DisplayTokenStatEnabled = boolValue
 		}
@@ -144,12 +139,8 @@ func updateOptionMap(key string, value string) (err error) {
 		config.TurnstileSiteKey = value
 	case "TurnstileSecretKey":
 		config.TurnstileSecretKey = value
-	case "QuotaForNewUser":
-		config.QuotaForNewUser, _ = strconv.ParseInt(value, 10, 64)
 	case "QuotaRemindThreshold":
 		config.QuotaRemindThreshold, _ = strconv.ParseInt(value, 10, 64)
-	case "PreConsumedQuota":
-		config.PreConsumedQuota, _ = strconv.ParseInt(value, 10, 64)
 	case "RetryTimes":
 		config.RetryTimes, _ = strconv.Atoi(value)
 	case "ModelRatio":
