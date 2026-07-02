@@ -11,18 +11,12 @@ import {
 const OperationSetting = () => {
   const { t } = useTranslation();
   let [inputs, setInputs] = useState({
-    QuotaRemindThreshold: 0,
     ModelRatio: '',
     CompletionRatio: '',
-    GroupRatio: '',
     ModelEndpointTypes: '',
-    QuotaPerUnit: 0,
     AutomaticDisableChannelEnabled: '',
     AutomaticEnableChannelEnabled: '',
     ChannelDisableThreshold: 0,
-    LogConsumeEnabled: '',
-    DisplayTokenStatEnabled: '',
-    ApproximateTokenEnabled: '',
     RetryTimes: 0,
   });
   const [originInputs, setOriginInputs] = useState({});
@@ -36,7 +30,6 @@ const OperationSetting = () => {
       data.forEach((item) => {
         if (
           item.key === 'ModelRatio' ||
-          item.key === 'GroupRatio' ||
           item.key === 'CompletionRatio' ||
           item.key === 'ModelEndpointTypes'
         ) {
@@ -96,14 +89,6 @@ const OperationSetting = () => {
             inputs.ChannelDisableThreshold
           );
         }
-        if (
-          originInputs['QuotaRemindThreshold'] !== inputs.QuotaRemindThreshold
-        ) {
-          await updateOption(
-            'QuotaRemindThreshold',
-            inputs.QuotaRemindThreshold
-          );
-        }
         break;
       case 'ratio':
         if (originInputs['ModelRatio'] !== inputs.ModelRatio) {
@@ -112,13 +97,6 @@ const OperationSetting = () => {
             return;
           }
           await updateOption('ModelRatio', inputs.ModelRatio);
-        }
-        if (originInputs['GroupRatio'] !== inputs.GroupRatio) {
-          if (!verifyJSON(inputs.GroupRatio)) {
-            showError('分组倍率不是合法的 JSON 字符串');
-            return;
-          }
-          await updateOption('GroupRatio', inputs.GroupRatio);
         }
         if (originInputs['CompletionRatio'] !== inputs.CompletionRatio) {
           if (!verifyJSON(inputs.CompletionRatio)) {
@@ -136,9 +114,6 @@ const OperationSetting = () => {
         }
         break;
       case 'general':
-        if (originInputs['QuotaPerUnit'] !== inputs.QuotaPerUnit) {
-          await updateOption('QuotaPerUnit', inputs.QuotaPerUnit);
-        }
         if (originInputs['RetryTimes'] !== inputs.RetryTimes) {
           await updateOption('RetryTimes', inputs.RetryTimes);
         }
@@ -175,17 +150,6 @@ const OperationSetting = () => {
           </Form.Group>
           <Form.Group widths='equal'>
             <Form.TextArea
-              label={t('setting.operation.ratio.group.title')}
-              name='GroupRatio'
-              onChange={handleInputChange}
-              style={{ minHeight: 250, fontFamily: 'JetBrains Mono, Consolas' }}
-              autoComplete='new-password'
-              value={inputs.GroupRatio}
-              placeholder={t('setting.operation.ratio.group.placeholder')}
-            />
-          </Form.Group>
-          <Form.Group widths='equal'>
-            <Form.TextArea
               label={t('setting.operation.ratio.endpoint_types.title')}
               name='ModelEndpointTypes'
               onChange={handleInputChange}
@@ -203,17 +167,6 @@ const OperationSetting = () => {
             {t('setting.operation.ratio.buttons.save')}
           </Form.Button>
           <Divider />
-          <Header as='h3'>{t('setting.operation.log.title')}</Header>
-          <Form.Group inline>
-            <Form.Checkbox
-              checked={inputs.LogConsumeEnabled === 'true'}
-              label={t('setting.operation.log.enable_consume')}
-              name='LogConsumeEnabled'
-              onChange={handleInputChange}
-            />
-          </Form.Group>
-
-          <Divider />
           <Header as='h3'>{t('setting.operation.monitor.title')}</Header>
           <Form.Group widths={3}>
             <Form.Input
@@ -226,18 +179,6 @@ const OperationSetting = () => {
               min='0'
               placeholder={t(
                 'setting.operation.monitor.max_response_time_placeholder'
-              )}
-            />
-            <Form.Input
-              label={t('setting.operation.monitor.quota_reminder')}
-              name='QuotaRemindThreshold'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.QuotaRemindThreshold}
-              type='number'
-              min='0'
-              placeholder={t(
-                'setting.operation.monitor.quota_reminder_placeholder'
               )}
             />
           </Form.Group>
@@ -267,18 +208,6 @@ const OperationSetting = () => {
           <Header as='h3'>{t('setting.operation.general.title')}</Header>
           <Form.Group widths={3}>
             <Form.Input
-              label={t('setting.operation.general.quota_per_unit')}
-              name='QuotaPerUnit'
-              onChange={handleInputChange}
-              autoComplete='new-password'
-              value={inputs.QuotaPerUnit}
-              type='number'
-              step='0.01'
-              placeholder={t(
-                'setting.operation.general.quota_per_unit_placeholder'
-              )}
-            />
-            <Form.Input
               label={t('setting.operation.general.retry_times')}
               name='RetryTimes'
               type={'number'}
@@ -290,20 +219,6 @@ const OperationSetting = () => {
               placeholder={t(
                 'setting.operation.general.retry_times_placeholder'
               )}
-            />
-          </Form.Group>
-          <Form.Group inline>
-            <Form.Checkbox
-              checked={inputs.DisplayTokenStatEnabled === 'true'}
-              label={t('setting.operation.general.display_token_stat')}
-              name='DisplayTokenStatEnabled'
-              onChange={handleInputChange}
-            />
-            <Form.Checkbox
-              checked={inputs.ApproximateTokenEnabled === 'true'}
-              label={t('setting.operation.general.approximate_token')}
-              name='ApproximateTokenEnabled'
-              onChange={handleInputChange}
             />
           </Form.Group>
           <Form.Button

@@ -1,17 +1,13 @@
 {
   "header": {
-    "home": "首页",
     "channel": "渠道",
     "token": "令牌",
     "user": "用户",
     "dashboard": "总览",
     "log": "日志",
     "setting": "设置",
-    "about": "关于",
-    "chat": "聊天",
     "login": "登录",
-    "logout": "注销",
-    "register": "注册"
+    "logout": "注销"
   },
   "channel": {
     "title": "管理渠道",
@@ -57,7 +53,8 @@
       "confirm_delete_disabled": "确认删除",
       "refresh": "刷新",
       "show_detail": "详情",
-      "hide_detail": "隐藏详情"
+      "hide_detail": "隐藏详情",
+      "reset": "重置"
     },
     "messages": {
       "test_success": "渠道 {{name}} 测试成功，模型 {{model}}，耗时 {{time}} 秒，模型输出：{{message}}",
@@ -141,18 +138,12 @@
     "table": {
       "name": "名称",
       "status": "状态",
-      "used_quota": "已用额度",
-      "remain_quota": "剩余额度",
       "created_time": "创建时间",
-      "expired_time": "过期时间",
       "actions": "操作",
       "no_name": "无",
-      "never_expire": "永不过期",
-      "unlimited": "无限制",
       "status_enabled": "已启用",
       "status_disabled": "已禁用",
       "status_expired": "已过期",
-      "status_depleted": "已耗尽",
       "status_unknown": "未知状态"
     },
     "buttons": {
@@ -177,26 +168,13 @@
       "ip_limit_placeholder": "请输入允许访问的网段，例如：192.168.0.0/24，请使用英文逗号分隔多个网段",
       "model_mapping": "模型映射",
       "model_mapping_placeholder": "模型名称映射，如 {\"gpt-4\": \"gpt-4-turbo\"}（JSON 格式）",
-      "expire_time": "过期时间",
-      "expire_time_placeholder": "请输入过期时间，格式为 yyyy-MM-dd HH:mm:ss，-1 表示无限制",
-      "quota_notice": "注意，令牌的额度仅用于限制令牌本身的最大额度使用量，实际的使用受到账户的剩余额度限制。",
-      "quota": "额度",
-      "quota_placeholder": "请输入额度",
       "buttons": {
-        "never_expire": "永不过期",
-        "expire_1_month": "一个月后过期",
-        "expire_1_day": "一天后过期",
-        "expire_1_hour": "一小时后过期",
-        "expire_1_minute": "一分钟后过期",
-        "unlimited_quota": "设为无限额度",
-        "cancel_unlimited": "取消无限额度",
         "submit": "提交",
         "cancel": "取消"
       },
       "messages": {
         "update_success": "令牌更新成功！",
-        "create_success": "令牌创建成功，请在列表页面点击复制获取令牌！",
-        "expire_time_invalid": "过期时间格式错误！"
+        "create_success": "令牌创建成功，请在列表页面点击复制获取令牌！"
       }
     },
     "copy_options": {
@@ -213,9 +191,7 @@
     },
     "sort": {
       "placeholder": "排序方式",
-      "default": "默认排序",
-      "by_remain": "按剩余额度排序",
-      "by_used": "按已用额度排序"
+      "default": "默认排序"
     }
   },
   "log": {
@@ -236,6 +212,7 @@
     "table": {
       "time": "时间",
       "channel": "渠道",
+      "channel_name": "渠道名",
       "type": "类型",
       "model": "模型",
       "username": "用户名",
@@ -254,14 +231,27 @@
       "quota": "额度",
       "detail": "详情"
     },
+    "messages": {
+      "detail_failed": "获取日志详情失败"
+    },
     "buttons": {
       "query": "操作",
       "submit": "查询",
       "refresh": "刷新"
     }
   },
+  "pagination": {
+    "jump_to": "跳至",
+    "page": "页",
+    "page_placeholder": "页码",
+    "first_page": "首页",
+    "last_page": "末页",
+    "first_page_aria": "第一页",
+    "last_page_aria": "最后一页"
+  },
   "user": {
     "title": "用户管理",
+    "search": "搜索用户 ID、用户名、显示名称或邮箱...",
     "edit": {
       "title": "更新用户信息",
       "username": "用户名",
@@ -270,21 +260,19 @@
       "password_placeholder": "请输入新的密码，最短 8 位",
       "display_name": "显示名称",
       "display_name_placeholder": "请输入新的显示名称",
-      "group": "分组",
-      "group_placeholder": "请选择分组",
-      "group_addition": "请在系统设置页面编辑分组倍率以添加新的分组：",
-      "quota": "剩余额度",
-      "quota_placeholder": "请输入新的剩余额度",
       "github_id": "已绑定的 GitHub 账户",
       "github_id_placeholder": "此项只读，需要用户通过个人设置页面的相关绑定按钮进行绑定，不可直接修改",
       "wechat_id": "已绑定的微信账户",
       "wechat_id_placeholder": "此项只读，需要用户通过个人设置页面的相关绑定按钮进行绑定，不可直接修改",
       "email": "已绑定的邮箱账户",
       "email_placeholder": "此项只读，需要用户通过个人设置页面的相关绑定按钮进行绑定，不可直接修改",
+      "quota": "额度",
+      "quota_placeholder": "请输入用户额度",
       "buttons": {
         "submit": "提交",
         "cancel": "取消"
-      }
+      },
+      "quota_invalid": "请输入有效的额度数值"
     },
     "add": {
       "title": "创建新用户账户"
@@ -294,46 +282,26 @@
       "create_success": "用户账户创建成功！",
       "operation_success": "操作成功完成！"
     },
-    "search": "搜索用户...",
     "table": {
       "id": "ID",
       "username": "用户名",
-      "group": "分组",
       "quota": "额度",
-      "role_text": "角色",
-      "status_text": "状态",
-      "actions": "操作",
       "remaining_quota": "剩余额度",
       "used_quota": "已用额度",
       "request_count": "请求次数",
-      "role_types": {
-        "normal": "普通用户",
-        "admin": "管理员",
-        "super_admin": "超级管理员",
-        "unknown": "未知身份"
-      },
+      "status_text": "状态",
+      "actions": "操作",
       "status_types": {
         "activated": "已激活",
         "banned": "已封禁",
         "unknown": "未知状态"
-      },
-      "sort": {
-        "default": "默认排序",
-        "by_quota": "按剩余额度排序",
-        "by_used_quota": "按已用额度排序",
-        "by_request_count": "按请求次数排序"
-      },
-      "sort_by": "排序方式"
+      }
     },
     "buttons": {
-      "add": "添加新的用户",
-      "delete": "删除",
-      "delete_user": "删除用户",
+      "add": "添加用户",
       "enable": "启用",
       "disable": "禁用",
-      "edit": "编辑",
-      "promote": "提升",
-      "demote": "降级"
+      "edit": "编辑"
     }
   },
   "dashboard": {
@@ -364,8 +332,7 @@
     "tabs": {
       "personal": "个人设置",
       "operation": "运营设置",
-      "system": "系统设置",
-      "other": "其他设置"
+      "system": "系统设置"
     },
     "personal": {
       "general": {
@@ -380,9 +347,12 @@
     "system": {
       "general": {
         "title": "通用设置",
+        "system_name": "系统名称",
+        "system_name_placeholder": "请输入系统名称",
         "server_address": "服务器地址",
         "server_address_placeholder": "例如：https://yourdomain.com",
         "buttons": {
+          "save_name": "设置系统名称",
           "update": "更新服务器地址"
         }
       },
@@ -500,11 +470,7 @@
         },
         "completion": {
           "title": "补全倍率",
-          "placeholder": "为一个 JSON 文本，键为模型名称，值为倍率，此处的倍率设置是模型补全倍率相较于提示倍率的比例，使用该设置可强制覆盖 One API 的内部比例"
-        },
-        "group": {
-          "title": "分组倍率",
-          "placeholder": "为一个 JSON 文本，键为分组名称，值为倍率"
+          "placeholder": "为一个 JSON 文本，键为模型名称，值为倍率，此处的倍率设置是模型补全倍率相较于提示倍率的比例，使用该设置可强制覆盖 MyApi 的内部比例"
         },
         "endpoint_types": {
           "title": "模型端点类型",
@@ -514,16 +480,10 @@
           "save": "保存倍率设置"
         }
       },
-      "log": {
-        "title": "日志设置",
-        "enable_consume": "启用额度消费日志记录"
-      },
       "monitor": {
         "title": "监控设置",
         "max_response_time": "最长响应时间",
         "max_response_time_placeholder": "单位秒，当运行渠道全部测试时，超过此时间将自动禁用渠道",
-        "quota_reminder": "额度提醒阈值",
-        "quota_reminder_placeholder": "低于此额度时将发送邮件提醒用户",
         "auto_disable": "失败时自动禁用渠道",
         "auto_enable": "成功时自动启用渠道",
         "buttons": {
@@ -534,84 +494,24 @@
         "title": "通用设置",
         "chat_link": "聊天页面链接",
         "chat_link_placeholder": "例如 ChatGPT Next Web 的部署地址",
-        "quota_per_unit": "单位美元额度",
-        "quota_per_unit_placeholder": "一单位货币能兑换的额度",
         "retry_times": "失败重试次数",
         "retry_times_placeholder": "失败重试次数",
-        "display_token_stat": "Billing 相关 API 显示令牌额度而非用户额度",
-        "approximate_token": "使用近似的方式估算 token 数以减少计算量",
         "buttons": {
           "save": "保存通用设置"
         }
       }
-    },
-    "other": {
-      "notice": {
-        "title": "公告设置",
-        "content": "公告内容",
-        "content_placeholder": "在此输入新的公告内容，支持 Markdown & HTML 代码",
-        "buttons": {
-          "save": "保存公告"
-        }
-      },
-      "system": {
-        "title": "系统设置",
-        "name": "系统名称",
-        "name_placeholder": "请输入系统名称",
-        "logo": "Logo 图片地址",
-        "logo_placeholder": "在此输入 Logo 图片地址",
-        "theme": {
-          "title": "主题名称",
-          "link": "当前可用主题",
-          "placeholder": "请输入主题名称"
-        },
-        "buttons": {
-          "save_name": "设置系统名称",
-          "save_logo": "设置 Logo",
-          "save_theme": "设置主题（重启生效）"
-        }
-      },
-      "content": {
-        "title": "内容设置",
-        "homepage": {
-          "title": "首页内容",
-          "placeholder": "在此输入首页内容，支持 Markdown & HTML 代码，设置后首页的状态信息将不再显示。如果输入的是一个链接，则会使用该链接作为 iframe 的 src 属性，这允许你设置任意网页作为首页。"
-        },
-        "about": {
-          "title": "关于",
-          "placeholder": "在此输入新的关于内容，支持 Markdown & HTML 代码。如果输入的是一个链接，则会使用该链接作为 iframe 的 src 属性，这允许你设置任意网页作为关于页面。"
-        },
-        "footer": {
-          "title": "页脚",
-          "placeholder": "在此输入新的页脚，留空则使用默认页脚，支持 HTML 代码"
-        },
-        "buttons": {
-          "save_homepage": "保存首页内容",
-          "save_about": "保存关于",
-          "save_footer": "设置页脚"
-        }
-      },
-      "copyright": {
-        "notice": "移除 One API 的版权标识必须首先获得授权，项目维护需要花费大量精力，如果本项目对你有意义，请主动支持本项目。"
-      }
     }
-  },
-  "about": {
-    "title": "关于",
-    "description": "One API 是一个开源的接口管理和代理平台。",
-    "repository": "项目地址：",
-    "loading_failed": "加载失败"
   },
   "footer": {
     "built_by": "由",
     "built_by_name": "JustSong",
-    "license": "构建，源代码遵循",
+    "license": "基于One Api构建，源代码遵循",
     "mit": "MIT 协议"
   },
   "home": {
     "welcome": {
-      "title": "欢迎使用 One API",
-      "description": "One API 是一个 LLM API 接口管理和分发系统，可以帮助您更好地管理和使用各大厂商的 LLM API。",
+      "title": "欢迎使用 MyApi",
+      "description": "MyApi 是一个 LLM API 接口管理和分发系统，可以帮助您更好地管理和使用各大厂商的 LLM API。",
       "login_notice": "如需使用，请先登录或注册。"
     },
     "system_status": {
@@ -626,15 +526,11 @@
       },
       "config": {
         "title": "系统配置",
-        "email_verify": "邮箱验证：",
-        "github_oauth": "GitHub 身份验证：",
-        "wechat_login": "微信身份验证：",
         "turnstile": "Turnstile 校验：",
         "enabled": "已启用",
         "disabled": "未启用"
       }
-    },
-    "loading_failed": "加载首页内容失败..."
+    }
   },
   "auth": {
     "login": {

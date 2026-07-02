@@ -39,24 +39,13 @@ func InitOptionMap() {
 	config.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(config.AutomaticDisableChannelEnabled)
 	config.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(config.AutomaticEnableChannelEnabled)
 	config.OptionMap["ApproximateTokenEnabled"] = strconv.FormatBool(config.ApproximateTokenEnabled)
-	config.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(config.LogConsumeEnabled)
-	config.OptionMap["DisplayTokenStatEnabled"] = strconv.FormatBool(config.DisplayTokenStatEnabled)
-	config.OptionMap["ChannelDisableThreshold"] = strconv.FormatFloat(config.ChannelDisableThreshold, 'f', -1, 64)
-	config.OptionMap["About"] = ""
-	config.OptionMap["HomePageContent"] = ""
-	config.OptionMap["Footer"] = config.Footer
 	config.OptionMap["SystemName"] = config.SystemName
-	config.OptionMap["Logo"] = config.Logo
-	config.OptionMap["ServerAddress"] = ""
-	config.OptionMap["MessagePusherAddress"] = ""
-	config.OptionMap["MessagePusherToken"] = ""
+	config.OptionMap["ChannelDisableThreshold"] = strconv.FormatFloat(config.ChannelDisableThreshold, 'f', -1, 64)
+	config.OptionMap["ServerAddress"] = config.ServerAddress
 	config.OptionMap["TurnstileSiteKey"] = ""
 	config.OptionMap["TurnstileSecretKey"] = ""
-	config.OptionMap["QuotaRemindThreshold"] = strconv.FormatInt(config.QuotaRemindThreshold, 10)
 	config.OptionMap["ModelRatio"] = billingratio.ModelRatio2JSONString()
-	config.OptionMap["GroupRatio"] = billingratio.GroupRatio2JSONString()
 	config.OptionMap["CompletionRatio"] = billingratio.CompletionRatio2JSONString()
-	config.OptionMap["QuotaPerUnit"] = strconv.FormatFloat(config.QuotaPerUnit, 'f', -1, 64)
 	config.OptionMap["RetryTimes"] = strconv.Itoa(config.RetryTimes)
 	config.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
@@ -116,43 +105,25 @@ func updateOptionMap(key string, value string) (err error) {
 			config.AutomaticEnableChannelEnabled = boolValue
 		case "ApproximateTokenEnabled":
 			config.ApproximateTokenEnabled = boolValue
-		case "LogConsumeEnabled":
-			config.LogConsumeEnabled = boolValue
-		case "DisplayTokenStatEnabled":
-			config.DisplayTokenStatEnabled = boolValue
 		}
 	}
 	switch key {
 	case "ServerAddress":
 		config.ServerAddress = value
-	case "Footer":
-		config.Footer = value
 	case "SystemName":
 		config.SystemName = value
-	case "Logo":
-		config.Logo = value
-	case "MessagePusherAddress":
-		config.MessagePusherAddress = value
-	case "MessagePusherToken":
-		config.MessagePusherToken = value
 	case "TurnstileSiteKey":
 		config.TurnstileSiteKey = value
 	case "TurnstileSecretKey":
 		config.TurnstileSecretKey = value
-	case "QuotaRemindThreshold":
-		config.QuotaRemindThreshold, _ = strconv.ParseInt(value, 10, 64)
 	case "RetryTimes":
 		config.RetryTimes, _ = strconv.Atoi(value)
 	case "ModelRatio":
 		err = billingratio.UpdateModelRatioByJSONString(value)
-	case "GroupRatio":
-		err = billingratio.UpdateGroupRatioByJSONString(value)
 	case "CompletionRatio":
 		err = billingratio.UpdateCompletionRatioByJSONString(value)
 	case "ChannelDisableThreshold":
 		config.ChannelDisableThreshold, _ = strconv.ParseFloat(value, 64)
-	case "QuotaPerUnit":
-		config.QuotaPerUnit, _ = strconv.ParseFloat(value, 64)
 	case ModelEndpointTypesKey:
 		updateModelEndpointTypesMap(value)
 	}

@@ -15,9 +15,6 @@ const SystemSetting = () => {
   let [inputs, setInputs] = useState({
     PasswordLoginEnabled: '',
     ServerAddress: '',
-    Footer: '',
-    MessagePusherAddress: '',
-    MessagePusherToken: '',
     TurnstileCheckEnabled: '',
     TurnstileSiteKey: '',
     TurnstileSecretKey: '',
@@ -91,6 +88,10 @@ const SystemSetting = () => {
     }
   };
 
+  const submitSystemName = async () => {
+    await updateOption('SystemName', inputs.SystemName);
+  };
+
   const submitServerAddress = async () => {
     let ServerAddress = removeTrailingSlash(inputs.ServerAddress);
     await updateOption('ServerAddress', ServerAddress);
@@ -113,6 +114,21 @@ const SystemSetting = () => {
       <Grid.Column>
         <Form loading={loading}>
           <Header as='h3'>{t('setting.system.general.title')}</Header>
+          <Form.Group widths='equal'>
+            <Form.Input
+              label={t('setting.system.general.system_name')}
+              placeholder={t(
+                'setting.system.general.system_name_placeholder'
+              )}
+              value={inputs.SystemName || ''}
+              name='SystemName'
+              onChange={handleInputChange}
+            />
+          </Form.Group>
+          <Form.Button onClick={submitSystemName}>
+            {t('setting.system.general.buttons.save_name')}
+          </Form.Button>
+
           <Form.Group widths='equal'>
             <Form.Input
               label={t('setting.system.general.server_address')}

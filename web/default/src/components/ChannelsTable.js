@@ -658,7 +658,7 @@ const ChannelsTable = () => {
                           manageChannel(channel.id, 'reset', idx);
                         }}
                       >
-                        重置
+                        {t('channel.buttons.reset')}
                       </Button>
                       <Button
                         size={'tiny'}

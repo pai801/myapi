@@ -153,15 +153,6 @@ sudo service nginx restart
 
 より詳細なデプロイのチュートリアルについては、[このページ](https://iamazing.cn/page/how-to-deploy-a-website) を参照してください。
 
-### マルチマシンデプロイ
-1. すべてのサーバに同じ `SESSION_SECRET` を設定する。
-2. `SQL_DSN` を設定し、SQLite の代わりに MySQL を使用する。すべてのサーバは同じデータベースに接続する。
-3. マスターノード以外のノードの `NODE_TYPE` を `slave` に設定する。
-4. データベースから定期的に設定を同期するサーバーには `SYNC_FREQUENCY` を設定する。
-5. マスター以外のノードでは、オプションで `FRONTEND_BASE_URL` を設定して、ページ要求をマスターサーバーにリダイレクトすることができます。
-6. マスター以外のノードには Redis を個別にインストールし、`REDIS_CONN_STRING` を設定して、キャッシュの有効期限が切れていないときにデータベースにゼロレイテンシーでアクセスできるようにする。
-7. メインサーバーでもデータベースへのアクセスが高レイテンシになる場合は、Redis を有効にし、`SYNC_FREQUENCY` を設定してデータベースから定期的に設定を同期する必要がある。
-
 Please refer to the [environment variables](#environment-variables) section for details on using environment variables.
 
 ### コントロールパネル（例: Baota）への展開
@@ -247,8 +238,6 @@ graph LR
     + 例: `FRONTEND_BASE_URL=https://openai.justsong.cn`
 6. `SYNC_FREQUENCY`: 設定された場合、システムは定期的にデータベースからコンフィグを秒単位で同期する。設定されていない場合、同期は行われません。
     + 例: `SYNC_FREQUENCY=60`
-7. `NODE_TYPE`: 設定すると、ノードのタイプを指定する。有効な値は `master` と `slave` である。設定されていない場合、デフォルトは `master`。
-    + 例: `NODE_TYPE=slave`
 8. `CHANNEL_UPDATE_FREQUENCY`: 設定すると、チャンネル残高を分単位で定期的に更新する。設定されていない場合、更新は行われません。
     + 例: `CHANNEL_UPDATE_FREQUENCY=1440`
 9. `CHANNEL_TEST_FREQUENCY`: 設定すると、チャンネルを定期的にテストする。設定されていない場合、テストは行われません。

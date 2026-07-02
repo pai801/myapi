@@ -174,8 +174,7 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	}
 
 	modelRatio := billingratio.GetModelRatio(imageModel, meta.ChannelType)
-	groupRatio := billingratio.GetGroupRatio(meta.Group)
-	ratio := modelRatio * groupRatio
+	ratio := modelRatio
 	userQuota, err := model.CacheGetUserQuota(ctx, meta.UserId)
 
 	var quota int64
@@ -187,7 +186,7 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		quota = int64(ratio*imageCostRatio*1000) * int64(imageRequest.N)
 	}
 
-	if userQuota-quota < 0 {
+	if userQuota < quota {
 		logger.Log.Errorf("[%s] %+v", "insufficient_user_quota", errors.New("user quota is not enough"))
 		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 	}
@@ -206,17 +205,15 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 			return
 		}
 
-		err := model.PostConsumeTokenQuota(meta.TokenId, quota)
+		err := model.DecreaseUserQuota(meta.UserId, quota)
 		if err != nil {
-			logger.Log.Errorf("error consuming token remain quota: " + err.Error())
+			logger.Log.Errorf("error decrease user quota: " + err.Error())
 		}
-		err = model.CacheUpdateUserQuota(ctx, meta.UserId)
-		if err != nil {
-			logger.Log.Errorf("error update user quota cache: " + err.Error())
-		}
+		// Force re-read from DB: delete Redis key, then CacheUpdateUserQuota fetches from DB
+		model.PostConsumeResetUserQuotaCache(ctx, meta.UserId, quota)
 		if quota != 0 {
 			tokenName := c.GetString(ctxkey.TokenName)
-			logContent := fmt.Sprintf("倍率：%.2f × %.2f", modelRatio, groupRatio)
+			logContent := fmt.Sprintf("倍率：%.2f", modelRatio)
 			model.RecordConsumeLog(ctx, &model.Log{
 				UserId:           meta.UserId,
 				ChannelId:        meta.ChannelId,

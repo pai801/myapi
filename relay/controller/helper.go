@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -32,6 +31,8 @@ const (
 	CtxKeyResponseBody
 	CtxKeyRequestHeader
 )
+
+var CtxKeyPreConsumedQuota = "pre_consumed_quota"
 
 func getAndValidateTextRequest(c *gin.Context, relayMode int) (*relaymodel.GeneralOpenAIRequest, error) {
 	textRequest := &relaymodel.GeneralOpenAIRequest{}
@@ -64,48 +65,7 @@ func getPromptTokens(textRequest *relaymodel.GeneralOpenAIRequest, relayMode int
 	return 0
 }
 
-func getPreConsumedQuota(textRequest *relaymodel.GeneralOpenAIRequest, promptTokens int, ratio float64) int64 {
-	preConsumedTokens := 500 + int64(promptTokens)
-	if textRequest.MaxTokens != 0 {
-		preConsumedTokens += int64(textRequest.MaxTokens)
-	}
-	return int64(float64(preConsumedTokens) * ratio)
-}
-
-func preConsumeQuota(ctx context.Context, textRequest *relaymodel.GeneralOpenAIRequest, promptTokens int, ratio float64, meta *meta.Meta) (int64, *relaymodel.ErrorWithStatusCode) {
-	preConsumedQuota := getPreConsumedQuota(textRequest, promptTokens, ratio)
-
-	userQuota, err := model.CacheGetUserQuota(ctx, meta.UserId)
-	if err != nil {
-		logger.Log.Errorf("[%s] %+v", "get_user_quota_failed", err)
-		return preConsumedQuota, openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
-	}
-	if userQuota-preConsumedQuota < 0 {
-		logger.Log.Errorf("[%s] %+v", "insufficient_user_quota", errors.New("user quota is not enough"))
-		return preConsumedQuota, openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
-	}
-	err = model.CacheDecreaseUserQuota(meta.UserId, preConsumedQuota)
-	if err != nil {
-		logger.Log.Errorf("[%s] %+v", "decrease_user_quota_failed", err)
-		return preConsumedQuota, openai.ErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
-	}
-	if userQuota > 100*preConsumedQuota {
-		// in this case, we do not pre-consume quota
-		// because the user has enough quota
-		preConsumedQuota = 0
-		//logger.Log.Infof("user %d has enough quota %d, trusted and no need to pre-consume", meta.UserId, userQuota)
-	}
-	if preConsumedQuota > 0 {
-		err := model.PreConsumeTokenQuota(meta.TokenId, preConsumedQuota)
-		if err != nil {
-			logger.Log.Errorf("[%s] %+v", "pre_consume_token_quota_failed", err)
-			return preConsumedQuota, openai.ErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
-		}
-	}
-	return preConsumedQuota, nil
-}
-
-func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.Meta, textRequest *relaymodel.GeneralOpenAIRequest, ratio float64, preConsumedQuota int64, modelRatio float64, groupRatio float64, systemPromptReset bool) {
+func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.Meta, textRequest *relaymodel.GeneralOpenAIRequest, ratio float64, modelRatio float64, systemPromptReset bool) {
 	if usage == nil {
 		logger.Log.Errorf("usage is nil, which is unexpected")
 		return
@@ -125,20 +85,41 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 	}
 	totalTokens := promptTokens + completionTokens
 	if totalTokens == 0 {
-		// in this case, must be some error happened
-		// we cannot just return, because we may have to return the pre-consumed quota
-		quota = 0
+		logger.Log.Warnf("totalTokens is 0 for user %d, model %s, rolling back pre-consumed quota", meta.UserId, textRequest.Model)
+		if preConsumed, ok := ctx.Value(CtxKeyPreConsumedQuota).(int64); ok && preConsumed > 0 {
+			if err := model.IncreaseUserQuota(meta.UserId, preConsumed); err != nil {
+				logger.Log.Errorf("error rolling back pre-consumed quota: " + err.Error())
+			}
+			model.PostConsumeResetUserQuotaCache(ctx, meta.UserId, preConsumed)
+		}
+		return
 	}
-	quotaDelta := quota - preConsumedQuota
-	err := model.PostConsumeTokenQuota(meta.TokenId, quotaDelta)
+
+	// Check pre-consumed quota and adjust by the delta
+	var err error
+	preConsumedQuota := int64(0)
+	if v := ctx.Value(CtxKeyPreConsumedQuota); v != nil {
+		preConsumedQuota = v.(int64)
+	}
+
+	if preConsumedQuota > 0 {
+		diff := quota - preConsumedQuota
+		if diff > 0 {
+			err = model.DecreaseUserQuota(meta.UserId, diff)
+		} else if diff < 0 {
+			err = model.IncreaseUserQuota(meta.UserId, -diff)
+		}
+		// diff == 0: exactly right, no adjustment needed
+	} else {
+		err = model.DecreaseUserQuota(meta.UserId, quota)
+	}
 	if err != nil {
-		logger.Log.Errorf("error consuming token remain quota: " + err.Error())
+		logger.Log.Errorf("error decrease user quota: " + err.Error())
 	}
-	err = model.CacheUpdateUserQuota(ctx, meta.UserId)
-	if err != nil {
-		logger.Log.Errorf("error update user quota cache: " + err.Error())
-	}
-	logContent := fmt.Sprintf("倍率：%.2f × %.2f × %.2f", modelRatio, groupRatio, completionRatio)
+	// DB quota has already been updated above; refresh Redis cache from DB.
+	model.PostConsumeResetUserQuotaCache(ctx, meta.UserId, quota)
+
+	logContent := fmt.Sprintf("倍率：%.2f × %.2f", modelRatio, completionRatio)
 
 	var requestBody string
 	if v := ctx.Value(CtxKeyRequestBody); v != nil {

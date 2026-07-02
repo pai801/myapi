@@ -50,16 +50,13 @@ func CreateRootAccountIfNeed() error {
 		if config.InitialRootToken != "" {
 			logger.Log.Infof("creating initial root token as requested")
 			token := Token{
-				Id:             1,
-				UserId:         rootUser.Id,
-				Key:            config.InitialRootToken,
-				Status:         TokenStatusEnabled,
-				Name:           "Initial Root Token",
-				CreatedTime:    helper.GetTimestamp(),
-				AccessedTime:   helper.GetTimestamp(),
-				ExpiredTime:    -1,
-				RemainQuota:    500000000000000,
-				UnlimitedQuota: true,
+				Id:           1,
+				UserId:       rootUser.Id,
+				Key:          config.InitialRootToken,
+				Status:       TokenStatusEnabled,
+				Name:         "Initial Root Token",
+				CreatedTime:  helper.GetTimestamp(),
+				AccessedTime: helper.GetTimestamp(),
 			}
 			DB.Create(&token)
 		}
@@ -131,10 +128,6 @@ func InitDB() {
 
 	sqlDB := setDBConns(DB)
 
-	if !config.IsMasterNode {
-		return
-	}
-
 	if common.UsingMySQL {
 		_, _ = sqlDB.Exec("DROP INDEX idx_channels_key ON channels;") // TODO: delete this line when most users have upgraded
 	}
@@ -155,6 +148,17 @@ func migrateDB() error {
 	if err = DB.AutoMigrate(&Token{}); err != nil {
 		return err
 	}
+	// 清理已废弃的列
+	tokenColsToDrop := []string{"expired_time", "remain_quota", "unlimited_quota", "used_quota"}
+	for _, col := range tokenColsToDrop {
+		if DB.Migrator().HasColumn(&Token{}, col) {
+			if err = DB.Migrator().DropColumn(&Token{}, col); err != nil {
+				return fmt.Errorf("failed to drop column %s: %w", col, err)
+			}
+		}
+	}
+	// 清理遗留的过期/耗尽 token 状态，重置为 disabled
+	DB.Model(&Token{}).Where("status NOT IN (1, 2)").Update("status", TokenStatusDisabled)
 	if err = DB.AutoMigrate(&User{}); err != nil {
 		return err
 	}
@@ -188,10 +192,6 @@ func InitLogDB() {
 	}
 
 	setDBConns(LOG_DB)
-
-	if !config.IsMasterNode {
-		return
-	}
 
 	logger.Log.Infof("secondary database migration started")
 	err = migrateLOGDB()

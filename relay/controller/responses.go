@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
@@ -22,7 +22,6 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/codex"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/apitype"
-	"github.com/songquanpeng/one-api/relay/billing"
 	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/constant"
 	metaPkg "github.com/songquanpeng/one-api/relay/meta"
@@ -91,44 +90,54 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 	}
 
 	// 存储请求体和请求头到 context 中
-	if config.LogConsumeEnabled {
+	const maxBodySize = 256 * 1024 // 256KB
+	if len(requestBody) <= maxBodySize {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(requestBody))
-		ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
+	} else {
+		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(requestBody)))
 	}
+	ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
 
 	// 获取模型比率和分组比率
 	modelRatio := billingratio.GetModelRatio(ctxMeta.ActualModelName, ctxMeta.ChannelType)
-	groupRatio := billingratio.GetGroupRatio(ctxMeta.Group)
-	ratio := modelRatio * groupRatio
+	ratio := modelRatio
 
-	// 估算 prompt tokens 并预扣费
-	promptTokens := estimateResponsesPromptTokens(req)
-	preConsumedQuota, bizErr := preConsumeQuotaForResponses(ctx, promptTokens, ratio, ctxMeta)
-	if bizErr != nil {
-		logger.Log.Warnf("preConsumeQuota failed: %+v", *bizErr)
-		return bizErr
+	userQuota, err := dbmodel.CacheGetUserQuota(ctx, ctxMeta.UserId)
+	if err != nil {
+		return openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
+	}
+	estimatedQuota := int64(float64(500+estimateResponsesPromptTokens(req)) * ratio)
+	if userQuota < estimatedQuota {
+		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
+	}
+
+	// Pre-consume to close race window between check and actual consumption
+	if err := dbmodel.DecreaseUserQuota(ctxMeta.UserId, estimatedQuota); err != nil {
+		logger.Log.Errorf("pre-consume quota failed for user %d: %v", ctxMeta.UserId, err)
+		return openai.ErrorWrapper(err, "pre_consume_quota_failed", http.StatusInternalServerError)
+	} else {
+		ctx = context.WithValue(ctx, CtxKeyPreConsumedQuota, estimatedQuota)
 	}
 
 	resp, err := relayAdaptor.DoRequest(c, ctxMeta, bytes.NewBuffer(requestBody))
 	if err != nil {
+		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		logger.Log.Errorf("[%s] %+v", "do request failed", err)
 		return openai.ErrorWrapper(err, "do request failed", http.StatusInternalServerError)
 	}
 
 	if isErrorResp(resp) {
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, ctxMeta.TokenId)
+		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		return relayErrorHandler(resp)
 	}
 
 	usage, relayErr := relayAdaptor.DoResponse(c, resp, ctxMeta)
-	if config.LogConsumeEnabled {
-		if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
-			ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
-		}
+	if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
+		ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
 	}
 	if relayErr != nil {
+		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		logger.Log.Errorf("DoResponse failed: %+v", relayErr)
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, ctxMeta.TokenId)
 		return relayErr
 	}
 
@@ -145,7 +154,7 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 	if v := ctx.Value(CtxKeyRequestHeader); v != nil {
 		reqHeader = v.(string)
 	}
-	go postConsumeQuotaForResponses(ctx, usage, ctxMeta, ratio, preConsumedQuota, modelRatio, groupRatio, reqBody, respBody, reqHeader)
+	go postConsumeQuotaForResponses(ctx, usage, ctxMeta, ratio, modelRatio, reqBody, respBody, reqHeader)
 
 	return nil
 }
@@ -218,34 +227,46 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	}
 
 	// 存储请求体和请求头到 context 中
-	if config.LogConsumeEnabled {
+	const maxBodySizeResp = 256 * 1024 // 256KB
+	if len(chatRequest) <= maxBodySizeResp {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(chatRequest))
-		ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
+	} else {
+		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(chatRequest)))
 	}
+	ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
 
 	// 获取模型比率和分组比率
 	modelRatio := billingratio.GetModelRatio(modelName, ctxMeta.ChannelType)
-	groupRatio := billingratio.GetGroupRatio(ctxMeta.Group)
-	ratio := modelRatio * groupRatio
+	ratio := modelRatio
 
-	// 估算 prompt tokens 并预扣费
-	promptTokens := estimateResponsesPromptTokens(req)
-	preConsumedQuota, bizErr := preConsumeQuotaForResponses(ctx, promptTokens, ratio, ctxMeta)
-	if bizErr != nil {
-		logger.Log.Warnf("preConsumeQuota failed: %+v", *bizErr)
-		return bizErr
+	userQuota, err := dbmodel.CacheGetUserQuota(ctx, ctxMeta.UserId)
+	if err != nil {
+		return openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
+	}
+	estimatedQuota := int64(float64(500+estimateResponsesPromptTokens(req)) * ratio)
+	if userQuota < estimatedQuota {
+		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
+	}
+
+	// Pre-consume to close race window between check and actual consumption
+	if err := dbmodel.DecreaseUserQuota(ctxMeta.UserId, estimatedQuota); err != nil {
+		logger.Log.Errorf("pre-consume quota failed for user %d: %v", ctxMeta.UserId, err)
+		return openai.ErrorWrapper(err, "pre_consume_quota_failed", http.StatusInternalServerError)
+	} else {
+		ctx = context.WithValue(ctx, CtxKeyPreConsumedQuota, estimatedQuota)
 	}
 
 	relayAdaptor.Init(chatMeta)
 
 	resp, err := relayAdaptor.DoRequest(c, chatMeta, chatRequestReader)
 	if err != nil {
+		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		logger.Log.Errorf("[%s] %+v", "do request failed", err)
 		return openai.ErrorWrapper(err, "do request failed", http.StatusInternalServerError)
 	}
 
 	if isErrorResp(resp) {
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, ctxMeta.TokenId)
+		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		return relayErrorHandler(resp)
 	}
 
@@ -257,12 +278,18 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 		c.Writer.WriteHeader(http.StatusOK)
 		var converterState any
 		streamResult, _ := forwardChatResponsesStream(c, resp.Body, requestBody, &converterState, fallbackReasoning)
-		if streamResult.FailureError != nil {
-			logger.Log.Errorf("[%s] %+v", "scan response failed", streamResult.FailureError)
-		}
-		if streamResult.FailedTerminal {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, ctxMeta.TokenId)
-			logger.Log.Warnf("responses stream failed after SSE headers committed")
+		if streamResult.FailureError != nil || streamResult.FailedTerminal {
+			rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
+			if streamResult.FailureError != nil {
+				logger.Log.Errorf("[%s] %+v", "scan response failed", streamResult.FailureError)
+			}
+			if streamResult.FailedTerminal {
+				logger.Log.Warnf("responses stream failed after SSE headers committed")
+			}
+			if err := resp.Body.Close(); err != nil {
+				logger.Log.Warnf("failed to close response body: %v", err)
+			}
+			return nil
 		}
 
 		// 从流状态中提取 usage 和完整的响应体用于日志记录
@@ -278,7 +305,7 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 				}
 			}
 
-			if config.LogConsumeEnabled && !streamResult.StreamErrored {
+			if !streamResult.StreamErrored {
 				completedBody := codex.GetStreamCompletedBody(converterState, requestBody)
 				if completedBody != nil {
 					ctx = context.WithValue(ctx, CtxKeyResponseBody, string(completedBody))
@@ -293,17 +320,15 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 		// 非流式响应处理
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
+			rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 			logger.Log.Errorf("[%s] %+v", "read response body failed", err)
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, ctxMeta.TokenId)
 			return openai.ErrorWrapper(err, "read response body failed", http.StatusInternalServerError)
 		}
 		if err := resp.Body.Close(); err != nil {
 			logger.Log.Warnf("failed to close response body: %v", err)
 		}
 
-		if config.LogConsumeEnabled {
-			ctx = context.WithValue(ctx, CtxKeyResponseBody, string(respBody))
-		}
+		ctx = context.WithValue(ctx, CtxKeyResponseBody, string(respBody))
 
 		responsesResponse := codex.ConvertChatResponseToResponsesWithContext(respBody, modelName, fallbackReasoning, requestBody)
 		c.JSON(http.StatusOK, json.RawMessage(responsesResponse))
@@ -346,7 +371,7 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	if v := ctx.Value(CtxKeyRequestHeader); v != nil {
 		reqHeader = v.(string)
 	}
-	go postConsumeQuotaForResponses(ctx, finalUsage, ctxMeta, ratio, preConsumedQuota, modelRatio, groupRatio, reqBody, respBody, reqHeader)
+	go postConsumeQuotaForResponses(ctx, finalUsage, ctxMeta, ratio, modelRatio, reqBody, respBody, reqHeader)
 
 	return nil
 }
@@ -545,58 +570,20 @@ func estimateResponsesPromptTokens(req map[string]interface{}) int {
 	return promptTokens
 }
 
-func preConsumeQuotaForResponses(ctx context.Context, promptTokens int, ratio float64, meta *metaPkg.Meta) (int64, *model.ErrorWithStatusCode) {
-	preConsumedQuota := int64(0)
-
-	// 对于流式请求，预扣费可以设置一个较小的值
-	if meta.IsStream {
-		preConsumedQuota = 500
-	} else {
-		// 非流式请求：基于 prompt tokens 计算预扣费
-		preConsumedTokens := 500 + int64(promptTokens)
-		preConsumedQuota = int64(math.Ceil(float64(preConsumedTokens) * ratio))
-	}
-
-	userQuota, err := dbmodel.CacheGetUserQuota(ctx, meta.UserId)
-	if err != nil {
-		logger.Log.Errorf("[%s] %+v", "get_user_quota_failed", err)
-		return preConsumedQuota, openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
-	}
-
-	if userQuota-preConsumedQuota < 0 {
-		logger.Log.Errorf("[%s] %+v", "insufficient_user_quota", nil)
-		return preConsumedQuota, openai.ErrorWrapper(nil, "insufficient_user_quota", http.StatusForbidden)
-	}
-
-	// 判断是否信任用户：配额充足时不预扣
-	if userQuota > 100*preConsumedQuota {
-		preConsumedQuota = 0
-		//		logger.Log.Infof("user %d has enough quota %d, trusted and no need to pre-consume", meta.UserId, userQuota)
-	}
-
-	if preConsumedQuota > 0 {
-		err = dbmodel.CacheDecreaseUserQuota(meta.UserId, preConsumedQuota)
-		if err != nil {
-			logger.Log.Errorf("[%s] %+v", "decrease_user_quota_failed", err)
-			return preConsumedQuota, openai.ErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
+func rollbackResponsesPreConsumedQuota(ctx context.Context, userId int) {
+	if preConsumed, ok := ctx.Value(CtxKeyPreConsumedQuota).(int64); ok && preConsumed > 0 {
+		if err := dbmodel.IncreaseUserQuota(userId, preConsumed); err != nil {
+			logger.Log.Errorf("error rolling back pre-consumed quota: %v", err)
+			return
 		}
-
-		err = dbmodel.PreConsumeTokenQuota(meta.TokenId, preConsumedQuota)
-		if err != nil {
-			logger.Log.Errorf("[%s] %+v", "pre_consume_token_quota_failed", err)
-			return preConsumedQuota, openai.ErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
-		}
+		dbmodel.PostConsumeResetUserQuotaCache(ctx, userId, preConsumed)
 	}
-
-	return preConsumedQuota, nil
 }
 
-func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta *metaPkg.Meta, ratio float64, preConsumedQuota int64, modelRatio float64, groupRatio float64, reqBody string, respBody string, reqHeader string) {
+func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta *metaPkg.Meta, ratio float64, modelRatio float64, reqBody string, respBody string, reqHeader string) {
 	if usage == nil {
 		logger.Log.Errorf("usage is nil, which is unexpected")
-		usage = &model.Usage{
-			CompletionTokensDetails: &model.CompletionTokensDetails{},
-		}
+		return
 	}
 
 	var quota int64
@@ -615,22 +602,43 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 	}
 
 	totalTokens := promptTokens + completionTokens
+
+	// Check pre-consumed quota early so we can rollback if totalTokens == 0
+	preConsumedQuota := int64(0)
+	if v := ctx.Value(CtxKeyPreConsumedQuota); v != nil {
+		preConsumedQuota = v.(int64)
+	}
+
 	if totalTokens == 0 {
-		quota = 0
+		if preConsumedQuota > 0 {
+			logger.Log.Warnf("totalTokens is 0 for user %d, model %s, rolling back pre-consumed quota", meta.UserId, meta.ActualModelName)
+			if err := dbmodel.IncreaseUserQuota(meta.UserId, preConsumedQuota); err != nil {
+				logger.Log.Errorf("error rolling back pre-consumed quota: " + err.Error())
+			}
+			dbmodel.PostConsumeResetUserQuotaCache(ctx, meta.UserId, preConsumedQuota)
+		}
+		return
 	}
 
-	quotaDelta := quota - preConsumedQuota
-	err := dbmodel.PostConsumeTokenQuota(meta.TokenId, quotaDelta)
+	var err error
+	if preConsumedQuota > 0 {
+		diff := quota - preConsumedQuota
+		if diff > 0 {
+			err = dbmodel.DecreaseUserQuota(meta.UserId, diff)
+		} else if diff < 0 {
+			err = dbmodel.IncreaseUserQuota(meta.UserId, -diff)
+		}
+		// diff == 0: exactly right, no adjustment needed
+	} else {
+		err = dbmodel.DecreaseUserQuota(meta.UserId, quota)
+	}
 	if err != nil {
-		logger.Log.Errorf("error consuming token remain quota: " + err.Error())
+		logger.Log.Errorf("error decrease user quota: " + err.Error())
 	}
+	// DB quota has already been updated above; refresh Redis cache from DB.
+	dbmodel.PostConsumeResetUserQuotaCache(ctx, meta.UserId, quota)
 
-	err = dbmodel.CacheUpdateUserQuota(ctx, meta.UserId)
-	if err != nil {
-		logger.Log.Errorf("error update user quota cache: " + err.Error())
-	}
-
-	logContent := fmt.Sprintf("Responses API - 倍率：%.2f × %.2f × %.2f", modelRatio, groupRatio, completionRatio)
+	logContent := fmt.Sprintf("Responses API - 倍率：%.2f × %.2f", modelRatio, completionRatio)
 
 	dbmodel.RecordConsumeLog(ctx, &dbmodel.Log{
 		UserId:            meta.UserId,

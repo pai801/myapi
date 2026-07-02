@@ -4,7 +4,6 @@ import {
   Button,
   Form,
   Header,
-  Message,
   Segment,
   Card,
 } from 'semantic-ui-react';
@@ -14,9 +13,7 @@ import {
   copy,
   showError,
   showSuccess,
-  timestamp2string,
 } from '../../helpers';
-import { renderQuotaWithPrompt } from '../../helpers/render';
 
 const EditToken = () => {
   const { t } = useTranslation();
@@ -27,15 +24,12 @@ const EditToken = () => {
   const [modelOptions, setModelOptions] = useState([]);
   const originInputs = {
     name: '',
-    remain_quota: isEdit ? 0 : 500000,
-    expired_time: -1,
-    unlimited_quota: false,
     models: [],
     subnet: '',
     model_mapping: '',
   };
   const [inputs, setInputs] = useState(originInputs);
-  const { name, remain_quota, expired_time, unlimited_quota } = inputs;
+  const { name } = inputs;
   const navigate = useNavigate();
   const handleInputChange = (e, { name, value }) => {
     setInputs((inputs) => ({ ...inputs, [name]: value }));
@@ -43,33 +37,12 @@ const EditToken = () => {
   const handleCancel = () => {
     navigate('/token');
   };
-  const setExpiredTime = (month, day, hour, minute) => {
-    let now = new Date();
-    let timestamp = now.getTime() / 1000;
-    let seconds = month * 30 * 24 * 60 * 60;
-    seconds += day * 24 * 60 * 60;
-    seconds += hour * 60 * 60;
-    seconds += minute * 60;
-    if (seconds !== 0) {
-      timestamp += seconds;
-      setInputs({ ...inputs, expired_time: timestamp2string(timestamp) });
-    } else {
-      setInputs({ ...inputs, expired_time: -1 });
-    }
-  };
-
-  const setUnlimitedQuota = () => {
-    setInputs({ ...inputs, unlimited_quota: !unlimited_quota });
-  };
 
   const loadToken = async () => {
     try {
       let res = await API.get(`/api/token/${tokenId}`);
       const { success, message, data } = res.data || {};
       if (success && data) {
-        if (data.expired_time !== -1) {
-          data.expired_time = timestamp2string(data.expired_time);
-        }
         if (data.models === '') {
           data.models = [];
         } else {
@@ -133,16 +106,7 @@ const EditToken = () => {
 
   const submit = async () => {
     if (!isEdit && inputs.name === '') return;
-    let localInputs = inputs;
-    localInputs.remain_quota = parseInt(localInputs.remain_quota);
-    if (localInputs.expired_time !== -1) {
-      let time = Date.parse(localInputs.expired_time);
-      if (isNaN(time)) {
-        showError(t('token.edit.messages.expire_time_invalid'));
-        return;
-      }
-      localInputs.expired_time = Math.ceil(time / 1000);
-    }
+    let localInputs = { ...inputs };
     localInputs.models = localInputs.models.join(',');
     let res;
     if (isEdit) {
@@ -155,12 +119,8 @@ const EditToken = () => {
     }
     const { success, message } = res.data;
     if (success) {
-      if (isEdit) {
-        showSuccess(t('token.edit.messages.update_success'));
-      } else {
-        showSuccess(t('token.edit.messages.create_success'));
-        setInputs(originInputs);
-      }
+      showSuccess(isEdit ? t('token.edit.messages.update_success') : t('token.edit.messages.create_success'));
+      navigate('/token');
     } else {
       showError(message);
     }
@@ -224,85 +184,6 @@ const EditToken = () => {
                 rows={5}
               />
             </Form.Field>
-            <Form.Field>
-              <Form.Input
-                label={t('token.edit.expire_time')}
-                name='expired_time'
-                placeholder={t('token.edit.expire_time_placeholder')}
-                onChange={handleInputChange}
-                value={expired_time}
-                autoComplete='new-password'
-                type='datetime-local'
-              />
-            </Form.Field>
-            <div style={{ lineHeight: '40px' }}>
-              <Button
-                type={'button'}
-                onClick={() => {
-                  setExpiredTime(0, 0, 0, 0);
-                }}
-              >
-                {t('token.edit.buttons.never_expire')}
-              </Button>
-              <Button
-                type={'button'}
-                onClick={() => {
-                  setExpiredTime(1, 0, 0, 0);
-                }}
-              >
-                {t('token.edit.buttons.expire_1_month')}
-              </Button>
-              <Button
-                type={'button'}
-                onClick={() => {
-                  setExpiredTime(0, 1, 0, 0);
-                }}
-              >
-                {t('token.edit.buttons.expire_1_day')}
-              </Button>
-              <Button
-                type={'button'}
-                onClick={() => {
-                  setExpiredTime(0, 0, 1, 0);
-                }}
-              >
-                {t('token.edit.buttons.expire_1_hour')}
-              </Button>
-              <Button
-                type={'button'}
-                onClick={() => {
-                  setExpiredTime(0, 0, 0, 1);
-                }}
-              >
-                {t('token.edit.buttons.expire_1_minute')}
-              </Button>
-            </div>
-            <Message>{t('token.edit.quota_notice')}</Message>
-            <Form.Field>
-              <Form.Input
-                label={`${t('token.edit.quota')}${renderQuotaWithPrompt(
-                  remain_quota,
-                  t
-                )}`}
-                name='remain_quota'
-                placeholder={t('token.edit.quota_placeholder')}
-                onChange={handleInputChange}
-                value={remain_quota}
-                autoComplete='new-password'
-                type='number'
-                disabled={unlimited_quota}
-              />
-            </Form.Field>
-            <Button
-              type={'button'}
-              onClick={() => {
-                setUnlimitedQuota();
-              }}
-            >
-              {unlimited_quota
-                ? t('token.edit.buttons.cancel_unlimited')
-                : t('token.edit.buttons.unlimited_quota')}
-            </Button>
             <Button floated='right' positive onClick={submit}>
               {t('token.edit.buttons.submit')}
             </Button>

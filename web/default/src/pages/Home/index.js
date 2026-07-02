@@ -1,42 +1,14 @@
-import React, { useContext, useEffect, useState, useRef } from 'react';
+import React, { useContext, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Grid, Header } from 'semantic-ui-react';
-import { API, showError, timestamp2string } from '../../helpers';
+import { timestamp2string } from '../../helpers';
 import { StatusContext } from '../../context/Status';
 import { UserContext } from '../../context/User';
-import { Link } from 'react-router-dom';
 
 const Home = () => {
   const { t } = useTranslation();
   const [statusState, statusDispatch] = useContext(StatusContext);
   const [userState] = useContext(UserContext);
-  const [homePageContent, setHomePageContent] = useState('');
-  const [homePageContentLoaded, setHomePageContentLoaded] = useState(false);
-
-  const displayHomePageContent = async () => {
-    try {
-      const res = await API.get('/api/home_page_content');
-      const { success, message, data } = res.data;
-      if (success) {
-        if (data && data !== '') {
-          setHomePageContent(data);
-        }
-      } else {
-        showError(message);
-      }
-    } catch (error) {
-      showError(error.message);
-    }
-    setHomePageContentLoaded(true);
-  };
-
-  const initRef = useRef(false);
-
-  useEffect(() => {
-    if (initRef.current) return;
-    initRef.current = true;
-    displayHomePageContent().then();
-  }, []);
 
   const getStartTimeString = () => {
     const timestamp = statusState?.status?.start_time;
@@ -56,9 +28,6 @@ const Home = () => {
               </Card.Description>
             </Card.Content>
           </Card>
-          {homePageContentLoaded && homePageContent !== '' && (
-            <div dangerouslySetInnerHTML={{ __html: homePageContent }}></div>
-          )}
           <Card fluid className='chart-card'>
             <Card.Content>
               <Card.Header>
@@ -107,25 +76,6 @@ const Home = () => {
                           <span>
                             {statusState?.status?.version || 'unknown'}
                           </span>
-                        </p>
-                        <p
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.5em',
-                          }}
-                        >
-                          <i className='github icon'></i>
-                          <span style={{ fontWeight: 'bold' }}>
-                            {t('home.system_status.info.source')}
-                          </span>
-                          <a
-                            href='https://github.com/songquanpeng/one-api'
-                            target='_blank'
-                            style={{ color: '#2185d0' }}
-                          >
-                            {t('home.system_status.info.source_link')}
-                          </a>
                         </p>
                         <p
                           style={{

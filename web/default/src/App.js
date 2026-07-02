@@ -8,7 +8,7 @@ import NotFound from './pages/NotFound';
 import Setting from './pages/Setting';
 import EditUser from './pages/User/EditUser';
 import AddUser from './pages/User/AddUser';
-import { API, getLogo, getSystemName, showError } from './helpers';
+import { API, showError } from './helpers';
 import { UserContext } from './context/User';
 import { StatusContext } from './context/Status';
 import Channel from './pages/Channel';
@@ -19,7 +19,6 @@ import Log from './pages/Log';
 import Dashboard from './pages/Dashboard';
 
 const Home = lazy(() => import('./pages/Home'));
-const About = lazy(() => import('./pages/About'));
 
 function App() {
   const [userState, userDispatch] = useContext(UserContext);
@@ -35,15 +34,14 @@ function App() {
   const loadStatus = async () => {
     try {
       const res = await API.get('/api/status');
-      const { success, message, data } = res.data || {}; // Add default empty object
+      const { success, message, data } = res.data || {};
       if (success && data) {
-        // Check data exists
         localStorage.setItem('status', JSON.stringify(data));
+        if (data.system_name) {
+          localStorage.setItem('system_name', data.system_name);
+          document.title = data.system_name;
+        }
         statusDispatch({ type: 'set', payload: data });
-        localStorage.setItem('system_name', data.system_name);
-        localStorage.setItem('logo', data.logo);
-        localStorage.setItem('footer_html', data.footer_html);
-        localStorage.setItem('quota_per_unit', data.quota_per_unit);
       } else {
         showError(message || '无法正常连接至服务器！');
       }
@@ -59,17 +57,6 @@ function App() {
     initRef.current = true;
     loadUser();
     loadStatus().then();
-    let systemName = getSystemName();
-    if (systemName) {
-      document.title = systemName;
-    }
-    let logo = getLogo();
-    if (logo) {
-      let linkElement = document.querySelector("link[rel~='icon']");
-      if (linkElement) {
-        linkElement.href = logo;
-      }
-    }
   }, []);
 
   return (
@@ -167,14 +154,6 @@ function App() {
         element={
           <Suspense fallback={<Loading></Loading>}>
             <LoginForm />
-          </Suspense>
-        }
-      />
-      <Route
-        path='/about'
-        element={
-          <Suspense fallback={<Loading></Loading>}>
-            <About />
           </Suspense>
         }
       />

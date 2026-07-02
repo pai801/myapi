@@ -59,25 +59,25 @@ function renderType(type, t) {
     case 2:
       return (
         <Label basic color='olive'>
-          消费
+          {t('log.type.usage')}
         </Label>
       );
     case 3:
       return (
         <Label basic color='orange'>
-          管理
+          {t('log.type.admin')}
         </Label>
       );
     case 4:
       return (
         <Label basic color='purple'>
-          系统
+          {t('log.type.system')}
         </Label>
       );
     case 5:
       return (
         <Label basic color='violet'>
-          测试
+          {t('log.type.test')}
         </Label>
       );
     default:
@@ -160,7 +160,7 @@ const LogsTable = () => {
         showError(message);
       }
     } catch (err) {
-      showError('获取日志详情失败');
+      showError(t('log.messages.detail_failed'));
     } finally {
       setDetailLoading(false);
     }
@@ -473,7 +473,7 @@ const LogsTable = () => {
                 }}
                 width={0.7}
               >
-                渠道ID
+                {t('log.table.channel_id')}
               </Table.HeaderCell>
             )}
             {isAdminUser && (
@@ -484,7 +484,7 @@ const LogsTable = () => {
                 }}
                 width={1.5}
               >
-                渠道名
+                {t('log.table.channel_name')}
               </Table.HeaderCell>
             )}
             <Table.HeaderCell
@@ -655,7 +655,7 @@ const LogsTable = () => {
 
                   {isAdminUser ? (
                     <Table.Cell>
-                      <Button size='mini' onClick={() => handleDetailClick(log)} disabled={!log.has_request_body && !log.has_response_body && !log.has_request_header} loading={detailLoading}>详情</Button>
+                      <Button size='mini' onClick={() => handleDetailClick(log)} disabled={!log.has_request_body && !log.has_response_body && !log.has_request_header} loading={detailLoading}>{t('log.table.detail')}</Button>
                     </Table.Cell>
                   ) : (
                     <Table.Cell>{renderDetail(log)}</Table.Cell>
@@ -682,7 +682,7 @@ const LogsTable = () => {
                 {t('log.buttons.refresh')}
               </Button>
               <span style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                跳至
+                {t('pagination.jump_to')}
                 <input
                   type='text'
                   value={jumpPage}
@@ -695,7 +695,7 @@ const LogsTable = () => {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleJumpPage();
                   }}
-                  placeholder='页码'
+                  placeholder={t('pagination.page_placeholder')}
                   style={{
                     width: '48px',
                     padding: '4px 6px',
@@ -705,7 +705,7 @@ const LogsTable = () => {
                     fontSize: '13px',
                   }}
                 />
-                页
+                {t('pagination.page')}
                 <Button
                   size='mini'
                   onClick={handleJumpPage}
@@ -720,8 +720,8 @@ const LogsTable = () => {
                 onPageChange={onPaginationChange}
                 size='small'
                 siblingRange={1}
-                firstItem={{ content: '首页', 'aria-label': '第一页' }}
-                lastItem={{ content: '末页', 'aria-label': '最后一页' }}
+                firstItem={{ content: t('pagination.first_page'), 'aria-label': t('pagination.first_page_aria') }}
+                lastItem={{ content: t('pagination.last_page'), 'aria-label': t('pagination.last_page_aria') }}
                 totalPages={
                   Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
                 }

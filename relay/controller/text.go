@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,11 +14,11 @@ import (
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/logger"
+	dbmodel "github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay"
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/apitype"
-	"github.com/songquanpeng/one-api/relay/billing"
 	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
@@ -41,24 +42,40 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	// set system prompt if not empty
 	systemPromptReset := setSystemPrompt(ctx, textRequest, meta.ForcedSystemPrompt)
 
-	// Store request body and headers in context for logging (controlled by LogConsumeEnabled)
-	if config.LogConsumeEnabled {
-		bodyJSON, _ := json.Marshal(textRequest)
+	// Store request body and headers in context for logging
+	bodyJSON, _ := json.Marshal(textRequest)
+	const maxBodySize = 256 * 1024 // 256KB
+	if len(bodyJSON) <= maxBodySize {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(bodyJSON))
-		ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
+	} else {
+		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(bodyJSON)))
 	}
+	ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
 
-	// get model ratio & group ratio
+	// get model ratio
 	modelRatio := billingratio.GetModelRatio(textRequest.Model, meta.ChannelType)
-	groupRatio := billingratio.GetGroupRatio(meta.Group)
-	ratio := modelRatio * groupRatio
-	// pre-consume quota
+	ratio := modelRatio
+	// balance check
 	promptTokens := getPromptTokens(textRequest, meta.Mode)
 	meta.PromptTokens = promptTokens
-	preConsumedQuota, bizErr := preConsumeQuota(ctx, textRequest, promptTokens, ratio, meta)
-	if bizErr != nil {
-		logger.Log.Warnf("preConsumeQuota failed: %+v", *bizErr)
-		return bizErr
+	estimatedQuota := int64(float64(500+promptTokens) * ratio)
+	if textRequest.MaxTokens != 0 {
+		estimatedQuota += int64(float64(textRequest.MaxTokens) * ratio)
+	}
+	userQuota, err := dbmodel.CacheGetUserQuota(ctx, meta.UserId)
+	if err != nil {
+		return openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
+	}
+	if userQuota < estimatedQuota {
+		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
+	}
+
+	// Pre-consume to close race window between check and actual consumption
+	if err := dbmodel.DecreaseUserQuota(meta.UserId, estimatedQuota); err != nil {
+		logger.Log.Errorf("pre-consume quota failed for user %d: %v", meta.UserId, err)
+		return openai.ErrorWrapper(err, "pre_consume_quota_failed", http.StatusInternalServerError)
+	} else {
+		ctx = context.WithValue(ctx, CtxKeyPreConsumedQuota, estimatedQuota)
 	}
 
 	adaptor := relay.GetAdaptor(meta.APIType)
@@ -78,28 +95,36 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	// do request
 	resp, err := adaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
+		// Rollback pre-consumed quota
+		if preConsumed, ok := ctx.Value(CtxKeyPreConsumedQuota).(int64); ok && preConsumed > 0 {
+			_ = dbmodel.IncreaseUserQuota(meta.UserId, preConsumed)
+		}
 		logger.Log.Errorf("[%s] %+v", "do_request_failed", err)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	if isErrorHappened(meta, resp) {
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		// Rollback pre-consumed quota
+		if preConsumed, ok := ctx.Value(CtxKeyPreConsumedQuota).(int64); ok && preConsumed > 0 {
+			_ = dbmodel.IncreaseUserQuota(meta.UserId, preConsumed)
+		}
 		return RelayErrorHandler(resp)
 	}
 
 	// do response
 	usage, respErr := adaptor.DoResponse(c, resp, meta)
-	if config.LogConsumeEnabled {
-		if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
-			ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
-		}
+	if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
+		ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
 	}
 	if respErr != nil {
+		// Rollback pre-consumed quota
+		if preConsumed, ok := ctx.Value(CtxKeyPreConsumedQuota).(int64); ok && preConsumed > 0 {
+			_ = dbmodel.IncreaseUserQuota(meta.UserId, preConsumed)
+		}
 		logger.Log.Errorf("respErr is not nil: %+v", respErr)
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
 		return respErr
 	}
 	// post-consume quota
-	go postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, modelRatio, groupRatio, systemPromptReset)
+	go postConsumeQuota(ctx, usage, meta, textRequest, ratio, modelRatio, systemPromptReset)
 	return nil
 }
 

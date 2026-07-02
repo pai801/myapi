@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
 )
@@ -91,11 +90,6 @@ func scheduleHourly(name string, hours int, task func(cutoff int64) (int64, erro
 }
 
 func Start() {
-	if !config.IsMasterNode {
-		logger.Log.Infof("log cleanup skipped on slave node")
-		return
-	}
-
 	scheduleHourly("logs", RetentionHours(), func(cutoff int64) (int64, error) {
 		return model.DeleteOldLog(cutoff)
 	})

@@ -32,18 +32,18 @@ const (
 // User if you add sensitive fields, don't forget to clean them in setupLogin function.
 // Otherwise, the sensitive information will be saved on local storage in plain text!
 type User struct {
-	Id               int    `json:"id"`
-	Username         string `json:"username" gorm:"unique;index" validate:"max=12"`
-	Password         string `json:"password" gorm:"not null;" validate:"min=8,max=20"`
-	DisplayName      string `json:"display_name" gorm:"index" validate:"max=20"`
-	Role             int    `json:"role" gorm:"type:int;default:1"`   // admin, util
-	Status           int    `json:"status" gorm:"type:int;default:1"` // enabled, disabled
-	Email            string `json:"email" gorm:"index" validate:"max=50"`
-	AccessToken      string `json:"access_token" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
-	Quota            int64  `json:"quota" gorm:"bigint;default:0"`
-	UsedQuota        int64  `json:"used_quota" gorm:"bigint;default:0;column:used_quota"` // used quota
-	RequestCount     int    `json:"request_count" gorm:"type:int;default:0;"`             // request number
-	Group            string `json:"group" gorm:"type:varchar(32);default:'default'"`
+	Id           int    `json:"id"`
+	Username     string `json:"username" gorm:"unique;index" validate:"max=12"`
+	Password     string `json:"password" gorm:"not null;" validate:"min=8,max=20"`
+	DisplayName  string `json:"display_name" gorm:"index" validate:"max=20"`
+	Role         int    `json:"role" gorm:"type:int;default:1"`   // admin, util
+	Status       int    `json:"status" gorm:"type:int;default:1"` // enabled, disabled
+	Email        string `json:"email" gorm:"index" validate:"max=50"`
+	AccessToken  string `json:"access_token" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
+	Quota        int64  `json:"quota" gorm:"bigint;default:0"`
+	UsedQuota    int64  `json:"used_quota" gorm:"bigint;default:0;column:used_quota"` // used quota
+	RequestCount int    `json:"request_count" gorm:"type:int;default:0;"`             // request number
+	Group        string `json:"group" gorm:"type:varchar(32);default:'default'"`
 }
 
 func GetMaxUserId() int {
@@ -52,21 +52,8 @@ func GetMaxUserId() int {
 	return user.Id
 }
 
-func GetAllUsers(startIdx int, num int, order string) (users []*User, err error) {
-	query := DB.Limit(num).Offset(startIdx).Omit("password").Where("status != ?", UserStatusDeleted)
-
-	switch order {
-	case "quota":
-		query = query.Order("quota desc")
-	case "used_quota":
-		query = query.Order("used_quota desc")
-	case "request_count":
-		query = query.Order("request_count desc")
-	default:
-		query = query.Order("id desc")
-	}
-
-	err = query.Find(&users).Error
+func GetAllUsers(startIdx int, num int) (users []*User, err error) {
+	err = DB.Omit("password").Where("status != ?", UserStatusDeleted).Order("id desc").Limit(num).Offset(startIdx).Find(&users).Error
 	return users, err
 }
 
@@ -117,14 +104,11 @@ func (user *User) Insert(ctx context.Context) error {
 	}
 	// create default token
 	cleanToken := Token{
-		UserId:         user.Id,
-		Name:           "default",
-		Key:            random.GenerateKey(),
-		CreatedTime:    helper.GetTimestamp(),
-		AccessedTime:   helper.GetTimestamp(),
-		ExpiredTime:    -1,
-		RemainQuota:    -1,
-		UnlimitedQuota: true,
+		UserId:       user.Id,
+		Name:         "default",
+		Key:          random.GenerateKey(),
+		CreatedTime:  helper.GetTimestamp(),
+		AccessedTime: helper.GetTimestamp(),
 	}
 	result.Error = cleanToken.Insert()
 	if result.Error != nil {
@@ -151,6 +135,7 @@ func (user *User) Update(updatePassword bool) error {
 	return err
 }
 
+// Deprecated: user deletion is no longer supported after removing operational features.
 func (user *User) Delete() error {
 	if user.Id == 0 {
 		return errors.New("id 为空！")
@@ -323,6 +308,16 @@ func DecreaseUserQuota(id int, quota int64) (err error) {
 func decreaseUserQuota(id int, quota int64) (err error) {
 	err = DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota - ?", quota)).Error
 	return err
+}
+
+// PostConsumeResetUserQuotaCache refreshes the cached user quota from DB after
+// the quota has already been updated in DB.
+func PostConsumeResetUserQuotaCache(ctx context.Context, userId int, consumedQuota int64) {
+	if common.RedisEnabled {
+		if err := CacheUpdateUserQuota(ctx, userId); err != nil {
+			logger.Log.Errorf("error update user quota cache: " + err.Error())
+		}
+	}
 }
 
 func GetRootUserEmail() (email string) {

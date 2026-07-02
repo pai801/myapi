@@ -129,9 +129,10 @@ func GetAllUsers(c *gin.Context) {
 	if p < 0 {
 		p = 0
 	}
+	pageSize := config.ItemsPerPage
+	startIdx := p * pageSize
 
-	order := c.DefaultQuery("order", "")
-	users, err := model.GetAllUsers(p*config.ItemsPerPage, config.ItemsPerPage, order)
+	users, err := model.GetAllUsers(startIdx, pageSize)
 
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -522,53 +523,6 @@ func ManageUser(c *gin.Context) {
 		}
 	case "enable":
 		user.Status = model.UserStatusEnabled
-	case "delete":
-		if user.Role == model.RoleRootUser {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "无法删除超级管理员用户",
-			})
-			return
-		}
-		if err := user.Delete(); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	case "promote":
-		if myRole != model.RoleRootUser {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "普通管理员用户无法提升其他用户为管理员",
-			})
-			return
-		}
-		if user.Role >= model.RoleAdminUser {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "该用户已经是管理员",
-			})
-			return
-		}
-		user.Role = model.RoleAdminUser
-	case "demote":
-		if user.Role == model.RoleRootUser {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "无法降级超级管理员用户",
-			})
-			return
-		}
-		if user.Role == model.RoleCommonUser {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "该用户已经是普通用户",
-			})
-			return
-		}
-		user.Role = model.RoleCommonUser
 	}
 
 	if err := user.Update(false); err != nil {

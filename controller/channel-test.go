@@ -21,7 +21,6 @@ import (
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/message"
 	"github.com/songquanpeng/one-api/middleware"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/monitor"
@@ -283,8 +282,6 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 				err = fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
 				if config.AutomaticDisableChannelEnabled {
 					monitor.DisableChannel(channel.Id, channel.Name, err.Error())
-				} else {
-					_ = message.Notify(message.ByAll, fmt.Sprintf("渠道 %s （%d）测试超时", channel.Name, channel.Id), "", err.Error())
 				}
 			}
 			if isChannelEnabled && monitor.ShouldDisableChannel(openaiErr, -1) {
@@ -299,12 +296,6 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 		testAllChannelsLock.Lock()
 		testAllChannelsRunning = false
 		testAllChannelsLock.Unlock()
-		if notify {
-			err := message.Notify(message.ByAll, "渠道测试完成", "", "渠道测试完成，如果没有收到禁用通知，说明所有渠道都正常")
-			if err != nil {
-				logger.Log.Errorf("failed to send email: %s", err.Error())
-			}
-		}
 	}()
 	return nil
 }

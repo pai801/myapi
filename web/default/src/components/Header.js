@@ -54,11 +54,6 @@ let headerButtons = [
     to: '/setting',
     icon: 'setting',
   },
-  {
-    name: 'header.about',
-    to: '/about',
-    icon: 'info circle',
-  },
 ];
 
 const Header = () => {

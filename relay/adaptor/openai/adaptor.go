@@ -9,7 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/alibailian"
@@ -120,14 +119,12 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Met
 			usage.PromptTokens = meta.PromptTokens
 			usage.CompletionTokens = usage.TotalTokens - meta.PromptTokens
 		}
-		if config.LogConsumeEnabled {
-			if responseBody == "" {
-				responseBody = buildStreamResponseBody(responseText, usage, meta.ActualModelName)
-			} else {
-				responseBody = ensureStreamResponseBodyUsage(responseBody, usage)
-			}
-			c.Set(ctxkey.ResponseBody, responseBody)
+		if responseBody == "" {
+			responseBody = buildStreamResponseBody(responseText, usage, meta.ActualModelName)
+		} else {
+			responseBody = ensureStreamResponseBodyUsage(responseBody, usage)
 		}
+		c.Set(ctxkey.ResponseBody, responseBody)
 	} else {
 		switch meta.Mode {
 		case relaymode.ImagesGenerations:

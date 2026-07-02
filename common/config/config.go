@@ -12,12 +12,17 @@ import (
 	"github.com/google/uuid"
 )
 
-var SystemName = "One API"
+var SystemName string
 var ServerAddress = "http://localhost:3000"
 var Footer = ""
 var Logo = ""
-var QuotaPerUnit = 500 * 1000.0 // $0.002 / 1K tokens
-var DisplayTokenStatEnabled = true
+
+func init() {
+	SystemName = os.Getenv("SYSTEM_NAME")
+	if SystemName == "" {
+		SystemName = "MyApi"
+	}
+}
 
 // Any options with "Secret", "Token" in its key won't be return by GetOptions
 
@@ -38,24 +43,19 @@ var DebugEnabled = strings.ToLower(os.Getenv("DEBUG")) == "true"
 var DebugSQLEnabled = strings.ToLower(os.Getenv("DEBUG_SQL")) == "true"
 var MemoryCacheEnabled = strings.ToLower(os.Getenv("MEMORY_CACHE_ENABLED")) == "true"
 
-var LogConsumeEnabled = true
-
-var MessagePusherAddress = ""
-var MessagePusherToken = ""
 
 var TurnstileSiteKey = ""
 var TurnstileSecretKey = ""
 
+var LogConsumeEnabled = true
+
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false
-var QuotaRemindThreshold int64 = 1000
 var ApproximateTokenEnabled = false
 var RetryTimes = 0
 
 var RootUserEmail = ""
-
-var IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 
 var requestInterval, _ = strconv.Atoi(os.Getenv("POLLING_INTERVAL"))
 var RequestInterval = time.Duration(requestInterval) * time.Second

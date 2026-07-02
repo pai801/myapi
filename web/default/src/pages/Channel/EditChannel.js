@@ -303,7 +303,7 @@ const EditChannel = () => {
               <>
                 <Message>
                   注意，<strong>模型部署名称必须和模型名称保持一致</strong>
-                  ，因为 One API 会把请求体中的 model
+                  ，因为 MyApi 会把请求体中的 model
                   参数替换为你的部署名称（模型名称中的点会被剔除），
                   <a
                     target='_blank'

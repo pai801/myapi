@@ -15,8 +15,6 @@ func SetApiRouter(router *gin.Engine) {
 	{
 		apiRouter.GET("/status", controller.GetStatus)
 		apiRouter.GET("/models", middleware.UserAuth(), controller.DashboardListModels)
-		apiRouter.GET("/about", controller.GetAbout)
-		apiRouter.GET("/home_page_content", controller.GetHomePageContent)
 
 		userRoute := apiRouter.Group("/user")
 		{

@@ -3,22 +3,16 @@ package model
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 )
 
 const (
-	TokenStatusEnabled   = 1 // don't use 0, 0 is the default value!
-	TokenStatusDisabled  = 2 // also don't use 0
-	TokenStatusExpired   = 3
-	TokenStatusExhausted = 4
+	TokenStatusEnabled  = 1
+	TokenStatusDisabled = 2
 )
 
 type Token struct {
@@ -27,30 +21,17 @@ type Token struct {
 	Key            string  `json:"key" gorm:"type:char(48);uniqueIndex"`
 	Status         int     `json:"status" gorm:"default:1"`
 	Name           string  `json:"name" gorm:"index" `
-	CreatedTime    int64   `json:"created_time" gorm:"bigint"`
-	AccessedTime   int64   `json:"accessed_time" gorm:"bigint"`
-	ExpiredTime    int64   `json:"expired_time" gorm:"bigint;default:-1"` // -1 means never expired
-	RemainQuota    int64   `json:"remain_quota" gorm:"bigint;default:0"`
-	UnlimitedQuota bool    `json:"unlimited_quota" gorm:"default:false"`
-	UsedQuota      int64   `json:"used_quota" gorm:"bigint;default:0"` // used quota
-	Models         *string `json:"models" gorm:"type:text"`            // allowed models
-	Subnet         *string `json:"subnet" gorm:"default:''"`           // allowed subnet
-	ModelMapping   *string `json:"model_mapping" gorm:"type:varchar(1024);default:''"`
+	CreatedTime  int64   `json:"created_time" gorm:"bigint"`
+	AccessedTime int64   `json:"accessed_time" gorm:"bigint"`
+	Models       *string `json:"models" gorm:"type:text"`               // allowed models
+	Subnet       *string `json:"subnet" gorm:"default:''"`             // allowed subnet
+	ModelMapping *string `json:"model_mapping" gorm:"type:varchar(1024);default:''"`
 }
 
-func GetAllUserTokens(userId int, startIdx int, num int, order string) ([]*Token, error) {
+func GetAllUserTokens(userId int, startIdx int, num int) ([]*Token, error) {
 	var tokens []*Token
 	var err error
-	query := DB.Where("user_id = ?", userId)
-
-	switch order {
-	case "remain_quota":
-		query = query.Order("unlimited_quota desc, remain_quota desc")
-	case "used_quota":
-		query = query.Order("used_quota desc")
-	default:
-		query = query.Order("id desc")
-	}
+	query := DB.Where("user_id = ?", userId).Order("id desc")
 
 	err = query.Limit(num).Offset(startIdx).Find(&tokens).Error
 	return tokens, err
@@ -73,34 +54,8 @@ func ValidateUserToken(key string) (token *Token, err error) {
 		}
 		return nil, errors.New("令牌验证失败")
 	}
-	if token.Status == TokenStatusExhausted {
-		return nil, fmt.Errorf("令牌 %s（#%d）额度已用尽", token.Name, token.Id)
-	} else if token.Status == TokenStatusExpired {
-		return nil, errors.New("该令牌已过期")
-	}
 	if token.Status != TokenStatusEnabled {
 		return nil, errors.New("该令牌状态不可用")
-	}
-	if token.ExpiredTime != -1 && token.ExpiredTime < helper.GetTimestamp() {
-		if !common.RedisEnabled {
-			token.Status = TokenStatusExpired
-			err := token.SelectUpdate()
-			if err != nil {
-				logger.Log.Errorf("failed to update token status" + err.Error())
-			}
-		}
-		return nil, errors.New("该令牌已过期")
-	}
-	if !token.UnlimitedQuota && token.RemainQuota <= 0 {
-		if !common.RedisEnabled {
-			// in this case, we can make sure the token is exhausted
-			token.Status = TokenStatusExhausted
-			err := token.SelectUpdate()
-			if err != nil {
-				logger.Log.Errorf("failed to update token status" + err.Error())
-			}
-		}
-		return nil, errors.New("该令牌额度已用尽")
 	}
 	return token, nil
 }
@@ -134,13 +89,8 @@ func (t *Token) Insert() error {
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (t *Token) Update() error {
 	var err error
-	err = DB.Model(t).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota", "models", "subnet", "model_mapping").Updates(t).Error
+	err = DB.Model(t).Select("name", "status", "models", "subnet", "model_mapping").Updates(t).Error
 	return err
-}
-
-func (t *Token) SelectUpdate() error {
-	// This can update zero values
-	return DB.Model(t).Select("accessed_time", "status").Updates(t).Error
 }
 
 func (t *Token) Delete() error {
@@ -199,103 +149,4 @@ func DeleteTokenById(id int, userId int) (err error) {
 		return err
 	}
 	return token.Delete()
-}
-
-func IncreaseTokenQuota(id int, quota int64) (err error) {
-	if quota < 0 {
-		return errors.New("quota 不能为负数！")
-	}
-	if config.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeTokenQuota, id, quota)
-		return nil
-	}
-	return increaseTokenQuota(id, quota)
-}
-
-func increaseTokenQuota(id int, quota int64) (err error) {
-	err = DB.Model(&Token{}).Where("id = ?", id).Updates(
-		map[string]interface{}{
-			"remain_quota":  gorm.Expr("remain_quota + ?", quota),
-			"used_quota":    gorm.Expr("used_quota - ?", quota),
-			"accessed_time": helper.GetTimestamp(),
-		},
-	).Error
-	return err
-}
-
-func DecreaseTokenQuota(id int, quota int64) (err error) {
-	if quota < 0 {
-		return errors.New("quota 不能为负数！")
-	}
-	if config.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeTokenQuota, id, -quota)
-		return nil
-	}
-	return decreaseTokenQuota(id, quota)
-}
-
-func decreaseTokenQuota(id int, quota int64) (err error) {
-	err = DB.Model(&Token{}).Where("id = ?", id).Updates(
-		map[string]interface{}{
-			"remain_quota":  gorm.Expr("remain_quota - ?", quota),
-			"used_quota":    gorm.Expr("used_quota + ?", quota),
-			"accessed_time": helper.GetTimestamp(),
-		},
-	).Error
-	return err
-}
-
-func PreConsumeTokenQuota(tokenId int, quota int64) (err error) {
-	if quota < 0 {
-		return errors.New("quota 不能为负数！")
-	}
-	token, err := GetTokenById(tokenId)
-	if err != nil {
-		return err
-	}
-	if !token.UnlimitedQuota && token.RemainQuota < quota {
-		return errors.New("令牌额度不足")
-	}
-	userQuota, err := GetUserQuota(token.UserId)
-	if err != nil {
-		return err
-	}
-	if userQuota < quota {
-		return errors.New("用户额度不足")
-	}
-	quotaTooLow := userQuota >= config.QuotaRemindThreshold && userQuota-quota < config.QuotaRemindThreshold
-	noMoreQuota := userQuota-quota <= 0
-	if quotaTooLow || noMoreQuota {
-	}
-	if !token.UnlimitedQuota {
-		err = DecreaseTokenQuota(tokenId, quota)
-		if err != nil {
-			return err
-		}
-	}
-	err = DecreaseUserQuota(token.UserId, quota)
-	return err
-}
-
-func PostConsumeTokenQuota(tokenId int, quota int64) (err error) {
-	token, err := GetTokenById(tokenId)
-	if err != nil {
-		return err
-	}
-	if quota > 0 {
-		err = DecreaseUserQuota(token.UserId, quota)
-	} else {
-		err = IncreaseUserQuota(token.UserId, -quota)
-	}
-	if !token.UnlimitedQuota {
-		if quota > 0 {
-			err = DecreaseTokenQuota(tokenId, quota)
-		} else {
-			err = IncreaseTokenQuota(tokenId, -quota)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

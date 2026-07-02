@@ -70,6 +70,8 @@ func (LogListItem) TableName() string {
 
 const (
 	LogTypeUnknown = iota
+	// LogTypeTopup 充值/额度变更记录。原充值功能已移除，保留该常量以保持数据库旧数据一致。
+	LogTypeTopup
 	LogTypeConsume
 	LogTypeManage
 	LogTypeSystem
@@ -88,9 +90,6 @@ func recordLogHelper(ctx context.Context, log *Log) {
 }
 
 func RecordLog(ctx context.Context, userId int, logType int, content string) {
-	if logType == LogTypeConsume && !config.LogConsumeEnabled {
-		return
-	}
 	log := &Log{
 		UserId:    userId,
 		Username:  GetUsernameById(userId),
@@ -102,9 +101,6 @@ func RecordLog(ctx context.Context, userId int, logType int, content string) {
 }
 
 func RecordConsumeLog(ctx context.Context, log *Log) {
-	if !config.LogConsumeEnabled {
-		return
-	}
 	log.Username = GetUsernameById(log.UserId)
 	log.CreatedAt = helper.GetTimestamp()
 	log.Type = LogTypeConsume
@@ -228,7 +224,11 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if common.UsingPostgreSQL {
 		ifnull = "COALESCE"
 	}
-	tx := LOG_DB.Table("logs").Select(fmt.Sprintf("%s(sum(quota),0)", ifnull))
+	db := LOG_DB
+	if db == nil {
+		db = DB
+	}
+	tx := db.Table("logs").Select(fmt.Sprintf("%s(sum(quota),0)", ifnull))
 	if username != "" {
 		tx = tx.Where("username = ?", username)
 	}
@@ -251,12 +251,32 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	return quota
 }
 
+// SumUserQuotaTotal sums the total quota consumed by a user from logs.
+func SumUserQuotaTotal(userId int) (token int) {
+	ifnull := "ifnull"
+	if common.UsingPostgreSQL {
+		ifnull = "COALESCE"
+	}
+	db := LOG_DB
+	if db == nil {
+		db = DB
+	}
+	db.Table("logs").Select(fmt.Sprintf("%s(sum(quota),0)", ifnull)).
+		Where("type = ? and user_id = ?", LogTypeConsume, userId).
+		Scan(&token)
+	return token
+}
+
 func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string) (token int) {
 	ifnull := "ifnull"
 	if common.UsingPostgreSQL {
 		ifnull = "COALESCE"
 	}
-	tx := LOG_DB.Table("logs").Select(fmt.Sprintf("%s(sum(prompt_tokens),0) + %s(sum(completion_tokens),0)", ifnull, ifnull))
+	db := LOG_DB
+	if db == nil {
+		db = DB
+	}
+	tx := db.Table("logs").Select(fmt.Sprintf("%s(sum(prompt_tokens),0) + %s(sum(completion_tokens),0)", ifnull, ifnull))
 	if username != "" {
 		tx = tx.Where("username = ?", username)
 	}

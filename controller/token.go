@@ -21,8 +21,7 @@ func GetAllTokens(c *gin.Context) {
 		p = 0
 	}
 
-	order := c.Query("order")
-	tokens, err := model.GetAllUserTokens(userId, p*config.ItemsPerPage, config.ItemsPerPage, order)
+	tokens, err := model.GetAllUserTokens(userId, p*config.ItemsPerPage, config.ItemsPerPage)
 
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -87,7 +86,7 @@ func GetToken(c *gin.Context) {
 func GetTokenStatus(c *gin.Context) {
 	tokenId := c.GetInt(ctxkey.TokenId)
 	userId := c.GetInt(ctxkey.Id)
-	token, err := model.GetTokenByIds(tokenId, userId)
+	_, err := model.GetTokenByIds(tokenId, userId)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -95,16 +94,11 @@ func GetTokenStatus(c *gin.Context) {
 		})
 		return
 	}
-	expiredAt := token.ExpiredTime
-	if expiredAt == -1 {
-		expiredAt = 0
-	}
 	c.JSON(http.StatusOK, gin.H{
 		"object":          "credit_summary",
-		"total_granted":   token.RemainQuota,
-		"total_used":      0, // not supported currently
-		"total_available": token.RemainQuota,
-		"expires_at":      expiredAt * 1000,
+		"total_granted":   0,
+		"total_used":      0,
+		"total_available": 0,
 	})
 }
 
@@ -147,17 +141,14 @@ func AddToken(c *gin.Context) {
 	}
 
 	cleanToken := model.Token{
-		UserId:         c.GetInt(ctxkey.Id),
-		Name:           token.Name,
-		Key:            random.GenerateKey(),
-		CreatedTime:    helper.GetTimestamp(),
-		AccessedTime:   helper.GetTimestamp(),
-		ExpiredTime:    token.ExpiredTime,
-		RemainQuota:    token.RemainQuota,
-		UnlimitedQuota: token.UnlimitedQuota,
-		Models:         model.SimplifyModelsField(token.Models),
-		Subnet:         token.Subnet,
-		ModelMapping:   token.ModelMapping,
+		UserId:       c.GetInt(ctxkey.Id),
+		Name:         token.Name,
+		Key:          random.GenerateKey(),
+		CreatedTime:  helper.GetTimestamp(),
+		AccessedTime: helper.GetTimestamp(),
+		Models:       model.SimplifyModelsField(token.Models),
+		Subnet:       token.Subnet,
+		ModelMapping: token.ModelMapping,
 	}
 	err = cleanToken.Insert()
 	if err != nil {
@@ -221,30 +212,11 @@ func UpdateToken(c *gin.Context) {
 		})
 		return
 	}
-	if token.Status == model.TokenStatusEnabled {
-		if cleanToken.Status == model.TokenStatusExpired && cleanToken.ExpiredTime <= helper.GetTimestamp() && cleanToken.ExpiredTime != -1 {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "令牌已过期，无法启用，请先修改令牌过期时间，或者设置为永不过期",
-			})
-			return
-		}
-		if cleanToken.Status == model.TokenStatusExhausted && cleanToken.RemainQuota <= 0 && !cleanToken.UnlimitedQuota {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "令牌可用额度已用尽，无法启用，请先修改令牌剩余额度，或者设置为无限额度",
-			})
-			return
-		}
-	}
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
 	} else {
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
-		cleanToken.ExpiredTime = token.ExpiredTime
-		cleanToken.RemainQuota = token.RemainQuota
-		cleanToken.UnlimitedQuota = token.UnlimitedQuota
 		cleanToken.Models = model.SimplifyModelsField(token.Models)
 		cleanToken.Subnet = token.Subnet
 		cleanToken.ModelMapping = token.ModelMapping

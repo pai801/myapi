@@ -1,17 +1,13 @@
 {
   "header": {
-    "home": "Home",
     "channel": "Channel",
     "token": "Token",
     "user": "User",
     "dashboard": "Dashboard",
     "log": "Log",
     "setting": "Settings",
-    "about": "About",
-    "chat": "Chat",
     "login": "Login",
-    "logout": "Logout",
-    "register": "Register"
+    "logout": "Logout"
   },
   "channel": {
     "title": "Channel Management",
@@ -57,7 +53,8 @@
       "confirm_delete_disabled": "Confirm Delete",
       "refresh": "Refresh",
       "show_detail": "Details",
-      "hide_detail": "Hide Details"
+      "hide_detail": "Hide Details",
+      "reset": "Reset"
     },
     "messages": {
       "test_success": "Channel {{name}} test successful, model {{model}}, time {{time}}s, output: {{message}}",
@@ -141,18 +138,12 @@
     "table": {
       "name": "Name",
       "status": "Status",
-      "used_quota": "Used Quota",
-      "remain_quota": "Remaining Quota",
       "created_time": "Created Time",
-      "expired_time": "Expiry Time",
       "actions": "Actions",
       "no_name": "None",
-      "never_expire": "never",
-      "unlimited": "Unlimited",
       "status_enabled": "Enabled",
       "status_disabled": "Disabled",
       "status_expired": "Expired",
-      "status_depleted": "Depleted",
       "status_unknown": "Unknown Status"
     },
     "buttons": {
@@ -175,26 +166,15 @@
       "models_placeholder": "Please select allowed models, leave empty for no restrictions",
       "ip_limit": "IP Restriction",
       "ip_limit_placeholder": "Please enter allowed subnets, e.g.: 192.168.0.0/24, use commas to separate multiple subnets",
-      "expire_time": "Expiry Time",
-      "expire_time_placeholder": "Please enter expiry time in yyyy-MM-dd HH:mm:ss format, -1 for no limit",
-      "quota_notice": "Note: Token quota only limits the maximum usage of the token itself, actual usage is subject to account remaining quota.",
-      "quota": "Quota",
-      "quota_placeholder": "Please enter quota",
+      "model_mapping": "Model Mapping",
+      "model_mapping_placeholder": "Model name mapping, e.g. {\"gpt-4\": \"gpt-4-turbo\"} (JSON format)",
       "buttons": {
-        "never_expire": "Never Expire",
-        "expire_1_month": "Expire in 1 Month",
-        "expire_1_day": "Expire in 1 Day",
-        "expire_1_hour": "Expire in 1 Hour",
-        "expire_1_minute": "Expire in 1 Minute",
-        "unlimited_quota": "Set Unlimited Quota",
-        "cancel_unlimited": "Cancel Unlimited Quota",
         "submit": "Submit",
         "cancel": "Cancel"
       },
       "messages": {
         "update_success": "Token updated successfully!",
-        "create_success": "Token created successfully, please copy it from the list page!",
-        "expire_time_invalid": "Invalid expiry time format!"
+        "create_success": "Token created successfully, please copy it from the list page!"
       }
     },
     "copy_options": {
@@ -211,9 +191,7 @@
     },
     "sort": {
       "placeholder": "Sort By",
-      "default": "Default Order",
-      "by_remain": "Sort by Remaining Quota",
-      "by_used": "Sort by Used Quota"
+      "default": "Default Order"
     }
   },
   "log": {
@@ -234,6 +212,7 @@
     "table": {
       "time": "Time",
       "channel": "Channel",
+      "channel_name": "Channel Name",
       "type": "Type",
       "model": "Model",
       "username": "Username",
@@ -252,14 +231,27 @@
       "quota": "Quota",
       "detail": "Detail"
     },
+    "messages": {
+      "detail_failed": "Failed to get log details"
+    },
     "buttons": {
       "query": "Action",
       "submit": "Query",
       "refresh": "Refresh"
     }
   },
+  "pagination": {
+    "jump_to": "Jump to",
+    "page": "",
+    "page_placeholder": "Page",
+    "first_page": "First",
+    "last_page": "Last",
+    "first_page_aria": "First page",
+    "last_page_aria": "Last page"
+  },
   "user": {
     "title": "User Management",
+    "search": "Search user ID, username, display name or email...",
     "edit": {
       "title": "Update User Information",
       "username": "Username",
@@ -268,21 +260,19 @@
       "password_placeholder": "Please enter new password, minimum 8 characters",
       "display_name": "Display Name",
       "display_name_placeholder": "Please enter new display name",
-      "group": "Group",
-      "group_placeholder": "Please select group",
-      "group_addition": "Please edit group multipliers in system settings to add new group:",
-      "quota": "Remaining Quota",
-      "quota_placeholder": "Please enter new remaining quota",
       "github_id": "Linked GitHub Account",
       "github_id_placeholder": "Read-only, user must link through personal settings page, cannot be modified directly",
       "wechat_id": "Linked WeChat Account",
       "wechat_id_placeholder": "Read-only, user must link through personal settings page, cannot be modified directly",
       "email": "Linked Email Account",
       "email_placeholder": "Read-only, user must link through personal settings page, cannot be modified directly",
+      "quota": "Quota",
+      "quota_placeholder": "Please enter user quota",
       "buttons": {
         "submit": "Submit",
         "cancel": "Cancel"
-      }
+      },
+      "quota_invalid": "Please enter a valid quota number"
     },
     "add": {
       "title": "Create New User Account"
@@ -292,46 +282,26 @@
       "create_success": "User account created successfully!",
       "operation_success": "Operation completed successfully!"
     },
-    "search": "Search users...",
     "table": {
       "id": "ID",
       "username": "Username",
-      "group": "Group",
       "quota": "Quota",
-      "role_text": "Role",
-      "status_text": "Status",
-      "actions": "Actions",
       "remaining_quota": "Remaining Quota",
       "used_quota": "Used Quota",
       "request_count": "Request Count",
-      "role_types": {
-        "normal": "Normal User",
-        "admin": "Admin",
-        "super_admin": "Super Admin",
-        "unknown": "Unknown Role"
-      },
+      "status_text": "Status",
+      "actions": "Actions",
       "status_types": {
         "activated": "Activated",
         "banned": "Banned",
         "unknown": "Unknown Status"
-      },
-      "sort": {
-        "default": "Default Order",
-        "by_quota": "Sort by Remaining Quota",
-        "by_used_quota": "Sort by Used Quota",
-        "by_request_count": "Sort by Request Count"
-      },
-      "sort_by": "Sort By"
+      }
     },
     "buttons": {
-      "add": "Add New User",
-      "delete": "Delete",
-      "delete_user": "Delete User",
+      "add": "Add User",
       "enable": "Enable",
       "disable": "Disable",
-      "edit": "Edit",
-      "promote": "Promote",
-      "demote": "Demote"
+      "edit": "Edit"
     }
   },
   "dashboard": {
@@ -362,8 +332,7 @@
     "tabs": {
       "personal": "Personal Settings",
       "operation": "Operation Settings",
-      "system": "System Settings",
-      "other": "Other Settings"
+      "system": "System Settings"
     },
     "personal": {
       "general": {
@@ -378,9 +347,12 @@
     "system": {
       "general": {
         "title": "General Settings",
+        "system_name": "System Name",
+        "system_name_placeholder": "Please enter system name",
         "server_address": "Server Address",
         "server_address_placeholder": "e.g.: https://yourdomain.com",
         "buttons": {
+          "save_name": "Set System Name",
           "update": "Update Server Address"
         }
       },
@@ -500,11 +472,7 @@
         },
         "completion": {
           "title": "Completion Ratio",
-          "placeholder": "A JSON text where keys are model names and values are ratios. These ratios are the proportion of completion to prompt ratio, which can override One API's internal ratios"
-        },
-        "group": {
-          "title": "Group Ratio",
-          "placeholder": "A JSON text where keys are group names and values are ratios"
+          "placeholder": "A JSON text where keys are model names and values are ratios. These ratios are the proportion of completion to prompt ratio, which can override MyApi's internal ratios"
         },
         "endpoint_types": {
           "title": "Model Endpoint Types",
@@ -514,16 +482,10 @@
           "save": "Save Ratio Settings"
         }
       },
-      "log": {
-        "title": "Log Settings",
-        "enable_consume": "Enable Quota Consumption Logging"
-      },
       "monitor": {
         "title": "Monitor Settings",
         "max_response_time": "Maximum Response Time",
         "max_response_time_placeholder": "In seconds, channels exceeding this time during testing will be automatically disabled",
-        "quota_reminder": "Quota Reminder Threshold",
-        "quota_reminder_placeholder": "Users will receive email reminders when quota falls below this value",
         "auto_disable": "Automatically Disable Channel on Failure",
         "auto_enable": "Automatically Enable Channel on Success",
         "buttons": {
@@ -534,80 +496,24 @@
         "title": "General Settings",
         "chat_link": "Chat Page Link",
         "chat_link_placeholder": "e.g.: ChatGPT Next Web deployment address",
-        "quota_per_unit": "Quota per Dollar",
-        "quota_per_unit_placeholder": "Quota exchangeable per unit of currency",
         "retry_times": "Retry Times on Failure",
         "retry_times_placeholder": "Number of retry attempts on failure",
-        "display_token_stat": "Show Token Quota Instead of User Quota in Billing APIs",
-        "approximate_token": "Use Approximate Method to Estimate Token Count",
         "buttons": {
           "save": "Save General Settings"
         }
-      }
-    },
-    "other": {
-      "notice": {
-        "title": "Notice Settings",
-        "content": "Notice Content",
-        "content_placeholder": "Enter new notice content here, supports Markdown & HTML code",
-        "buttons": {
-          "save": "Save Notice"
-        }
-      },
-      "system": {
-        "title": "System Settings",
-        "name": "System Name",
-        "name_placeholder": "Please enter system name",
-        "logo": "Logo Image URL",
-        "logo_placeholder": "Enter Logo image URL here",
-        "theme": {
-          "title": "Theme Name",
-          "link": "Available Themes",
-          "placeholder": "Please enter theme name"
-        },
-        "buttons": {
-          "save_name": "Set System Name",
-          "save_logo": "Set Logo",
-          "save_theme": "Set Theme (Restart Required)"
-        }
-      },
-      "content": {
-        "title": "Content Settings",
-        "homepage": {
-          "title": "Homepage Content",
-          "placeholder": "Enter homepage content here, supports Markdown & HTML code. Status information will not be shown after setting. If a link is entered, it will be used as the src attribute of an iframe, allowing you to set any webpage as homepage."
-        },
-        "about": {
-          "title": "About System",
-          "description": "You can set about content in settings page, supports HTML & Markdown",
-          "repository": "Project Repository:",
-          "loading_failed": "Failed to load about content..."
-        },
-        "footer": {
-          "title": "Footer",
-          "placeholder": "Enter new footer here, leave empty to use default footer, supports HTML code"
-        },
-        "buttons": {
-          "save_homepage": "Save Homepage Content",
-          "save_about": "Save About",
-          "save_footer": "Set Footer"
-        }
-      },
-      "copyright": {
-        "notice": "Removing One API's copyright notice requires authorization. Project maintenance requires significant effort, if this project is meaningful to you, please actively support it."
       }
     }
   },
   "footer": {
     "built_by": "built by",
     "built_by_name": "JustSong",
-    "license": ", source code is licensed under the",
+    "license": ", built based on One API, source code is licensed under the",
     "mit": "MIT License"
   },
   "home": {
     "welcome": {
-      "title": "Welcome to One API",
-      "description": "One API is a LLM API management and distribution system that helps you better manage and use LLM APIs from various providers.",
+      "title": "Welcome to MyApi",
+      "description": "MyApi is a LLM API management and distribution system that helps you better manage and use LLM APIs from various providers.",
       "login_notice": "To use the service, please login or register first."
     },
     "system_status": {
@@ -622,15 +528,11 @@
       },
       "config": {
         "title": "System Configuration",
-        "email_verify": "Email Verification: ",
-        "github_oauth": "GitHub OAuth: ",
-        "wechat_login": "WeChat Login: ",
         "turnstile": "Turnstile Check: ",
         "enabled": "Enabled",
         "disabled": "Disabled"
       }
-    },
-    "loading_failed": "Failed to load homepage content..."
+    }
   },
   "auth": {
     "login": {
@@ -674,12 +576,6 @@
         "notice": "New password has been generated, please click the password field or button above to copy. Please login and change your password as soon as possible!"
       }
     }
-  },
-  "about": {
-    "title": "About",
-    "description": "One API is an open-source API management and proxy platform.",
-    "repository": "Repository: ",
-    "loading_failed": "Loading failed"
   },
   "messages": {
     "success": {
