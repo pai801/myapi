@@ -16,7 +16,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	tempDir, err := os.MkdirTemp("", "one-api-codex-tests-*")
+	tempDir, err := os.MkdirTemp("", "myapi-codex-tests-*")
 	if err != nil {
 		panic(err)
 	}

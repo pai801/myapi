@@ -8,12 +8,12 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/blacklist"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/blacklist"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/common/random"
 )
 
 const (

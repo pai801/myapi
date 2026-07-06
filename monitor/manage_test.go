@@ -3,8 +3,8 @@ package monitor
 import (
 	"testing"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/relay/model"
 	. "github.com/smartystreets/goconvey/convey"
 )
 

@@ -3,7 +3,7 @@ package image
 import (
 	"bytes"
 	"encoding/base64"
-	"github.com/songquanpeng/one-api/common/client"
+	"github.com/pai801/myapi/common/client"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"

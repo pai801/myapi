@@ -3,7 +3,7 @@ package middleware
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/helper"
+	"github.com/pai801/myapi/common/helper"
 )
 
 func RequestId() func(c *gin.Context) {

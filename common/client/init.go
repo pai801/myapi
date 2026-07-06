@@ -1,8 +1,8 @@
 package client
 
 import (
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/logger"
 	"net/http"
 	"net/url"
 	"time"

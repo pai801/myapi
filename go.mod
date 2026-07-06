@@ -1,4 +1,4 @@
-module github.com/songquanpeng/one-api
+module github.com/pai801/myapi
 
 go 1.23
 

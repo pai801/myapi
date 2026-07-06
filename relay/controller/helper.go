@@ -7,21 +7,21 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/relay/constant/role"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/relay/constant/role"
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/controller/validator"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/model"
+	"github.com/pai801/myapi/relay/adaptor/openai"
+	billingratio "github.com/pai801/myapi/relay/billing/ratio"
+	"github.com/pai801/myapi/relay/channeltype"
+	"github.com/pai801/myapi/relay/controller/validator"
+	"github.com/pai801/myapi/relay/meta"
+	relaymodel "github.com/pai801/myapi/relay/model"
+	"github.com/pai801/myapi/relay/relaymode"
 )
 
 type contextKey int

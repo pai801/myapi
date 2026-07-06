@@ -1,8 +1,8 @@
 package monitor
 
 import (
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/model"
 )
 
 // DisableChannel disable & notify

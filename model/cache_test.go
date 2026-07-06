@@ -3,8 +3,8 @@ package model
 import (
 	"testing"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/config"
 	. "github.com/smartystreets/goconvey/convey"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"

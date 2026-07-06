@@ -1,34 +1,35 @@
 <p align="right">
     <a href="./README.md">中文</a> | <strong>English</strong> | <a href="./README.ja.md">日本語</a>
 </p>
+> **Fork Notice**: This project is a fork of [One API](https://github.com/songquanpeng/one-api) and retains the original MIT License.
 
 <p align="center">
-  <a href="https://github.com/songquanpeng/one-api"><img src="https://raw.githubusercontent.com/songquanpeng/one-api/main/web/default/public/logo.png" width="150" height="150" alt="one-api logo"></a>
+  <a href="https://github.com/pai801/myapi"><img src="https://raw.githubusercontent.com/pai801/myapi/main/web/default/public/logo.png" width="150" height="150" alt="myapi logo"></a>
 </p>
 
 <div align="center">
 
-# One API
+# My API
 
 _✨ Access all LLM through the standard OpenAI API format, easy to deploy & use ✨_
 
 </div>
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/songquanpeng/one-api/main/LICENSE">
-    <img src="https://img.shields.io/github/license/songquanpeng/one-api?color=brightgreen" alt="license">
+  <a href="https://raw.githubusercontent.com/pai801/myapi/main/LICENSE">
+    <img src="https://img.shields.io/github/license/pai801/myapi?color=brightgreen" alt="license">
   </a>
-  <a href="https://github.com/songquanpeng/one-api/releases/latest">
-    <img src="https://img.shields.io/github/v/release/songquanpeng/one-api?color=brightgreen&include_prereleases" alt="release">
+  <a href="https://github.com/pai801/myapi/releases/latest">
+    <img src="https://img.shields.io/github/v/release/pai801/myapi?color=brightgreen&include_prereleases" alt="release">
   </a>
-  <a href="https://hub.docker.com/repository/docker/justsong/one-api">
-    <img src="https://img.shields.io/docker/pulls/justsong/one-api?color=brightgreen" alt="docker pull">
+  <a href="https://hub.docker.com/repository/docker/pai801/myapi">
+    <img src="https://img.shields.io/docker/pulls/pai801/myapi?color=brightgreen" alt="docker pull">
   </a>
-  <a href="https://github.com/songquanpeng/one-api/releases/latest">
-    <img src="https://img.shields.io/github/downloads/songquanpeng/one-api/total?color=brightgreen&include_prereleases" alt="release">
+  <a href="https://github.com/pai801/myapi/releases/latest">
+    <img src="https://img.shields.io/github/downloads/pai801/myapi/total?color=brightgreen&include_prereleases" alt="release">
   </a>
-  <a href="https://goreportcard.com/report/github.com/songquanpeng/one-api">
-    <img src="https://goreportcard.com/badge/github.com/songquanpeng/one-api" alt="GoReportCard">
+  <a href="https://goreportcard.com/report/github.com/pai801/myapi">
+    <img src="https://goreportcard.com/badge/github.com/pai801/myapi" alt="GoReportCard">
   </a>
 </p>
 
@@ -37,17 +38,7 @@ _✨ Access all LLM through the standard OpenAI API format, easy to deploy & use
   ·
   <a href="#usage">Usage</a>
   ·
-  <a href="https://github.com/songquanpeng/one-api/issues">Feedback</a>
-  ·
-  <a href="#screenshots">Screenshots</a>
-  ·
-  <a href="https://openai.justsong.cn/">Live Demo</a>
-  ·
-  <a href="#faq">FAQ</a>
-  ·
-  <a href="#related-projects">Related Projects</a>
-  ·
-  <a href="https://iamazing.cn/page/reward">Donate</a>
+  <a href="https://github.com/pai801/myapi/issues">Feedback</a>
 </p>
 
 > **Warning**: This README is translated by ChatGPT. Please feel free to submit a PR if you find any translation errors.
@@ -57,50 +48,46 @@ _✨ Access all LLM through the standard OpenAI API format, easy to deploy & use
 ## Features
 1. Support for multiple large models:
    + [x] [OpenAI ChatGPT Series Models](https://platform.openai.com/docs/guides/gpt/chat-completions-api) (Supports [Azure OpenAI API](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference))
-   + [x] [Anthropic Claude Series Models](https://anthropic.com)
+   + [x] [Anthropic Claude Series Models](https://anthropic.com) (Supports AWS Claude)
    + [x] [Google PaLM2 and Gemini Series Models](https://developers.generativeai.google)
    + [x] [Baidu Wenxin Yiyuan Series Models](https://cloud.baidu.com/doc/WENXINWORKSHOP/index.html)
    + [x] [Alibaba Tongyi Qianwen Series Models](https://help.aliyun.com/document_detail/2400395.html)
    + [x] [Zhipu ChatGLM Series Models](https://bigmodel.cn)
-2. Supports access to multiple channels through **load balancing**.
-3. Supports **stream mode** that enables typewriter-like effect through stream transmission.
-4. Supports **multi-machine deployment**. [See here](#multi-machine-deployment) for more details.
-5. Supports **token management** that allows setting token expiration time and usage count.
-6. Supports **voucher management** that enables batch generation and export of vouchers. Vouchers can be used for account balance replenishment.
-7. Supports **channel management** that allows bulk creation of channels.
-8. Supports **user grouping** and **channel grouping** for setting different rates for different groups.
-9. Supports channel **model list configuration**.
-10. Supports **quota details checking**.
-11. Supports **user invite rewards**.
-12. Allows display of balance in USD.
-13. Supports announcement publishing, recharge link setting, and initial balance setting for new users.
+2. Supports configuration of mirror sites and third-party proxy services.
+3. Supports access to multiple channels through **load balancing**.
+4. Supports **stream mode** that enables typewriter-like effect through stream transmission.
+5. Supports **token management** that allows setting allowed IP ranges and allowed model access.
+6. Supports **channel management** that allows bulk creation of channels.
+7. Supports **user grouping** and **channel grouping**.
+8. Supports channel **model list configuration**.
+9. Supports **quota details checking**.
+10. Supports model mapping to redirect user's request model. Please do not set it unless necessary, as it will cause the request body to be reconstructed instead of being directly passed through.
+11. Supports automatic retry on failure.
+12. Supports image generation API.
+13. Supports [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/providers/openai/). Fill in `https://gateway.ai.cloudflare.com/v1/ACCOUNT_TAG/GATEWAY/openai` in the proxy section of the channel settings.
 14. Offers rich **customization** options:
     1. Supports customization of system name, logo, and footer.
-    2. Supports customization of homepage and about page using HTML & Markdown code, or embedding a standalone webpage through iframe.
-15. Supports management API access through system access tokens.
+15. Supports management API access through system access tokens, enabling extension and customization of My API without secondary development. See the [API documentation](./docs/API.md) for details.
 16. Supports Cloudflare Turnstile user verification.
 17. Supports user management and multiple user login/registration methods:
-    + Email login/registration and password reset via email.
-    + [GitHub OAuth](https://github.com/settings/applications/new).
-    + WeChat Official Account authorization (requires additional deployment of [WeChat Server](https://github.com/songquanpeng/wechat-server)).
-18. Immediate support and encapsulation of other major model APIs as they become available.
+    + Email login/registration (with email whitelist support) and password reset via email.
 
 ## Deployment
 ### Docker Deployment
 
 Deployment command:
-`docker run --name one-api -d --restart always -p 3000:3000 -e TZ=Asia/Shanghai -v /home/ubuntu/data/one-api:/data justsong/one-api`
+`docker run --name myapi -d --restart always -p 3000:3000 -e TZ=Asia/Shanghai -v /home/ubuntu/data/myapi:/data pai801/myapi`
 
 Update command: `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower -cR`
 
 The first `3000` in `-p 3000:3000` is the port of the host, which can be modified as needed.
 
-Data will be saved in the `/home/ubuntu/data/one-api` directory on the host. Ensure that the directory exists and has write permissions, or change it to a suitable directory.
+Data will be saved in the `/home/ubuntu/data/myapi` directory on the host. Ensure that the directory exists and has write permissions, or change it to a suitable directory.
 
 Nginx reference configuration:
 ```
 server{
-   server_name openai.justsong.cn;  # Modify your domain name accordingly
+   server_name your-domain.com;  # Modify your domain name accordingly
 
    location / {
           client_max_body_size  64m;
@@ -129,71 +116,28 @@ sudo service nginx restart
 The initial account username is `root` and password is `123456`.
 
 ### Manual Deployment
-1. Download the executable file from [GitHub Releases](https://github.com/songquanpeng/one-api/releases/latest) or compile from source:
+1. Download the executable file from [GitHub Releases](https://github.com/pai801/myapi/releases/latest) or compile from source:
    ```shell
-   git clone https://github.com/songquanpeng/one-api.git
+   git clone https://github.com/pai801/myapi.git
 
    # Build the frontend
-   cd one-api/web/default
+   cd myapi/web/default
    npm install
    npm run build
 
    # Build the backend
    cd ../..
    go mod download
-   go build -ldflags "-s -w" -o one-api
+   go build -ldflags "-s -w" -o myapi
    ```
 2. Run:
    ```shell
-   chmod u+x one-api
-   ./one-api --port 3000 --log-dir ./logs
+   chmod u+x myapi
+   ./myapi --port 3000 --log-dir ./logs
    ```
 3. Access [http://localhost:3000/](http://localhost:3000/) and log in. The initial account username is `root` and password is `123456`.
 
-For more detailed deployment tutorials, please refer to [this page](https://iamazing.cn/page/how-to-deploy-a-website).
-
 Please refer to the [environment variables](#environment-variables) section for details on using environment variables.
-
-### Deployment on Control Panels (e.g., Baota)
-Refer to [#175](https://github.com/songquanpeng/one-api/issues/175) for detailed instructions.
-
-If you encounter a blank page after deployment, refer to [#97](https://github.com/songquanpeng/one-api/issues/97) for possible solutions.
-
-### Deployment on Third-Party Platforms
-<details>
-<summary><strong>Deploy on Sealos</strong></summary>
-<div>
-
-> Sealos supports high concurrency, dynamic scaling, and stable operations for millions of users.
-
-> Click the button below to deploy with one click.👇
-
-[![](https://raw.githubusercontent.com/labring-actions/templates/main/Deploy-on-Sealos.svg)](https://cloud.sealos.io/?openapp=system-fastdeploy?templateName=one-api)
-
-
-</div>
-</details>
-
-<details>
-<summary><strong>Deployment on Zeabur</strong></summary>
-<div>
-
-> Zeabur's servers are located overseas, automatically solving network issues, and the free quota is sufficient for personal usage.
-
-[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/7Q0KO3)
-
-1. First, fork the code.
-2. Go to [Zeabur](https://zeabur.com?referralCode=songquanpeng), log in, and enter the console.
-3. Create a new project. In Service -> Add Service, select Marketplace, and choose MySQL. Note down the connection parameters (username, password, address, and port).
-4. Copy the connection parameters and run ```create database `one-api` ``` to create the database.
-5. Then, in Service -> Add Service, select Git (authorization is required for the first use) and choose your forked repository.
-6. Automatic deployment will start, but please cancel it for now. Go to the Variable tab, add a `PORT` with a value of `3000`, and then add a `SQL_DSN` with a value of `<username>:<password>@tcp(<addr>:<port>)/one-api`. Save the changes. Please note that if `SQL_DSN` is not set, data will not be persisted, and the data will be lost after redeployment.
-7. Select Redeploy.
-8. In the Domains tab, select a suitable domain name prefix, such as "my-one-api". The final domain name will be "my-one-api.zeabur.app". You can also CNAME your own domain name.
-9. Wait for the deployment to complete, and click on the generated domain name to access One API.
-
-</div>
-</details>
 
 ## Configuration
 The system is ready to use out of the box.
@@ -205,22 +149,22 @@ After the system starts, log in as the `root` user to further configure the syst
 ## Usage
 Add your API Key on the `Channels` page, and then add an access token on the `Tokens` page.
 
-You can then use your access token to access One API. The usage is consistent with the [OpenAI API](https://platform.openai.com/docs/api-reference/introduction).
+You can then use your access token to access My API. The usage is consistent with the [OpenAI API](https://platform.openai.com/docs/api-reference/introduction).
 
-In places where the OpenAI API is used, remember to set the API Base to your One API deployment address, for example: `https://openai.justsong.cn`. The API Key should be the token generated in One API.
+In places where the OpenAI API is used, remember to set the API Base to your My API deployment address, for example: `https://your-domain.com`. The API Key should be the token generated in My API.
 
 Note that the specific API Base format depends on the client you are using.
 
 ```mermaid
 graph LR
     A(User)
-    A --->|Request| B(One API)
+    A --->|Request| B(My API)
     B -->|Relay Request| C(OpenAI)
     B -->|Relay Request| D(Azure)
     B -->|Relay Request| E(Other downstream channels)
 ```
 
-To specify which channel to use for the current request, you can add the channel ID after the token, for example: `Authorization: Bearer ONE_API_KEY-CHANNEL_ID`.
+To specify which channel to use for the current request, you can add the channel ID after the token, for example: `Authorization: Bearer MY_API_KEY-CHANNEL_ID`.
 Note that the token needs to be created by an administrator to specify the channel ID.
 
 If the channel ID is not provided, load balancing will be used to distribute the requests to multiple channels.
@@ -231,11 +175,11 @@ If the channel ID is not provided, load balancing will be used to distribute the
 2. `SESSION_SECRET`: When set, a fixed session key will be used to ensure that cookies of logged-in users are still valid after the system restarts.
     + Example: `SESSION_SECRET=random_string`
 3. `SQL_DSN`: When set, the specified database will be used instead of SQLite. Please use MySQL version 8.0.
-    + Example: `SQL_DSN=root:123456@tcp(localhost:3306)/oneapi`
+    + Example: `SQL_DSN=root:123456@tcp(localhost:3306)/myapi`
 4. `LOG_SQL_DSN`: When set, a separate database will be used for the `logs` table; please use MySQL or PostgreSQL.
-    + Example: `LOG_SQL_DSN=root:123456@tcp(localhost:3306)/oneapi-logs`
+    + Example: `LOG_SQL_DSN=root:123456@tcp(localhost:3306)/myapi-logs`
 5. `FRONTEND_BASE_URL`: When set, the specified frontend address will be used instead of the backend address.
-    + Example: `FRONTEND_BASE_URL=https://openai.justsong.cn`
+    + Example: `FRONTEND_BASE_URL=https://your-domain.com`
 6. 'MEMORY_CACHE_ENABLED': Enabling memory caching can cause a certain delay in updating user quotas, with optional values of 'true' and 'false'. If not set, it defaults to 'false'.
 7. `SYNC_FREQUENCY`: When set, the system will periodically sync configurations from the database, with the unit in seconds. If not set, no sync will happen.
     + Example: `SYNC_FREQUENCY=60`
@@ -262,7 +206,7 @@ If the channel ID is not provided, load balancing will be used to distribute the
 18. `USER_CONTENT_REQUEST_PROXY`: After setting up, use this agent to request content uploaded by users, such as images.
 19. `SQLITE_BUSY_TIMEOUT`: SQLite lock wait timeout setting, measured in milliseconds, default to '3000'.
 20. `GEMINI_SAFETY_SETTING`: Gemini's security settings are set to 'BLOCK-NONE' by default.
-21. `GEMINI_VERSION`: The Gemini version used by the One API, which defaults to 'v1'.
+21. `GEMINI_VERSION`: The Gemini version used by My API, which defaults to 'v1'.
 22. `THE`: The system's theme setting, default to 'default', specific optional values refer to [here] (./web/README. md).
 23. `ENABLE_METRIC`: Whether to disable channels based on request success rate, default not enabled, optional values are 'true' and 'false'.
 24. `METRIC_QUEUE_SIZE`: Request success rate statistics queue size, default to '10'.
@@ -278,41 +222,5 @@ If the channel ID is not provided, load balancing will be used to distribute the
 3. `--version`: Prints the system version number and exits.
 4. `--help`: Displays the command usage help and parameter descriptions.
 
-## Screenshots
-![channel](https://user-images.githubusercontent.com/39998050/233837954-ae6683aa-5c4f-429f-a949-6645a83c9490.png)
-![token](https://user-images.githubusercontent.com/39998050/233837971-dab488b7-6d96-43af-b640-a168e8d1c9bf.png)
-
-## FAQ
-1. What is quota? How is it calculated? Does One API have quota calculation issues?
-    + Quota = Group multiplier * Model multiplier * (number of prompt tokens + number of completion tokens * completion multiplier)
-    + The completion multiplier is fixed at 1.33 for GPT3.5 and 2 for GPT4, consistent with the official definition.
-    + If it is not a stream mode, the official API will return the total number of tokens consumed. However, please note that the consumption multipliers for prompts and completions are different.
-2. Why does it prompt "insufficient quota" even though my account balance is sufficient?
-    + Please check if your token quota is sufficient. It is separate from the account balance.
-    + The token quota is used to set the maximum usage and can be freely set by the user.
-3. It says "No available channels" when trying to use a channel. What should I do?
-    + Please check the user and channel group settings.
-    + Also check the channel model settings.
-4. Channel testing reports an error: "invalid character '<' looking for beginning of value"
-    + This error occurs when the returned value is not valid JSON but an HTML page.
-    + Most likely, the IP of your deployment site or the node of the proxy has been blocked by CloudFlare.
-5. ChatGPT Next Web reports an error: "Failed to fetch"
-    + Do not set `BASE_URL` during deployment.
-    + Double-check that your interface address and API Key are correct.
-
-## Related Projects
-* [FastGPT](https://github.com/labring/FastGPT): Knowledge question answering system based on the LLM
-* [VChart](https://github.com/VisActor/VChart):  More than just a cross-platform charting library, but also an expressive data storyteller.
-* [VMind](https://github.com/VisActor/VMind):  Not just automatic, but also fantastic. Open-source solution for intelligent visualization.
-* * [CherryStudio](https://github.com/CherryHQ/cherry-studio):  A cross-platform AI client that integrates multiple service providers and supports local knowledge base management.
-
 ## Note
-This project is an open-source project. Please use it in compliance with OpenAI's [Terms of Use](https://openai.com/policies/terms-of-use) and **applicable laws and regulations**. It must not be used for illegal purposes.
-
-This project is released under the MIT license. Based on this, attribution and a link to this project must be included at the bottom of the page.
-
-The same applies to derivative projects based on this project.
-
-If you do not wish to include attribution, prior authorization must be obtained.
-
-According to the MIT license, users should bear the risk and responsibility of using this project, and the developer of this open-source project is not responsible for this.
+This project is a fork of One API (MIT) and retains the MIT License.

@@ -1,7 +1,7 @@
 services:
   - type: web
-    name: my-one-api
-    repo: https://github.com/yj173055792/one-api
+    name: myapi
+    repo: https://github.com/pai801/myapi
     branch: main
     runtime: docker
     plan: free

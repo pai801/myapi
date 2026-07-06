@@ -5,9 +5,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/logger"
 	"gorm.io/gorm"
 )
 

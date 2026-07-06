@@ -3,8 +3,8 @@ package controller
 import (
 	"net/http"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/config"
 
 	"github.com/gin-gonic/gin"
 )

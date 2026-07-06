@@ -13,13 +13,13 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/relay/constant"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/common/render"
+	"github.com/pai801/myapi/relay/constant"
+	"github.com/pai801/myapi/relay/meta"
+	"github.com/pai801/myapi/relay/model"
 )
 
 const maxSSEEventBytes = constant.ScannerBufferMax * 2

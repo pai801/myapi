@@ -14,14 +14,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/copier"
 	"github.com/pkg/errors"
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
-	"github.com/songquanpeng/one-api/relay/adaptor/aws/utils"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/relay/adaptor/anthropic"
+	"github.com/pai801/myapi/relay/adaptor/aws/utils"
+	"github.com/pai801/myapi/relay/adaptor/openai"
+	relaymodel "github.com/pai801/myapi/relay/model"
 )
 
 // https://docs.aws.amazon.com/bedrock/latest/userguide/model-ids.html

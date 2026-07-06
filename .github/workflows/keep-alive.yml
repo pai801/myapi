@@ -8,6 +8,6 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Render one-api
+      - name: Ping Render myapi
         run: |
-          curl -s -o /dev/null -w "%{http_code}" https://my-one-api-9bew.onrender.com/
+          curl -s -o /dev/null -w "%{http_code}" https://myapi.onrender.com/

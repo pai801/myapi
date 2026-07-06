@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/common/env"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/pai801/myapi/common/env"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/logger"
 )
 
 func SetUpLogger(server *gin.Engine) {

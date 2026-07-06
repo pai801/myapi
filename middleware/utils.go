@@ -3,10 +3,10 @@ package middleware
 import (
 	"fmt"
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/model"
 	"strings"
 )
 

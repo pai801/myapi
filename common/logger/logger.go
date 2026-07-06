@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/common/config"
+	"github.com/pai801/myapi/common/config"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 

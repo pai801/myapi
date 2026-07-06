@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/songquanpeng/one-api/common/env"
+	"github.com/pai801/myapi/common/env"
 
 	"github.com/google/uuid"
 )
@@ -28,7 +28,7 @@ func init() {
 
 var SessionSecret = uuid.New().String()
 var JWTExpiresIn = env.Int("JWT_EXPIRES_IN", 604800) // 默认 7 天
-var JWTSecret = "one-api-jwt-secret"
+var JWTSecret = "myapi-jwt-secret"
 
 var OptionMap map[string]string
 var OptionMapRWMutex sync.RWMutex

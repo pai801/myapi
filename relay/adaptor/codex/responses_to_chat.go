@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/pai801/myapi/common/logger"
 )
 
 func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream bool) []byte {

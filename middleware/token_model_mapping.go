@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/common/logger"
 )
 
 // TokenModelMapping 根据 token 的 ModelMapping 配置，把 ctxkey.RequestModel 映射为目标模型名

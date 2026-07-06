@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/relay/model"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

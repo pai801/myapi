@@ -10,17 +10,17 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "github.com/joho/godotenv/autoload"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/i18n"
-	"github.com/songquanpeng/one-api/common/logcleanup"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/controller"
-	"github.com/songquanpeng/one-api/middleware"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/router"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/client"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/i18n"
+	"github.com/pai801/myapi/common/logcleanup"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/controller"
+	"github.com/pai801/myapi/middleware"
+	"github.com/pai801/myapi/model"
+	"github.com/pai801/myapi/relay/adaptor/openai"
+	"github.com/pai801/myapi/router"
 )
 
 //go:embed web/build/*

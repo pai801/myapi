@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/logger"
 )
 
 var (
@@ -21,8 +21,8 @@ var (
 func printHelp() {
 	fmt.Println("One API " + Version + " - All in one API service for OpenAI API.")
 	fmt.Println("Copyright (C) 2023 JustSong. All rights reserved.")
-	fmt.Println("GitHub: https://github.com/songquanpeng/one-api")
-	fmt.Println("Usage: one-api [--port <port>] [--log-dir <log directory>] [--version] [--help]")
+	fmt.Println("GitHub: https://github.com/pai801/myapi")
+	fmt.Println("Usage: myapi [--port <port>] [--log-dir <log directory>] [--version] [--help]")
 }
 
 func Init() {

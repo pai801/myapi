@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt"
-	"github.com/songquanpeng/one-api/common/config"
+	"github.com/pai801/myapi/common/config"
 )
 
 type JWTClaims struct {

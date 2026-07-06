@@ -2,10 +2,10 @@ package controller
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/middleware"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/middleware"
+	"github.com/pai801/myapi/model"
 	"net/http"
 	"strconv"
 	"strings"

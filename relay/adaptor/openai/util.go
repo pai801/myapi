@@ -1,7 +1,7 @@
 package openai
 
 import (
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/relay/model"
 )
 
 func ErrorWrapper(err error, code string, statusCode int) *model.ErrorWithStatusCode {

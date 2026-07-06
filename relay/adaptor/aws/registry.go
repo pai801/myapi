@@ -1,9 +1,9 @@
 package aws
 
 import (
-	claude "github.com/songquanpeng/one-api/relay/adaptor/aws/claude"
-	llama3 "github.com/songquanpeng/one-api/relay/adaptor/aws/llama3"
-	"github.com/songquanpeng/one-api/relay/adaptor/aws/utils"
+	claude "github.com/pai801/myapi/relay/adaptor/aws/claude"
+	llama3 "github.com/pai801/myapi/relay/adaptor/aws/llama3"
+	"github.com/pai801/myapi/relay/adaptor/aws/utils"
 )
 
 type AwsModelType int

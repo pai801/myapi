@@ -11,18 +11,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/logger"
-	dbmodel "github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/apitype"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/common/logger"
+	dbmodel "github.com/pai801/myapi/model"
+	"github.com/pai801/myapi/relay"
+	"github.com/pai801/myapi/relay/adaptor"
+	"github.com/pai801/myapi/relay/adaptor/openai"
+	"github.com/pai801/myapi/relay/apitype"
+	billingratio "github.com/pai801/myapi/relay/billing/ratio"
+	"github.com/pai801/myapi/relay/channeltype"
+	"github.com/pai801/myapi/relay/meta"
+	"github.com/pai801/myapi/relay/model"
 )
 
 func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {

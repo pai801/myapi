@@ -4,21 +4,21 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"github.com/songquanpeng/one-api/common/render"
+	"github.com/pai801/myapi/common/render"
 	"io"
 	"net/http"
 	"strings"
 
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/random"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/random"
 
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/image"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/constant"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/image"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/relay/adaptor/openai"
+	"github.com/pai801/myapi/relay/constant"
+	"github.com/pai801/myapi/relay/model"
 )
 
 func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {

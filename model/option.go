@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/relay/apitype"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/relay/apitype"
+	billingratio "github.com/pai801/myapi/relay/billing/ratio"
 )
 
 const ModelEndpointTypesKey = "ModelEndpointTypes"

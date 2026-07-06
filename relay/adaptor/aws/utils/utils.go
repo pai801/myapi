@@ -3,7 +3,7 @@ package utils
 import (
 	"net/http"
 
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	relaymodel "github.com/pai801/myapi/relay/model"
 )
 
 func WrapErr(err error) *relaymodel.ErrorWithStatusCode {

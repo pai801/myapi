@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/model"
 	"gorm.io/gorm/clause"
 )
 

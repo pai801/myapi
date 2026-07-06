@@ -9,10 +9,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/aws/utils"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/relay/adaptor"
+	"github.com/pai801/myapi/relay/adaptor/aws/utils"
+	"github.com/pai801/myapi/relay/meta"
+	"github.com/pai801/myapi/relay/model"
 )
 
 var _ adaptor.Adaptor = new(Adaptor)

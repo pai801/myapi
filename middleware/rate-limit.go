@@ -8,8 +8,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/config"
 )
 
 var timeFormat = "2006-01-02T15:04:05.000Z"

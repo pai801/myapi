@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/i18n"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/pai801/myapi/common/config"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/i18n"
+	"github.com/pai801/myapi/model"
 
 	"github.com/gin-gonic/gin"
 )

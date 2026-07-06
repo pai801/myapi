@@ -6,8 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	. "github.com/smartystreets/goconvey/convey"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/model"
 )
 
 func TestMatchChannelsByAliasExact(t *testing.T) {

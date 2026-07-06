@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/gin-gonic/gin"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/pai801/myapi/relay/model"
 	"io"
 	"net/http"
 )

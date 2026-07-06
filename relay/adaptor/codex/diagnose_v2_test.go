@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/songquanpeng/one-api/relay/adaptor/codex"
+	"github.com/pai801/myapi/relay/adaptor/codex"
 	"github.com/tidwall/gjson"
 )
 

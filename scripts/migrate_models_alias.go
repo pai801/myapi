@@ -6,9 +6,9 @@ import (
 
 	_ "github.com/joho/godotenv/autoload"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/model"
 )
 
 func main() {

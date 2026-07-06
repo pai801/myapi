@@ -3,9 +3,9 @@ package model
 import (
 	"sync"
 
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/relay/apitype"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/common/logger"
+	"github.com/pai801/myapi/relay/apitype"
 )
 
 var modelMetadataMap = make(map[string]*ModelMetadata)

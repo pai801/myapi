@@ -9,12 +9,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/relay/adaptor"
+	"github.com/pai801/myapi/relay/adaptor/openai"
+	"github.com/pai801/myapi/relay/meta"
+	"github.com/pai801/myapi/relay/model"
+	"github.com/pai801/myapi/relay/relaymode"
 )
 
 // https://cloud.tencent.com/document/api/1729/101837
