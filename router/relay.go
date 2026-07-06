@@ -20,7 +20,7 @@ func SetRelayRouter(router *gin.Engine) {
 	relayV1Router := router.Group("/v1")
 	relayV1Router.Use(middleware.RelayPanicRecover(), middleware.TokenAuth(), middleware.TokenModelMapping(), middleware.Distribute())
 	{
-		relayV1Router.Any("/oneapi/proxy/:channelid/*target", controller.Relay)
+		relayV1Router.Any("/myapi/proxy/:channelid/*target", controller.Relay)
 		relayV1Router.POST("/completions", controller.Relay)
 		relayV1Router.POST("/chat/completions", controller.Relay)
 		relayV1Router.POST("/responses", controller.Relay)

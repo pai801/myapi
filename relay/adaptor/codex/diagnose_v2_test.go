@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -12,9 +14,14 @@ import (
 )
 
 func TestDiagnoseV2(t *testing.T) {
-	base := "/Users/rafe/work/github/one-api"
+	_, thisFile, _, _ := runtime.Caller(0)
+	base := filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
+	rawReqPath := filepath.Join(base, "request_raw.txt")
+	if _, err := os.Stat(rawReqPath); os.IsNotExist(err) {
+		t.Skipf("skip: %s not found", rawReqPath)
+	}
 
-	rawReq, err := os.ReadFile(base + "/request_raw.txt")
+	rawReq, err := os.ReadFile(rawReqPath)
 	if err != nil { t.Fatalf("read request: %v", err) }
 	firstLine := ""
 	for _, line := range strings.Split(string(rawReq), "\n") {

@@ -19,10 +19,10 @@ var (
 )
 
 func printHelp() {
-	fmt.Println("One API " + Version + " - All in one API service for OpenAI API.")
-	fmt.Println("Copyright (C) 2023 JustSong. All rights reserved.")
+	fmt.Println("MyAPI " + Version + " - All in one API service for OpenAI API.")
+	fmt.Println("Copyright (C) 2026 Pai801. All rights reserved.")
 	fmt.Println("GitHub: https://github.com/pai801/myapi")
-	fmt.Println("Usage: myapi [--port <port>] [--log-dir <log directory>] [--version] [--help]")
+	fmt.Println("Usage: MyAPI --port <port> [--log-dir <log directory>] [--version] [--help]")
 }
 
 func Init() {

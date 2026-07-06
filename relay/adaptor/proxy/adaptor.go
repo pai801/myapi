@@ -58,7 +58,7 @@ func (a *Adaptor) GetChannelName() string {
 
 // GetRequestURL remove static prefix, and return the real request url to the upstream service
 func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
-	prefix := fmt.Sprintf("/v1/oneapi/proxy/%d", meta.ChannelId)
+	prefix := fmt.Sprintf("/v1/myapi/proxy/%d", meta.ChannelId)
 	return meta.BaseURL + strings.TrimPrefix(meta.RequestURLPath, prefix), nil
 
 }
