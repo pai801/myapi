@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/config"
 	"github.com/pai801/myapi/common/ctxkey"
 	"github.com/pai801/myapi/common/helper"
 	"github.com/pai801/myapi/common/logger"
@@ -90,8 +91,7 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 	}
 
 	// 存储请求体和请求头到 context 中
-	const maxBodySize = 256 * 1024 // 256KB
-	if len(requestBody) <= maxBodySize {
+	if len(requestBody) <= config.MaxLoggedBodySize {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(requestBody))
 	} else {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(requestBody)))
@@ -227,8 +227,7 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	}
 
 	// 存储请求体和请求头到 context 中
-	const maxBodySizeResp = 256 * 1024 // 256KB
-	if len(chatRequest) <= maxBodySizeResp {
+	if len(chatRequest) <= config.MaxLoggedBodySize {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(chatRequest))
 	} else {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(chatRequest)))

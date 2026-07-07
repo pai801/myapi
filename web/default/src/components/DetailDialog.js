@@ -7,7 +7,7 @@ import {
   Header,
   Segment,
 } from 'semantic-ui-react';
-import { copy, showSuccess, showWarning } from '../helpers';
+import { copy, isMobile, showSuccess, showWarning } from '../helpers';
 
 function formatJSON(value) {
   if (!value) return null;
@@ -25,10 +25,10 @@ function DetailField({ label, value, onCopy, collapsible }) {
 
   const segmentStyle = {
     fontFamily: 'monospace',
-    fontSize: '0.8rem',
+    fontSize: isMobile() ? '0.75rem' : '0.8rem',
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-all',
-    ...(canCollapse && !expanded ? { maxHeight: 300, overflow: 'auto' } : {}),
+    ...(canCollapse && !expanded ? { maxHeight: isMobile() ? 200 : 300, overflow: 'auto' } : {}),
   };
 
   return (
@@ -110,7 +110,13 @@ export default function DetailDialog({ open, onClose, logItem }) {
   }
 
   return (
-    <Modal key={logItem?.id ?? 'empty'} open={open} onClose={onClose} size='large'>
+    <Modal
+      key={logItem?.id ?? 'empty'}
+      open={open}
+      onClose={onClose}
+      size={isMobile() ? 'small' : 'large'}
+      className='log-detail-modal'
+    >
       <Modal.Header>
         详情
       </Modal.Header>

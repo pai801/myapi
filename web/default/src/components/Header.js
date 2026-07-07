@@ -8,7 +8,6 @@ import {
   Dropdown,
   Icon,
   Menu,
-  Segment,
 } from 'semantic-ui-react';
 import {
   API,
@@ -85,6 +84,7 @@ const Header = () => {
         return (
           <Menu.Item
             key={button.name}
+            className='mobile-header-drawer-item'
             onClick={() => {
               navigate(button.to);
               setShowSidebar(false);
@@ -129,6 +129,7 @@ const Header = () => {
         <Menu
           borderless
           size='large'
+          className='mobile-header-bar'
           style={
             showSidebar
               ? {
@@ -150,24 +151,27 @@ const Header = () => {
               padding: '0 10px',
             }}
           >
-            <Menu.Item as={Link} to='/'>
+            <Menu.Item as={Link} to='/' onClick={() => setShowSidebar(false)}>
               <img src={logo} alt='logo' style={{ marginRight: '0.75em' }} />
               <div style={{ fontSize: '20px' }}>
                 <b>{systemName}</b>
               </div>
             </Menu.Item>
             <Menu.Menu position='right'>
-              <Menu.Item onClick={toggleSidebar}>
+              <Menu.Item onClick={toggleSidebar} className='mobile-header-toggle'>
                 <Icon name={showSidebar ? 'close' : 'sidebar'} />
               </Menu.Item>
             </Menu.Menu>
           </div>
         </Menu>
-        {showSidebar ? (
-          <Segment style={{ marginTop: 0, borderTop: '0' }}>
-            <Menu secondary vertical style={{ width: '100%', margin: 0 }}>
+        <div
+          className={`mobile-header-overlay ${showSidebar ? 'is-open' : ''}`}
+          onClick={() => setShowSidebar(false)}
+        />
+        <div className={`mobile-header-drawer ${showSidebar ? 'is-open' : ''}`}>
+          <Menu secondary vertical className='mobile-header-drawer-menu'>
               {renderButtons(true)}
-              <Menu.Item>
+              <Menu.Item className='mobile-header-drawer-item'>
                 <Dropdown
                   selection
                   trigger={
@@ -178,32 +182,36 @@ const Header = () => {
                   }
                   options={languageOptions}
                   value={i18n.language}
-                  onChange={(_, { value }) => changeLanguage(value)}
+                  onChange={(_, { value }) => {
+                    changeLanguage(value);
+                    setShowSidebar(false);
+                  }}
                 />
               </Menu.Item>
-              <Menu.Item>
+              <Menu.Item className='mobile-header-drawer-item'>
                 {userState.user ? (
-                  <Button onClick={logout} style={{ color: '#666666' }}>
+                  <Button
+                    onClick={async () => {
+                      setShowSidebar(false);
+                      await logout();
+                    }}
+                    style={{ color: '#666666' }}
+                  >
                     {t('header.logout')}
                   </Button>
                 ) : (
-                  <>
-                    <Button
-                      onClick={() => {
-                        setShowSidebar(false);
-                        navigate('/login');
-                      }}
-                    >
-                      {t('header.login')}
-                    </Button>
-                  </>
+                  <Button
+                    onClick={() => {
+                      setShowSidebar(false);
+                      navigate('/login');
+                    }}
+                  >
+                    {t('header.login')}
+                  </Button>
                 )}
               </Menu.Item>
-            </Menu>
-          </Segment>
-        ) : (
-          <></>
-        )}
+          </Menu>
+        </div>
       </>
     );
   }

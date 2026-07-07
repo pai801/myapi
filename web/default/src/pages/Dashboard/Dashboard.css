@@ -71,8 +71,9 @@
 /* 优化图表响应式布局 */
 @media (max-width: 768px) {
     .dashboard-container {
-        padding: 10px 16px;   /* 移动端也相应减小内边距 */
+        padding: 10px 0 24px;
         max-width: 100%;      /* 移动端占满全宽 */
+        margin-top: 0;
     }
     
     .chart-container {

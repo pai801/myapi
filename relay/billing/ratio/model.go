@@ -708,6 +708,7 @@ var ModelRatio = map[string]float64{
 	"x-ai/grok-beta":                                  7.5,
 	"x-ai/grok-vision-beta":                           7.5,
 	"xwin-lm/xwin-lm-70b":                             1.875,
+	"free":                                            0,
 }
 
 var CompletionRatio = map[string]float64{
@@ -830,8 +831,26 @@ func GetModelRatio(name string, channelType int) float64 {
 	if ratio, ok := DefaultModelRatio[name]; ok {
 		return ratio
 	}
-	//logger.Warn(nil, "model ratio not found: "+name)
-	return 30
+	if idx := strings.LastIndex(name, "/"); idx != -1 {
+		base := name[idx+1:]
+		if base != name {
+			model := fmt.Sprintf("%s(%d)", base, channelType)
+			if ratio, ok := ModelRatio[model]; ok {
+				return ratio
+			}
+			if ratio, ok := DefaultModelRatio[model]; ok {
+				return ratio
+			}
+			if ratio, ok := ModelRatio[base]; ok {
+				return ratio
+			}
+			if ratio, ok := DefaultModelRatio[base]; ok {
+				return ratio
+			}
+		}
+	}
+	logger.Log.Errorf("model ratio not found: %s", name)
+	return 1
 }
 
 func CompletionRatio2JSONString() string {

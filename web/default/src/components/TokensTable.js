@@ -282,7 +282,8 @@ const TokensTable = () => {
         />
       </Form>
 
-      <Table basic={'very'} compact size='small'>
+      <div className='table-scroll-wrapper'>
+      <Table unstackable basic={'very'} compact size='small'>
         <Table.Header>
           <Table.Row>
             <Table.HeaderCell
@@ -428,37 +429,40 @@ const TokensTable = () => {
         <Table.Footer>
           <Table.Row>
             <Table.HeaderCell colSpan='4'>
-              <Button size='small' as={Link} to='/token/add' loading={loading}>
-                {t('token.buttons.add')}
-              </Button>
-              <Button size='small' onClick={refresh} loading={loading}>
-                {t('token.buttons.refresh')}
-              </Button>
-              <Dropdown
-                placeholder={t('token.sort.placeholder')}
-                selection
-                options={[
-                  { key: '', text: t('token.sort.default'), value: '' },
-                ]}
-                value={orderBy}
-                onChange={handleOrderByChange}
-                style={{ marginLeft: '10px' }}
-              />
-              <Pagination
-                floated='right'
-                activePage={activePage}
-                onPageChange={onPaginationChange}
-                size='small'
-                siblingRange={1}
-                totalPages={
-                  Math.ceil(tokens.length / ITEMS_PER_PAGE) +
-                  (tokens.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                }
-              />
+              <div className='scroll-x-nowrap'>
+                <Button size='small' as={Link} to='/token/add' loading={loading}>
+                  {t('token.buttons.add')}
+                </Button>
+                <Button size='small' onClick={refresh} loading={loading}>
+                  {t('token.buttons.refresh')}
+                </Button>
+                <Dropdown
+                  placeholder={t('token.sort.placeholder')}
+                  selection
+                  options={[
+                    { key: '', text: t('token.sort.default'), value: '' },
+                  ]}
+                  value={orderBy}
+                  onChange={handleOrderByChange}
+                  style={{ marginLeft: '10px' }}
+                />
+                <Pagination
+                  floated='right'
+                  activePage={activePage}
+                  onPageChange={onPaginationChange}
+                  size='small'
+                  siblingRange={1}
+                  totalPages={
+                    Math.ceil(tokens.length / ITEMS_PER_PAGE) +
+                    (tokens.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
+                  }
+                />
+              </div>
             </Table.HeaderCell>
           </Table.Row>
         </Table.Footer>
       </Table>
+      </div>
     </>
   );
 };

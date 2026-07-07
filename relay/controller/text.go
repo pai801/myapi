@@ -44,8 +44,7 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 
 	// Store request body and headers in context for logging
 	bodyJSON, _ := json.Marshal(textRequest)
-	const maxBodySize = 256 * 1024 // 256KB
-	if len(bodyJSON) <= maxBodySize {
+	if len(bodyJSON) <= config.MaxLoggedBodySize {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(bodyJSON))
 	} else {
 		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(bodyJSON)))

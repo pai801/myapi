@@ -441,7 +441,8 @@ const ChannelsTable = () => {
           {t('channel.detail_notice')}
         </Message>
       )}
-      <Table basic={'very'} compact size='small'>
+      <div className='table-scroll-wrapper'>
+      <Table unstackable basic={'very'} compact size='small'>
         <Table.Header>
           <Table.Row>
             <Table.HeaderCell
@@ -485,6 +486,7 @@ const ChannelsTable = () => {
               {t('channel.table.status')}
             </Table.HeaderCell>
             <Table.HeaderCell
+              className='hide-on-mobile'
               style={{ cursor: 'pointer' }}
               onClick={() => {
                 sortChannel('response_time');
@@ -493,6 +495,7 @@ const ChannelsTable = () => {
               {t('channel.table.response_time')}
             </Table.HeaderCell>
             <Table.HeaderCell
+              className='hide-on-mobile'
               style={{ cursor: 'pointer' }}
               onClick={() => {
                 sortChannel('balance');
@@ -533,7 +536,7 @@ const ChannelsTable = () => {
                   <Table.Cell>{renderGroup(channel.group)}</Table.Cell>
                   <Table.Cell>{renderType(channel.type, t)}</Table.Cell>
                   <Table.Cell>{renderStatus(channel.status, t)}</Table.Cell>
-                  <Table.Cell>
+                  <Table.Cell className='hide-on-mobile'>
                     <Popup
                       content={
                         channel.test_time
@@ -545,7 +548,7 @@ const ChannelsTable = () => {
                       basic
                     />
                   </Table.Cell>
-                  <Table.Cell>
+                  <Table.Cell className='hide-on-mobile'>
                     <Popup
                       trigger={
                         <span
@@ -596,6 +599,7 @@ const ChannelsTable = () => {
                   </Table.Cell>
                   <Table.Cell>
                     <div
+                      className='scroll-x-nowrap'
                       style={{
                         display: 'flex',
                         alignItems: 'center',
@@ -677,69 +681,72 @@ const ChannelsTable = () => {
         <Table.Footer>
           <Table.Row>
             <Table.HeaderCell colSpan={showDetail ? '10' : '8'}>
-              <Button size='tiny' as={Link} to='/channel/add' loading={loading}>
-                {t('channel.buttons.add')}
-              </Button>
-              <Button
-                size='tiny'
-                loading={loading}
-                onClick={() => {
-                  testChannels('all');
-                }}
-              >
-                {t('channel.buttons.test_all')}
-              </Button>
-              <Button
-                size='tiny'
-                loading={loading}
-                onClick={() => {
-                  testChannels('disabled');
-                }}
-              >
-                {t('channel.buttons.test_disabled')}
-              </Button>
-              <Popup
-                trigger={
-                  <Button size='tiny' loading={loading}>
-                    {t('channel.buttons.delete_disabled')}
-                  </Button>
-                }
-                on='click'
-                flowing
-                hoverable
-              >
+              <div className='scroll-x-nowrap'>
+                <Button size='tiny' as={Link} to='/channel/add' loading={loading}>
+                  {t('channel.buttons.add')}
+                </Button>
                 <Button
                   size='tiny'
                   loading={loading}
-                  negative
-                  onClick={deleteAllDisabledChannels}
+                  onClick={() => {
+                    testChannels('all');
+                  }}
                 >
-                  {t('channel.buttons.confirm_delete_disabled')}
+                  {t('channel.buttons.test_all')}
                 </Button>
-              </Popup>
-              <Pagination
-                floated='right'
-                activePage={activePage}
-                onPageChange={onPaginationChange}
-                size='tiny'
-                siblingRange={1}
-                totalPages={
-                  Math.ceil(channels.length / ITEMS_PER_PAGE) +
-                  (channels.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                }
-              />
-              <Button size='tiny' onClick={refresh} loading={loading}>
-                {t('channel.buttons.refresh')}
-              </Button>
-              <Button size='tiny' onClick={toggleShowDetail}>
-                {showDetail
-                  ? t('channel.buttons.hide_detail')
-                  : t('channel.buttons.show_detail')}
-              </Button>
+                <Button
+                  size='tiny'
+                  loading={loading}
+                  onClick={() => {
+                    testChannels('disabled');
+                  }}
+                >
+                  {t('channel.buttons.test_disabled')}
+                </Button>
+                <Popup
+                  trigger={
+                    <Button size='tiny' loading={loading}>
+                      {t('channel.buttons.delete_disabled')}
+                    </Button>
+                  }
+                  on='click'
+                  flowing
+                  hoverable
+                >
+                  <Button
+                    size='tiny'
+                    loading={loading}
+                    negative
+                    onClick={deleteAllDisabledChannels}
+                  >
+                    {t('channel.buttons.confirm_delete_disabled')}
+                  </Button>
+                </Popup>
+                <Button size='tiny' onClick={refresh} loading={loading}>
+                  {t('channel.buttons.refresh')}
+                </Button>
+                <Button size='tiny' onClick={toggleShowDetail}>
+                  {showDetail
+                    ? t('channel.buttons.hide_detail')
+                    : t('channel.buttons.show_detail')}
+                </Button>
+                <Pagination
+                  floated='right'
+                  activePage={activePage}
+                  onPageChange={onPaginationChange}
+                  size='tiny'
+                  siblingRange={1}
+                  totalPages={
+                    Math.ceil(channels.length / ITEMS_PER_PAGE) +
+                    (channels.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
+                  }
+                />
+              </div>
             </Table.HeaderCell>
           </Table.Row>
         </Table.Footer>
       </Table>
+      </div>
     </>
   );
 };

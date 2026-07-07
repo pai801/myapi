@@ -28,9 +28,106 @@ code {
     font-size: 1.1em;
 }
 
+/* ===== Mobile First: <= 600px (手机竖屏) ===== */
 @media only screen and (max-width: 600px) {
     .hide-on-mobile {
         display: none !important;
+    }
+
+    /* 表单：字段保持横向排列，空间不足时换行 */
+    .ui.form .fields,
+    .ui.form .grouped-fields,
+    .ui.form [class*="grouped fields"],
+    .ui.form .group {
+        flex-wrap: wrap !important;
+        margin: 0 !important;
+    }
+
+    .ui.form .fields > .field,
+    .ui.form .group > .fields > .field,
+    .ui.form .group > .field {
+        min-width: 120px !important;
+        flex-grow: 1 !important;
+        margin-bottom: 0.5em !important;
+        padding: 0 0.25em !important;
+    }
+
+    .ui.form .grouped-fields > .field,
+    .ui.form [class*="grouped fields"] > .field {
+        min-width: 120px !important;
+        flex-grow: 1 !important;
+        margin-bottom: 0.5em !important;
+        padding: 0 0.25em !important;
+    }
+
+    /* 搜索输入框全宽 */
+    .ui.form input.icon[type="text"] {
+        width: 100% !important;
+    }
+
+    /* 表格：包裹在可滚动容器中，保持横向表格布局，手指可左右滑动查看 */
+    .table-scroll-wrapper {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+
+    /* 表格保持横向：按内容自然宽度排列，不压缩、不换行 */
+    .ui.table {
+        font-size: 0.82em !important;
+        width: auto !important;        /* 不强制 100%，按内容宽度排列 */
+        min-width: 100% !important;    /* 至少撑满容器宽度 */
+        table-layout: auto !important;
+    }
+
+    .ui.table th,
+    .ui.table td {
+        padding: 0.5em 0.6em !important;
+        white-space: nowrap !important; /* 表头与数据单元格均不换行，保持单行横向 */
+    }
+
+    /* Modal 全屏显示 */
+    .ui.modal {
+        width: 95% !important;
+        max-width: 100% !important;
+        margin: 1rem auto !important;
+        top: 1rem !important;
+        max-height: calc(100vh - 2rem) !important;
+        border-radius: 8px !important;
+    }
+
+    .ui.modal > .content {
+        padding: 1em !important;
+        max-height: calc(80vh) !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+    }
+
+    .ui.modal > .header {
+        padding: 1em 1em 0.5em !important;
+        font-size: 1.1em !important;
+    }
+
+    .ui.modal > .actions {
+        padding: 0.75em 1em !important;
+    }
+
+    /* Segment 内边距缩小 */
+    .ui.segment {
+        padding: 0.85em !important;
+    }
+
+    /* Label 尺寸调整 */
+    .ui.label {
+        font-size: 0.78em !important;
+        padding: 0.35em 0.6em !important;
+    }
+
+    /* Button 触控区域加大 */
+    .ui.button {
+        min-height: 36px !important;
     }
 }
 
@@ -40,6 +137,15 @@ code {
     margin-left: 0 !important;
     margin-right: 0 !important;
     padding: 0 10px !important;
+  }
+
+  .ui.container.main-content {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
   }
 
   .ui.card, 
@@ -52,6 +158,153 @@ code {
   .ui.table {
     padding-left: 0 !important;
     padding-right: 0 !important;
+  }
+
+  .scroll-x-nowrap {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    width: 100% !important;
+  }
+
+  .scroll-x-nowrap > * {
+    flex-shrink: 0 !important;
+  }
+
+  .ui.form .scroll-x-nowrap > .fields,
+  .ui.form .scroll-x-nowrap > .group,
+  .ui.form .scroll-x-nowrap .fields,
+  .ui.form .scroll-x-nowrap .group {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    flex-shrink: 0 !important;
+    min-width: max-content !important;
+    margin: 0 !important;
+  }
+
+  .ui.form .scroll-x-nowrap .fields > .field,
+  .ui.form .scroll-x-nowrap .group > .field,
+  .ui.form .scroll-x-nowrap .group > .fields > .field {
+    flex-shrink: 0 !important;
+  }
+
+  .ui.table tfoot .scroll-x-nowrap {
+    align-items: center !important;
+    gap: 6px !important;
+  }
+
+  /* 表格底部工具栏：flex 横向排列，空间不足换行 */
+  .ui.table tfoot .ui.headercell,
+  .ui.table tfoot th {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 0.5em 0.5em !important;
+  }
+
+  /* 取消 Pagination 的 float，改用 margin-left:auto 推到右侧 */
+  .ui.table tfoot .ui.pagination.menu {
+    float: none !important;
+    margin-left: auto !important;
+    flex-wrap: wrap !important;
+    justify-content: flex-end !important;
+    min-height: auto !important;
+  }
+
+  .ui.table tfoot .scroll-x-nowrap .ui.pagination.menu {
+    flex-wrap: nowrap !important;
+  }
+
+  /* Select 下拉框和按钮在移动端不挤压 */
+  .ui.table tfoot .ui.dropdown,
+  .ui.table tfoot .ui.button,
+  .ui.table tfoot .ui.selection {
+    flex-shrink: 0 !important;
+  }
+
+  /* 安全网：强制未加 unstackable 的表单字段也不堆叠 */
+  .ui.form:not(.unstackable) .fields:not(.unstackable) > .field,
+  .ui.form:not(.unstackable) .fields:not(.unstackable) > .fields {
+    width: auto !important;
+    min-width: 120px !important;
+    flex-grow: 1 !important;
+  }
+
+  .mobile-header-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    z-index: 1003;
+    margin: 0 !important;
+    border-radius: 0 !important;
+  }
+
+  .mobile-header-toggle {
+    min-width: 44px !important;
+    min-height: 44px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .mobile-header-overlay {
+    position: fixed;
+    inset: 52px 0 0 0;
+    background: rgba(0, 0, 0, 0.38);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
+    z-index: 1000;
+  }
+
+  .mobile-header-overlay.is-open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .mobile-header-drawer {
+    position: fixed;
+    top: 52px;
+    right: 0;
+    bottom: 0;
+    width: min(84vw, 320px);
+    max-width: 100%;
+    background: #fff;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    z-index: 1002;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mobile-header-drawer.is-open {
+    transform: translateX(0);
+  }
+
+  .mobile-header-drawer-menu {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 10px 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .mobile-header-drawer-menu > .mobile-header-drawer-item {
+    min-height: 44px !important;
+    display: flex !important;
+    align-items: center !important;
+  }
+
+  .mobile-header-drawer-menu .ui.button,
+  .mobile-header-drawer-menu .ui.dropdown {
+    width: 100% !important;
   }
 }
 

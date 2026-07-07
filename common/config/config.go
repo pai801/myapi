@@ -67,6 +67,9 @@ var BatchUpdateInterval = env.Int("BATCH_UPDATE_INTERVAL", 5)
 
 var RelayTimeout = env.Int("RELAY_TIMEOUT", 0) // unit is second
 
+// MaxLoggedBodySize 是消费日志中记录请求体的最大字节数，超过则只记录 "[body too large: N bytes]"
+var MaxLoggedBodySize = env.Int("MAX_LOGGED_BODY_SIZE", 2*1024*1024) // 默认 2MB
+
 var GeminiSafetySetting = env.String("GEMINI_SAFETY_SETTING", "BLOCK_NONE")
 
 // All duration's unit is seconds

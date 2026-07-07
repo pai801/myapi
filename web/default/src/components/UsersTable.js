@@ -163,14 +163,15 @@ const UsersTable = () => {
         />
       </Form>
 
-      <Table basic={'very'} compact size='small'>
+      <div className='table-scroll-wrapper'>
+      <Table unstackable basic={'very'} compact size='small'>
         <Table.Header>
           <Table.Row>
             <Table.HeaderCell>{t('user.table.id')}</Table.HeaderCell>
             <Table.HeaderCell>{t('user.table.username')}</Table.HeaderCell>
-            <Table.HeaderCell>{t('user.edit.display_name')}</Table.HeaderCell>
+            <Table.HeaderCell className='hide-on-mobile'>{t('user.edit.display_name')}</Table.HeaderCell>
             <Table.HeaderCell>{t('user.table.remaining_quota')}</Table.HeaderCell>
-            <Table.HeaderCell>{t('user.table.used_quota')}</Table.HeaderCell>
+            <Table.HeaderCell className='hide-on-mobile'>{t('user.table.used_quota')}</Table.HeaderCell>
             <Table.HeaderCell>{t('user.table.status_text')}</Table.HeaderCell>
             <Table.HeaderCell>{t('user.table.actions')}</Table.HeaderCell>
           </Table.Row>
@@ -187,7 +188,7 @@ const UsersTable = () => {
                 <Table.Row key={user.id}>
                   <Table.Cell>{user.id}</Table.Cell>
                   <Table.Cell>{renderText(user.username, 15)}</Table.Cell>
-                  <Table.Cell>{renderText(user.display_name, 15)}</Table.Cell>
+                  <Table.Cell className='hide-on-mobile'>{renderText(user.display_name, 15)}</Table.Cell>
                   <Table.Cell>
                     <Popup
                       content={t('user.table.remaining_quota')}
@@ -196,7 +197,7 @@ const UsersTable = () => {
                       }
                     />
                   </Table.Cell>
-                  <Table.Cell>
+                  <Table.Cell className='hide-on-mobile'>
                     <Popup
                       content={t('user.table.used_quota')}
                       trigger={
@@ -240,30 +241,33 @@ const UsersTable = () => {
         <Table.Footer>
           <Table.Row>
             <Table.HeaderCell colSpan='7'>
-              <Button size='small' as={Link} to='/user/add' loading={loading}>
-                {t('user.buttons.add')}
-              </Button>
-              <Button
-                size='small'
-                icon='refresh'
-                onClick={refreshUsers}
-                loading={loading}
-              />
-              <Pagination
-                floated='right'
-                activePage={activePage}
-                onPageChange={onPaginationChange}
-                size='small'
-                siblingRange={1}
-                totalPages={
-                  Math.ceil(users.length / ITEMS_PER_PAGE) +
-                  (users.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                }
-              />
+              <div className='scroll-x-nowrap'>
+                <Button size='small' as={Link} to='/user/add' loading={loading}>
+                  {t('user.buttons.add')}
+                </Button>
+                <Button
+                  size='small'
+                  icon='refresh'
+                  onClick={refreshUsers}
+                  loading={loading}
+                />
+                <Pagination
+                  floated='right'
+                  activePage={activePage}
+                  onPageChange={onPaginationChange}
+                  size='small'
+                  siblingRange={1}
+                  totalPages={
+                    Math.ceil(users.length / ITEMS_PER_PAGE) +
+                    (users.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
+                  }
+                />
+              </div>
             </Table.HeaderCell>
           </Table.Row>
         </Table.Footer>
       </Table>
+      </div>
     </>
   );
 };

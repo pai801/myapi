@@ -369,81 +369,85 @@ const LogsTable = () => {
         ）
       </Header>
       <Form>
-        <Form.Group>
-          <Form.Input
-            fluid
-            label={t('log.table.token_name')}
-            size={'small'}
-            width={3}
-            value={token_name}
-            placeholder={t('log.table.token_name_placeholder')}
-            name='token_name'
-            onChange={handleInputChange}
-          />
-          <Form.Input
-            fluid
-            label={t('log.table.model_name')}
-            size={'small'}
-            width={3}
-            value={model_name}
-            placeholder={t('log.table.model_name_placeholder')}
-            name='model_name'
-            onChange={handleInputChange}
-          />
-          <Form.Input
-            fluid
-            label={t('log.table.start_time')}
-            size={'small'}
-            width={4}
-            value={start_timestamp}
-            type='datetime-local'
-            name='start_timestamp'
-            onChange={handleInputChange}
-          />
-          <Form.Input
-            fluid
-            label={t('log.table.end_time')}
-            size={'small'}
-            width={4}
-            value={end_timestamp}
-            type='datetime-local'
-            name='end_timestamp'
-            onChange={handleInputChange}
-          />
-          <Form.Button
-            fluid
-            label={t('log.buttons.query')}
-            size={'small'}
-            width={2}
-            onClick={refresh}
-          >
-            {t('log.buttons.submit')}
-          </Form.Button>
-        </Form.Group>
+        <div className='scroll-x-nowrap'>
+          <Form.Group unstackable>
+            <Form.Input
+              fluid
+              label={t('log.table.token_name')}
+              size={'small'}
+              width={3}
+              value={token_name}
+              placeholder={t('log.table.token_name_placeholder')}
+              name='token_name'
+              onChange={handleInputChange}
+            />
+            <Form.Input
+              fluid
+              label={t('log.table.model_name')}
+              size={'small'}
+              width={3}
+              value={model_name}
+              placeholder={t('log.table.model_name_placeholder')}
+              name='model_name'
+              onChange={handleInputChange}
+            />
+            <Form.Input
+              fluid
+              label={t('log.table.start_time')}
+              size={'small'}
+              width={4}
+              value={start_timestamp}
+              type='datetime-local'
+              name='start_timestamp'
+              onChange={handleInputChange}
+            />
+            <Form.Input
+              fluid
+              label={t('log.table.end_time')}
+              size={'small'}
+              width={4}
+              value={end_timestamp}
+              type='datetime-local'
+              name='end_timestamp'
+              onChange={handleInputChange}
+            />
+            <Form.Button
+              fluid
+              label={t('log.buttons.query')}
+              size={'small'}
+              width={2}
+              onClick={refresh}
+            >
+              {t('log.buttons.submit')}
+            </Form.Button>
+          </Form.Group>
+        </div>
         {isAdminUser && (
           <>
-            <Form.Group>
-              <Form.Input
-                fluid
-                label={t('log.table.channel_id')}
-                size={'small'}
-                width={3}
-                value={channel}
-                placeholder={t('log.table.channel_id_placeholder')}
-                name='channel'
-                onChange={handleInputChange}
-              />
-              <Form.Input
-                fluid
-                label={t('log.table.username')}
-                size={'small'}
-                width={3}
-                value={username}
-                placeholder={t('log.table.username_placeholder')}
-                name='username'
-                onChange={handleInputChange}
-              />
-            </Form.Group>
+            <div className='scroll-x-nowrap'>
+              <Form.Group unstackable>
+                <Form.Input
+                  fluid
+                  label={t('log.table.channel_id')}
+                  size={'small'}
+                  width={3}
+                  value={channel}
+                  placeholder={t('log.table.channel_id_placeholder')}
+                  name='channel'
+                  onChange={handleInputChange}
+                />
+                <Form.Input
+                  fluid
+                  label={t('log.table.username')}
+                  size={'small'}
+                  width={3}
+                  value={username}
+                  placeholder={t('log.table.username_placeholder')}
+                  name='username'
+                  onChange={handleInputChange}
+                />
+              </Form.Group>
+            </div>
           </>
         )}
         <Form.Input
@@ -453,7 +457,8 @@ const LogsTable = () => {
           onChange={(e, { value }) => setSearchKeyword(value)}
         />
       </Form>
-      <Table basic={'very'} compact size='small'>
+      <div className='table-scroll-wrapper'>
+      <Table unstackable basic={'very'} compact size='small'>
         <Table.Header>
           <Table.Row>
             <Table.HeaderCell
@@ -467,6 +472,7 @@ const LogsTable = () => {
             </Table.HeaderCell>
             {isAdminUser && (
               <Table.HeaderCell
+                className='hide-on-mobile'
                 style={{ cursor: 'pointer' }}
                 onClick={() => {
                   sortLog('channel');
@@ -478,6 +484,7 @@ const LogsTable = () => {
             )}
             {isAdminUser && (
               <Table.HeaderCell
+                className='hide-on-mobile'
                 style={{ cursor: 'pointer' }}
                 onClick={() => {
                   sortLog('channel_name');
@@ -506,6 +513,7 @@ const LogsTable = () => {
               {t('log.table.model')}
             </Table.HeaderCell>
             <Table.HeaderCell
+              className='hide-on-mobile'
               style={{ cursor: 'pointer' }}
               onClick={() => {
                 sortLog('is_stream');
@@ -518,6 +526,7 @@ const LogsTable = () => {
               <>
                 {isAdminUser && (
                   <Table.HeaderCell
+                    className='hide-on-mobile'
                     style={{ cursor: 'pointer' }}
                     onClick={() => {
                       sortLog('username');
@@ -537,6 +546,7 @@ const LogsTable = () => {
                   {t('log.table.token_name')}
                 </Table.HeaderCell>
                 <Table.HeaderCell
+                  className='hide-on-mobile'
                   style={{ cursor: 'pointer' }}
                   onClick={() => {
                     sortLog('prompt_tokens');
@@ -546,6 +556,7 @@ const LogsTable = () => {
                   {t('log.table.prompt_tokens')}
                 </Table.HeaderCell>
                 <Table.HeaderCell
+                  className='hide-on-mobile'
                   style={{ cursor: 'pointer' }}
                   onClick={() => {
                     sortLog('cached_tokens');
@@ -555,6 +566,7 @@ const LogsTable = () => {
                   {t('log.table.cached_tokens')}
                 </Table.HeaderCell>
                 <Table.HeaderCell
+                  className='hide-on-mobile'
                   style={{ cursor: 'pointer' }}
                   onClick={() => {
                     sortLog('completion_tokens');
@@ -589,7 +601,7 @@ const LogsTable = () => {
                     {renderTimestamp(log.created_at, log.request_id)}
                   </Table.Cell>
                   {isAdminUser && (
-                    <Table.Cell>
+                    <Table.Cell className='hide-on-mobile'>
                       {log.channel ? (
                         <Label
                           basic
@@ -604,7 +616,7 @@ const LogsTable = () => {
                     </Table.Cell>
                   )}
                   {isAdminUser && (
-                    <Table.Cell>
+                    <Table.Cell className='hide-on-mobile'>
                       {log.channel_name || ''}
                     </Table.Cell>
                   )}
@@ -612,7 +624,7 @@ const LogsTable = () => {
                   <Table.Cell>
                     {log.model_name ? renderColorLabel(log.model_name) : ''}
                   </Table.Cell>
-                  <Table.Cell>
+                  <Table.Cell className='hide-on-mobile'>
                     <Label basic color={log.is_stream ? 'blue' : 'grey'} size='mini'>
                       {log.is_stream ? 'true' : 'false'}
                     </Label>
@@ -620,7 +632,7 @@ const LogsTable = () => {
                   {showUserTokenQuota() && (
                     <>
                       {isAdminUser && (
-                        <Table.Cell>
+                        <Table.Cell className='hide-on-mobile'>
                           {log.username ? (
                             <Label
                               basic
@@ -638,13 +650,13 @@ const LogsTable = () => {
                         {log.token_name ? renderColorLabel(log.token_name) : ''}
                       </Table.Cell>
 
-                      <Table.Cell>
+                      <Table.Cell className='hide-on-mobile'>
                         {log.prompt_tokens ? log.prompt_tokens : ''}
                       </Table.Cell>
-                      <Table.Cell>
+                      <Table.Cell className='hide-on-mobile'>
                         {log.cached_tokens ? (log.prompt_tokens && log.prompt_tokens > 0 ? `${log.cached_tokens} (${(log.cached_tokens / log.prompt_tokens * 100).toFixed(2)}%)` : log.cached_tokens) : ''}
                       </Table.Cell>
-                      <Table.Cell>
+                      <Table.Cell className='hide-on-mobile'>
                         {log.completion_tokens ? log.completion_tokens : ''}
                       </Table.Cell>
                       <Table.Cell>
@@ -668,68 +680,71 @@ const LogsTable = () => {
         <Table.Footer>
           <Table.Row>
             <Table.HeaderCell colSpan={'11'}>
-              <Select
-                placeholder={t('log.type.select')}
-                options={LOG_OPTIONS}
-                style={{ marginRight: '8px' }}
-                name='logType'
-                value={logType}
-                onChange={(e, { name, value }) => {
-                  setLogType(value);
-                }}
-              />
-              <Button size='small' onClick={refresh} loading={loading}>
-                {t('log.buttons.refresh')}
-              </Button>
-              <span style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                {t('pagination.jump_to')}
-                <input
-                  type='text'
-                  value={jumpPage}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === '' || /^\d+$/.test(val)) {
-                      setJumpPage(val);
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleJumpPage();
-                  }}
-                  placeholder={t('pagination.page_placeholder')}
-                  style={{
-                    width: '48px',
-                    padding: '4px 6px',
-                    border: '1px solid rgba(34,36,38,.15)',
-                    borderRadius: '4px',
-                    textAlign: 'center',
-                    fontSize: '13px',
+              <div className='scroll-x-nowrap'>
+                <Select
+                  placeholder={t('log.type.select')}
+                  options={LOG_OPTIONS}
+                  style={{ marginRight: '8px' }}
+                  name='logType'
+                  value={logType}
+                  onChange={(e, { name, value }) => {
+                    setLogType(value);
                   }}
                 />
-                {t('pagination.page')}
-                <Button
-                  size='mini'
-                  onClick={handleJumpPage}
-                  disabled={loading}
-                >
-                  GO
+                <Button size='small' onClick={refresh} loading={loading}>
+                  {t('log.buttons.refresh')}
                 </Button>
-              </span>
-              <Pagination
-                floated='right'
-                activePage={activePage}
-                onPageChange={onPaginationChange}
-                size='small'
-                siblingRange={1}
-                firstItem={{ content: t('pagination.first_page'), 'aria-label': t('pagination.first_page_aria') }}
-                lastItem={{ content: t('pagination.last_page'), 'aria-label': t('pagination.last_page_aria') }}
-                totalPages={
-                  Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
-                }
-              />
+                <span className='hide-on-mobile' style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                  {t('pagination.jump_to')}
+                  <input
+                    type='text'
+                    value={jumpPage}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '' || /^\d+$/.test(val)) {
+                        setJumpPage(val);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleJumpPage();
+                    }}
+                    placeholder={t('pagination.page_placeholder')}
+                    style={{
+                      width: '48px',
+                      padding: '4px 6px',
+                      border: '1px solid rgba(34,36,38,.15)',
+                      borderRadius: '4px',
+                      textAlign: 'center',
+                      fontSize: '13px',
+                    }}
+                  />
+                  {t('pagination.page')}
+                  <Button
+                    size='mini'
+                    onClick={handleJumpPage}
+                    disabled={loading}
+                  >
+                    GO
+                  </Button>
+                </span>
+                <Pagination
+                  floated='right'
+                  activePage={activePage}
+                  onPageChange={onPaginationChange}
+                  size='small'
+                  siblingRange={1}
+                  firstItem={{ content: t('pagination.first_page'), 'aria-label': t('pagination.first_page_aria') }}
+                  lastItem={{ content: t('pagination.last_page'), 'aria-label': t('pagination.last_page_aria') }}
+                  totalPages={
+                    Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
+                  }
+                />
+              </div>
             </Table.HeaderCell>
           </Table.Row>
         </Table.Footer>
       </Table>
+      </div>
     </>
   );
 };
