@@ -1,9 +1,15 @@
 package controller
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"strings"
+
 	"github.com/gin-gonic/gin"
+
 	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/model"
 	relay "github.com/pai801/myapi/relay"
 	"github.com/pai801/myapi/relay/adaptor/openai"
@@ -11,8 +17,6 @@ import (
 	"github.com/pai801/myapi/relay/channeltype"
 	"github.com/pai801/myapi/relay/meta"
 	relaymodel "github.com/pai801/myapi/relay/model"
-	"net/http"
-	"strings"
 )
 
 // https://platform.openai.com/docs/api-reference/models/list
@@ -169,9 +173,8 @@ func ListModels(c *gin.Context) {
 	if c.GetString(ctxkey.AvailableModels) != "" {
 		availableModels = strings.Split(c.GetString(ctxkey.AvailableModels), ",")
 	} else {
-		userId := c.GetInt(ctxkey.Id)
-		userGroup, _ := model.CacheGetUserGroup(userId)
-		availableModels, _ = model.CacheGetGroupModels(ctx, userGroup)
+		// 管理员视角：所有分组模型的并集
+		availableModels = getAllGroupsModels(ctx)
 	}
 	modelSet := make(map[string]bool)
 	for _, availableModel := range availableModels {
@@ -229,27 +232,35 @@ func RetrieveModel(c *gin.Context) {
 
 func GetUserAvailableModels(c *gin.Context) {
 	ctx := c.Request.Context()
-	id := c.GetInt(ctxkey.Id)
-	userGroup, err := model.CacheGetUserGroup(id)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
-	models, err := model.CacheGetGroupModels(ctx, userGroup)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
-		return
-	}
+	models := getAllGroupsModels(ctx)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    models,
 	})
 	return
+}
+
+// getAllGroupsModels 返回所有分组模型的并集（用于管理员视角的模型可见性）。
+func getAllGroupsModels(ctx context.Context) []string {
+	groups, err := model.GetAllGroups()
+	if err != nil {
+		logger.Log.Errorf("GetAllGroups failed: %v", err)
+		return nil
+	}
+	modelSet := make(map[string]bool)
+	for _, g := range groups {
+		models, err := model.CacheGetGroupModels(ctx, g.Name)
+		if err != nil {
+			continue
+		}
+		for _, m := range models {
+			modelSet[m] = true
+		}
+	}
+	result := make([]string, 0, len(modelSet))
+	for m := range modelSet {
+		result = append(result, m)
+	}
+	return result
 }

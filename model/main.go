@@ -174,7 +174,30 @@ func migrateDB() error {
 	if err = DB.AutoMigrate(&ModelMetadata{}); err != nil {
 		return err
 	}
+	if err = DB.AutoMigrate(&Group{}); err != nil {
+		return err
+	}
+	// 种子默认分组
+	if err = seedDefaultGroup(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func seedDefaultGroup() error {
+	count, err := GroupCount()
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	defaultGroup := &Group{
+		Name:        "default",
+		ModelRatio:  1.0,
+		CreatedTime: helper.GetTimestamp(),
+	}
+	return AddGroup(defaultGroup)
 }
 
 func InitLogDB() {

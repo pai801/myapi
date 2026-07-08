@@ -100,7 +100,8 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 
 	// 获取模型比率和分组比率
 	modelRatio := billingratio.GetModelRatio(ctxMeta.ActualModelName, ctxMeta.ChannelType)
-	ratio := modelRatio
+	groupRatio := dbmodel.GetGroupModelRatio(ctxMeta.Group)
+	ratio := modelRatio * groupRatio
 
 	userQuota, err := dbmodel.CacheGetUserQuota(ctx, ctxMeta.UserId)
 	if err != nil {
@@ -236,7 +237,8 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 
 	// 获取模型比率和分组比率
 	modelRatio := billingratio.GetModelRatio(modelName, ctxMeta.ChannelType)
-	ratio := modelRatio
+	groupRatio := dbmodel.GetGroupModelRatio(ctxMeta.Group)
+	ratio := modelRatio * groupRatio
 
 	userQuota, err := dbmodel.CacheGetUserQuota(ctx, ctxMeta.UserId)
 	if err != nil {
@@ -637,7 +639,8 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 	// DB quota has already been updated above; refresh Redis cache from DB.
 	dbmodel.PostConsumeResetUserQuotaCache(ctx, meta.UserId, quota)
 
-	logContent := fmt.Sprintf("Responses API - 倍率：%.2f × %.2f", modelRatio, completionRatio)
+	groupRatio := dbmodel.GetGroupModelRatio(meta.Group)
+	logContent := fmt.Sprintf("Responses API - 倍率：%.2f × %.2f × 分组%.2f", modelRatio, completionRatio, groupRatio)
 
 	dbmodel.RecordConsumeLog(ctx, &dbmodel.Log{
 		UserId:            meta.UserId,

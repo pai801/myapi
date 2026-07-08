@@ -88,6 +88,11 @@ func SetApiRouter(router *gin.Engine) {
 		groupRoute.Use(middleware.AdminAuth())
 		{
 			groupRoute.GET("/", controller.GetGroups)
+			groupRoute.GET("/list", controller.GetGroupList)
+			groupRoute.GET("/:id", controller.GetGroup)
+			groupRoute.POST("/", controller.AddGroup)
+			groupRoute.PUT("/:id", controller.UpdateGroup)
+			groupRoute.DELETE("/:id", controller.DeleteGroup)
 		}
 		modelMetadataRoute := apiRouter.Group("/model-metadata")
 		modelMetadataRoute.Use(middleware.AdminAuth())

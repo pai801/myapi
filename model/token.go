@@ -16,16 +16,17 @@ const (
 )
 
 type Token struct {
-	Id             int     `json:"id"`
-	UserId         int     `json:"user_id"`
-	Key            string  `json:"key" gorm:"type:char(48);uniqueIndex"`
-	Status         int     `json:"status" gorm:"default:1"`
-	Name           string  `json:"name" gorm:"index" `
+	Id           int     `json:"id"`
+	UserId       int     `json:"user_id"`
+	Key          string  `json:"key" gorm:"type:char(48);uniqueIndex"`
+	Status       int     `json:"status" gorm:"default:1"`
+	Name         string  `json:"name" gorm:"index" `
 	CreatedTime  int64   `json:"created_time" gorm:"bigint"`
 	AccessedTime int64   `json:"accessed_time" gorm:"bigint"`
-	Models       *string `json:"models" gorm:"type:text"`               // allowed models
-	Subnet       *string `json:"subnet" gorm:"default:''"`             // allowed subnet
+	Models       *string `json:"models" gorm:"type:text"`  // allowed models
+	Subnet       *string `json:"subnet" gorm:"default:''"` // allowed subnet
 	ModelMapping *string `json:"model_mapping" gorm:"type:varchar(1024);default:''"`
+	Group        string  `json:"group" gorm:"type:varchar(32);default:'default'"` // token belongs to a single group
 }
 
 func GetAllUserTokens(userId int, startIdx int, num int) ([]*Token, error) {
@@ -89,7 +90,7 @@ func (t *Token) Insert() error {
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (t *Token) Update() error {
 	var err error
-	err = DB.Model(t).Select("name", "status", "models", "subnet", "model_mapping").Updates(t).Error
+	err = DB.Model(t).Select("name", "status", "models", "subnet", "model_mapping", "group").Updates(t).Error
 	return err
 }
 

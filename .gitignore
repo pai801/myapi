@@ -23,9 +23,7 @@ AGENTS.md
 migrate_models_alias
 .zed/
 requirement-2025-05-28.md
-docs/contracts/
-docs/superpowers/
-docs/diagnosis/
+docs/
 request*.txt
 response*.txt
 .mimocode/

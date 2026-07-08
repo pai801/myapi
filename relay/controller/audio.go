@@ -18,9 +18,9 @@ import (
 	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/relay/adaptor/openai"
-	"github.com/pai801/myapi/relay/constant"
 	billingratio "github.com/pai801/myapi/relay/billing/ratio"
 	"github.com/pai801/myapi/relay/channeltype"
+	"github.com/pai801/myapi/relay/constant"
 	"github.com/pai801/myapi/relay/meta"
 	relaymodel "github.com/pai801/myapi/relay/model"
 	"github.com/pai801/myapi/relay/relaymode"
@@ -54,7 +54,8 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	}
 
 	modelRatio := billingratio.GetModelRatio(audioModel, channelType)
-	ratio := modelRatio
+	groupRatio := model.GetGroupModelRatio(meta.Group)
+	ratio := modelRatio * groupRatio
 	var quota int64
 	var estimatedQuota int64
 	switch relayMode {

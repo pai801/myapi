@@ -118,6 +118,13 @@ func validateToken(c *gin.Context, token model.Token) error {
 			return fmt.Errorf("模型映射必须是合法的 JSON 格式：%s", err.Error())
 		}
 	}
+	// 检查分组是否存在
+	groupName := token.Group
+	if groupName != "" && groupName != "default" {
+		if _, err := model.GetGroupByName(groupName); err != nil {
+			return fmt.Errorf("分组 '%s' 不存在", groupName)
+		}
+	}
 	return nil
 }
 
@@ -149,6 +156,7 @@ func AddToken(c *gin.Context) {
 		Models:       model.SimplifyModelsField(token.Models),
 		Subnet:       token.Subnet,
 		ModelMapping: token.ModelMapping,
+		Group:        token.Group,
 	}
 	err = cleanToken.Insert()
 	if err != nil {
@@ -214,12 +222,23 @@ func UpdateToken(c *gin.Context) {
 	}
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
+	} else if c.Query("group_only") != "" {
+		// group_only 模式：只更新分组，不覆盖其他字段
+		if token.Group == "" {
+			token.Group = "default"
+		}
+		cleanToken.Group = token.Group
 	} else {
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
 		cleanToken.Models = model.SimplifyModelsField(token.Models)
 		cleanToken.Subnet = token.Subnet
 		cleanToken.ModelMapping = token.ModelMapping
+		// 空分组兜底 default，防止前端未传时误覆盖 DB 值
+		if token.Group == "" {
+			token.Group = "default"
+		}
+		cleanToken.Group = token.Group
 	}
 	err = cleanToken.Update()
 	if err != nil {

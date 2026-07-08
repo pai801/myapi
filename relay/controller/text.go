@@ -53,7 +53,8 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 
 	// get model ratio
 	modelRatio := billingratio.GetModelRatio(textRequest.Model, meta.ChannelType)
-	ratio := modelRatio
+	groupRatio := dbmodel.GetGroupModelRatio(meta.Group)
+	ratio := modelRatio * groupRatio
 	// balance check
 	promptTokens := getPromptTokens(textRequest, meta.Mode)
 	meta.PromptTokens = promptTokens

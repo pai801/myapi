@@ -43,7 +43,6 @@ type User struct {
 	Quota        int64  `json:"quota" gorm:"bigint;default:0"`
 	UsedQuota    int64  `json:"used_quota" gorm:"bigint;default:0;column:used_quota"` // used quota
 	RequestCount int    `json:"request_count" gorm:"type:int;default:0;"`             // request number
-	Group        string `json:"group" gorm:"type:varchar(32);default:'default'"`
 }
 
 func GetMaxUserId() int {
@@ -266,16 +265,6 @@ func GetUserUsedQuota(id int) (quota int64, err error) {
 func GetUserEmail(id int) (email string, err error) {
 	err = DB.Model(&User{}).Where("id = ?", id).Select("email").Find(&email).Error
 	return email, err
-}
-
-func GetUserGroup(id int) (group string, err error) {
-	groupCol := "`group`"
-	if common.UsingPostgreSQL {
-		groupCol = `"group"`
-	}
-
-	err = DB.Model(&User{}).Where("id = ?", id).Select(groupCol).Find(&group).Error
-	return group, err
 }
 
 func IncreaseUserQuota(id int, quota int64) (err error) {

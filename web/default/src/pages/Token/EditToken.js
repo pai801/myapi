@@ -22,11 +22,13 @@ const EditToken = () => {
   const isEdit = tokenId !== undefined;
   const [loading, setLoading] = useState(isEdit);
   const [modelOptions, setModelOptions] = useState([]);
+  const [groupOptions, setGroupOptions] = useState([]);
   const originInputs = {
     name: '',
     models: [],
     subnet: '',
     model_mapping: '',
+    group: '',
   };
   const [inputs, setInputs] = useState(originInputs);
   const { name } = inputs;
@@ -61,6 +63,9 @@ const EditToken = () => {
         } else {
           data.model_mapping = '';
         }
+        if (data.group === undefined || data.group === null) {
+          data.group = '';
+        }
         setInputs(data);
       } else {
         showError(message || 'Failed to load token');
@@ -92,6 +97,25 @@ const EditToken = () => {
     }
   };
 
+  const fetchGroups = async () => {
+    try {
+      let res = await API.get(`/api/group/`);
+      const { success, message, data } = res.data || {};
+      if (success && Array.isArray(data)) {
+        let options = data.map((group) => ({
+          key: group,
+          text: group,
+          value: group,
+        }));
+        setGroupOptions(options);
+      } else if (!success) {
+        showError(message || 'Failed to load groups');
+      }
+    } catch (error) {
+      showError(error.message || 'Network error');
+    }
+  };
+
   useEffect(() => {
     if (isEdit) {
       loadToken().catch((error) => {
@@ -101,6 +125,9 @@ const EditToken = () => {
     }
     loadAvailableModels().catch((error) => {
       showError(error.message || 'Failed to load models');
+    });
+    fetchGroups().catch((error) => {
+      showError(error.message || 'Failed to load groups');
     });
   }, []);
 
@@ -161,6 +188,19 @@ const EditToken = () => {
                 value={inputs.models}
                 autoComplete='new-password'
                 options={modelOptions}
+              />
+            </Form.Field>
+            <Form.Field>
+              <Form.Dropdown
+                label={t('token.edit.group')}
+                placeholder={t('token.edit.group')}
+                name='group'
+                fluid
+                selection
+                onChange={handleInputChange}
+                value={inputs.group}
+                autoComplete='new-password'
+                options={groupOptions}
               />
             </Form.Field>
             <Form.Field>

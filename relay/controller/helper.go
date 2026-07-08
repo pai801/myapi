@@ -72,6 +72,7 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 	}
 	var quota int64
 	completionRatio := billingratio.GetCompletionRatio(textRequest.Model, meta.ChannelType)
+	groupRatio := model.GetGroupModelRatio(meta.Group)
 	promptTokens := usage.PromptTokens
 	completionTokens := usage.CompletionTokens
 	// 从 usage 中提取缓存命中的token数
@@ -119,7 +120,7 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 	// DB quota has already been updated above; refresh Redis cache from DB.
 	model.PostConsumeResetUserQuotaCache(ctx, meta.UserId, quota)
 
-	logContent := fmt.Sprintf("倍率：%.2f × %.2f", modelRatio, completionRatio)
+	logContent := fmt.Sprintf("倍率：%.2f × %.2f × 分组%.2f", modelRatio, completionRatio, groupRatio)
 
 	var requestBody string
 	if v := ctx.Value(CtxKeyRequestBody); v != nil {

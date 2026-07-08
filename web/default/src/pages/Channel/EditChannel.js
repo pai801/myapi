@@ -289,7 +289,6 @@ const EditChannel = () => {
                 multiple
                 selection
                 allowAdditions
-                additionLabel={t('channel.edit.group_addition')}
                 onChange={handleInputChange}
                 value={inputs.groups}
                 autoComplete='new-password'

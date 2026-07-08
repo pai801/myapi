@@ -7,7 +7,16 @@
     "log": "Log",
     "setting": "Settings",
     "login": "Login",
-    "logout": "Logout"
+    "logout": "Logout",
+    "group": "Group Management"
+  },
+  "group": {
+    "management": "Group Management",
+    "name": "Group Name",
+    "model_ratio": "Model Ratio",
+    "edit": "Edit Group",
+    "delete_confirm": "Are you sure to delete this group?",
+    "add": "Add Group"
   },
   "channel": {
     "title": "Channel Management",
@@ -72,7 +81,6 @@
       "name_placeholder": "Please enter name",
       "group": "Group",
       "group_placeholder": "Please select groups that can use this channel",
-      "group_addition": "Please edit group multipliers in system settings to add new group:",
       "models": "Models",
       "models_placeholder": "Please select models supported by this channel",
       "model_mapping": "Model Mapping",
@@ -139,6 +147,7 @@
       "name": "Name",
       "status": "Status",
       "created_time": "Created Time",
+      "group": "Group",
       "actions": "Actions",
       "no_name": "None",
       "status_enabled": "Enabled",
@@ -168,6 +177,7 @@
       "ip_limit_placeholder": "Please enter allowed subnets, e.g.: 192.168.0.0/24, use commas to separate multiple subnets",
       "model_mapping": "Model Mapping",
       "model_mapping_placeholder": "Model name mapping, e.g. {\"gpt-4\": \"gpt-4-turbo\"} (JSON format)",
+      "group": "Group",
       "buttons": {
         "submit": "Submit",
         "cancel": "Cancel"

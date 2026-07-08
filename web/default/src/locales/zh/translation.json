@@ -7,7 +7,16 @@
     "log": "日志",
     "setting": "设置",
     "login": "登录",
-    "logout": "注销"
+    "logout": "注销",
+    "group": "分组管理"
+  },
+  "group": {
+    "management": "分组管理",
+    "name": "分组名称",
+    "model_ratio": "模型倍率",
+    "edit": "编辑分组",
+    "delete_confirm": "确认删除该分组？",
+    "add": "新建分组"
   },
   "channel": {
     "title": "管理渠道",
@@ -72,7 +81,6 @@
       "name_placeholder": "请输入名称",
       "group": "分组",
       "group_placeholder": "请选择可以使用该渠道的分组",
-      "group_addition": "请在系统设置页面编辑分组倍率以添加新的分组：",
       "models": "模型",
       "models_placeholder": "请选择该渠道所支持的模型",
       "model_mapping": "模型重定向",
@@ -139,6 +147,7 @@
       "name": "名称",
       "status": "状态",
       "created_time": "创建时间",
+      "group": "分组",
       "actions": "操作",
       "no_name": "无",
       "status_enabled": "已启用",
@@ -168,6 +177,7 @@
       "ip_limit_placeholder": "请输入允许访问的网段，例如：192.168.0.0/24，请使用英文逗号分隔多个网段",
       "model_mapping": "模型映射",
       "model_mapping_placeholder": "模型名称映射，如 {\"gpt-4\": \"gpt-4-turbo\"}（JSON 格式）",
+      "group": "分组",
       "buttons": {
         "submit": "提交",
         "cancel": "取消"

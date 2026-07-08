@@ -53,6 +53,12 @@ let headerButtons = [
     to: '/setting',
     icon: 'setting',
   },
+  {
+    name: 'header.group',
+    to: '/group',
+    icon: 'object group',
+    admin: true,
+  },
 ];
 
 const Header = () => {

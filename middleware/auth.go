@@ -181,6 +181,11 @@ func TokenAuth() func(c *gin.Context) {
 		}
 		c.Set(ctxkey.Id, token.UserId)
 		c.Set(ctxkey.TokenId, token.Id)
+		tokenGroup := token.Group
+		if tokenGroup == "" {
+			tokenGroup = "default"
+		}
+		c.Set(ctxkey.Group, tokenGroup)
 		if token.ModelMapping != nil && *token.ModelMapping != "" && *token.ModelMapping != "{}" {
 			c.Set(ctxkey.TokenModelMapping, *token.ModelMapping)
 		}

@@ -14,6 +14,7 @@ import { StatusContext } from './context/Status';
 import Channel from './pages/Channel';
 import Token from './pages/Token';
 import EditToken from './pages/Token/EditToken';
+import Group from './pages/Group';
 import EditChannel from './pages/Channel/EditChannel';
 import Log from './pages/Log';
 import Dashboard from './pages/Dashboard';
@@ -115,6 +116,14 @@ function App() {
           <Suspense fallback={<Loading></Loading>}>
             <EditToken />
           </Suspense>
+        }
+      />
+      <Route
+        path='/group'
+        element={
+          <PrivateRoute>
+            <Group />
+          </PrivateRoute>
         }
       />
       <Route

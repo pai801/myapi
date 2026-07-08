@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Button,
@@ -18,6 +18,7 @@ import {
   showWarning,
   timestamp2string,
 } from '../helpers';
+import { renderColorLabel } from '../helpers/render';
 
 import { ITEMS_PER_PAGE } from '../constants';
 
@@ -72,6 +73,22 @@ const TokensTable = () => {
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
   const [orderBy, setOrderBy] = useState('');
+  const [groupOptions, setGroupOptions] = useState([]);
+  const [editingTokenId, setEditingTokenId] = useState(null);
+
+  const fetchGroups = useCallback(async () => {
+    try {
+      const res = await API.get('/api/group/');
+      const { success, message, data } = res.data || {};
+      if (success && Array.isArray(data)) {
+        setGroupOptions(
+          data.map((g) => ({ key: g, text: g, value: g }))
+        );
+      }
+    } catch (error) {
+      // group list 加载失败不影响 token 列表展示
+    }
+  }, []);
 
   const loadTokens = async (startIdx) => {
     const res = await API.get(`/api/token/?p=${startIdx}&order=${orderBy}`);
@@ -93,7 +110,6 @@ const TokensTable = () => {
   const onPaginationChange = (e, { activePage }) => {
     (async () => {
       if (activePage === Math.ceil(tokens.length / ITEMS_PER_PAGE) + 1) {
-        // In this case we have to load more data and then append them.
         await loadTokens(activePage - 1, orderBy);
       }
       setActivePage(activePage);
@@ -104,6 +120,15 @@ const TokensTable = () => {
     setLoading(true);
     await loadTokens(activePage - 1);
   };
+
+  useEffect(() => {
+    loadTokens(0, orderBy)
+      .then()
+      .catch((reason) => {
+        showError(reason);
+      });
+    fetchGroups().then();
+  }, [orderBy, fetchGroups]);
 
   const onCopy = async (type, key) => {
     let status = localStorage.getItem('status');
@@ -166,25 +191,12 @@ const TokensTable = () => {
         url = `opencat://team/join?domain=${encodedServerAddress}&token=sk-${key}`;
         break;
 
-      case 'lobechat':
-        url =
-          `https://app.nextchat.dev/?settings={"keyVaults":{"openai":{"apiKey":"sk-${key}","baseURL":"${serverAddress}/v1"}}}`;
-        break;
-
       default:
         url = defaultUrl;
     }
 
     window.open(url, '_blank');
   };
-
-  useEffect(() => {
-    loadTokens(0, orderBy)
-      .then()
-      .catch((reason) => {
-        showError(reason);
-      });
-  }, [orderBy]);
 
   const manageToken = async (id, action, idx) => {
     let data = { id };
@@ -219,9 +231,26 @@ const TokensTable = () => {
     }
   };
 
+  const handleGroupChange = async (tokenId, newGroup, idx) => {
+    setEditingTokenId(null);
+    const res = await API.put('/api/token/?group_only=true', {
+      id: tokenId,
+      group: newGroup,
+    });
+    const { success, message } = res.data;
+    if (success) {
+      showSuccess(t('token.messages.operation_success'));
+      let newTokens = [...tokens];
+      let realIdx = (activePage - 1) * ITEMS_PER_PAGE + idx;
+      newTokens[realIdx].group = newGroup;
+      setTokens(newTokens);
+    } else {
+      showError(message);
+    }
+  };
+
   const searchTokens = async () => {
     if (searchKeyword === '') {
-      // if keyword is blank, load files instead.
       await loadTokens(0);
       setActivePage(1);
       setOrderBy('');
@@ -249,10 +278,8 @@ const TokensTable = () => {
     let sortedTokens = [...tokens];
     sortedTokens.sort((a, b) => {
       if (!isNaN(a[key])) {
-        // If the value is numeric, subtract to sort
         return a[key] - b[key];
       } else {
-        // If the value is not numeric, sort as strings
         return ('' + a[key]).localeCompare(b[key]);
       }
     });
@@ -288,25 +315,20 @@ const TokensTable = () => {
           <Table.Row>
             <Table.HeaderCell
               style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortToken('name');
-              }}
+              onClick={() => sortToken('name')}
             >
               {t('token.table.name')}
             </Table.HeaderCell>
             <Table.HeaderCell
               style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortToken('status');
-              }}
+              onClick={() => sortToken('status')}
             >
               {t('token.table.status')}
             </Table.HeaderCell>
+            <Table.HeaderCell>{t('token.table.group')}</Table.HeaderCell>
             <Table.HeaderCell
               style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortToken('created_time');
-              }}
+              onClick={() => sortToken('created_time')}
             >
               {t('token.table.created_time')}
             </Table.HeaderCell>
@@ -345,6 +367,30 @@ const TokensTable = () => {
                     {token.name ? token.name : t('token.table.no_name')}
                   </Table.Cell>
                   <Table.Cell>{renderStatus(token.status, t)}</Table.Cell>
+                  <Table.Cell>
+                    {editingTokenId === token.id ? (
+                      <Dropdown
+                        fluid
+                        selection
+                        search
+                        defaultOpen
+                        options={groupOptions}
+                        defaultValue={token.group || 'default'}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e, { value }) =>
+                          handleGroupChange(token.id, value, idx)
+                        }
+                        onBlur={() => setEditingTokenId(null)}
+                      />
+                    ) : (
+                      <a
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setEditingTokenId(token.id)}
+                      >
+                        {renderColorLabel(token.group || 'default')}
+                      </a>
+                    )}
+                  </Table.Cell>
                   <Table.Cell>{renderTimestamp(token.created_time)}</Table.Cell>
                   <Table.Cell>
                     <div>
@@ -428,7 +474,7 @@ const TokensTable = () => {
 
         <Table.Footer>
           <Table.Row>
-            <Table.HeaderCell colSpan='4'>
+            <Table.HeaderCell colSpan='5'>
               <div className='scroll-x-nowrap'>
                 <Button size='small' as={Link} to='/token/add' loading={loading}>
                   {t('token.buttons.add')}

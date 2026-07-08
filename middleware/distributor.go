@@ -196,8 +196,10 @@ func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		userId := c.GetInt(ctxkey.Id)
-		userGroup, _ := model.CacheGetUserGroup(userId)
-		c.Set(ctxkey.Group, userGroup)
+		tokenGroup := c.GetString(ctxkey.Group)
+		if tokenGroup == "" {
+			tokenGroup = "default"
+		}
 
 		var channel *model.Channel
 		var requestModel string
@@ -228,14 +230,14 @@ func Distribute() func(c *gin.Context) {
 				requestModel = "auto"
 				c.Set(ctxkey.RequestModel, requestModel)
 			}
-			channel, suggestedModel, err = SelectChannel(ctx, userGroup, requestModel, -1, userId)
+			channel, suggestedModel, err = SelectChannel(ctx, tokenGroup, requestModel, -1, userId)
 			if err != nil {
 				abortWithMessage(c, http.StatusServiceUnavailable, err.Error())
 				return
 			}
 		}
 
-		logger.Log.Debugf("user id %d, user group: %s, request model: %s, suggested model: %s, using channel #%d", userId, userGroup, requestModel, suggestedModel, channel.Id)
+		logger.Log.Debugf("user id %d, token group: %s, request model: %s, suggested model: %s, using channel #%d", userId, tokenGroup, requestModel, suggestedModel, channel.Id)
 		setDistributeContext(c, channel, requestModel, suggestedModel)
 		SetupContextForSelectedChannel(c, channel, suggestedModel)
 		c.Next()
