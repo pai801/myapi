@@ -68,13 +68,9 @@ const (
 )
 
 var ModelList = []string{
-	"gpt-4o",
-	"gpt-4o-mini",
-	"gpt-4-turbo",
-	"gpt-4",
-	"gpt-3.5-turbo",
-	"o1",
-	"o1-mini",
+	"gpt-5.5",
+	"gpt-5.4-mini",
+	"gpt-5.4",
 }
 
 func DoResponsesResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (*model.Usage, *model.ErrorWithStatusCode) {
@@ -326,7 +322,7 @@ func readSSEEvent(r *bufio.Reader, maxBytes int) (sseEvent, error) {
 		}
 		if len(line) > 0 {
 			// RawSize 包含换行符，作为安全上限使用，略大于实际 wire bytes。
-		event.RawSize += len(line)
+			event.RawSize += len(line)
 			if event.RawSize > maxBytes {
 				return sseEvent{}, fmt.Errorf("sse event too large: %d > %d", event.RawSize, maxBytes)
 			}
@@ -356,12 +352,12 @@ func readSSEEvent(r *bufio.Reader, maxBytes int) (sseEvent, error) {
 				event.Event = fieldValue
 			case "data":
 				dataLines = append(dataLines, fieldValue)
-		case "id":
-			event.ID = fieldValue
-			// 记录 Last-Event-ID 用于调试
-			if fieldValue != "" {
-				logger.Log.Debugf("[readSSEEvent] received id: %s", fieldValue)
-			}
+			case "id":
+				event.ID = fieldValue
+				// 记录 Last-Event-ID 用于调试
+				if fieldValue != "" {
+					logger.Log.Debugf("[readSSEEvent] received id: %s", fieldValue)
+				}
 			}
 		}
 		if errors.Is(err, io.EOF) {
@@ -749,22 +745,22 @@ func buildFailedStreamError(resp *model.ResponsesResponse) model.Error {
 }
 
 type sseProcessState struct {
-	currentFrame        **model.ResponsesStreamFrame
-	deltaFrame          **model.ResponsesStreamFrame
-	deltaText           *strings.Builder
-	capture             *model.ResponsesStreamCapture
-	usage               **model.Usage
-	outputItems         *[]model.ResponsesItem
-	outputItemByID      *map[string]int
-	skippedItemIDs      *map[string]struct{}
-	doneRendered        *bool
-	responseText        *string
-	streamError         *model.Error
-	sawFailedTerminal   *bool
+	currentFrame           **model.ResponsesStreamFrame
+	deltaFrame             **model.ResponsesStreamFrame
+	deltaText              *strings.Builder
+	capture                *model.ResponsesStreamCapture
+	usage                  **model.Usage
+	outputItems            *[]model.ResponsesItem
+	outputItemByID         *map[string]int
+	skippedItemIDs         *map[string]struct{}
+	doneRendered           *bool
+	responseText           *string
+	streamError            *model.Error
+	sawFailedTerminal      *bool
 	sawCompletedTerminal   *bool
 	sentSyntheticCompleted *bool
-	sawDone             *bool
-	lastEventType       *string
+	sawDone                *bool
+	lastEventType          *string
 }
 
 type flushCallbacks struct {

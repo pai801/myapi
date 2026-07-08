@@ -86,6 +86,7 @@ export const CHANNEL_OPTIONS = [
   { key: 45, text: 'xAI', value: 45, color: 'blue' },
   { key: 46, text: 'Replicate', value: 46, color: 'blue' },
   { key: 52, text: 'Codex', value: 52, color: 'blue' },
+  { key: 53, text: 'ChatGPT 订阅', value: 53, color: 'purple' },
   {
     key: 8,
     text: '自定义渠道',

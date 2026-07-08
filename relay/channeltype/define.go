@@ -54,5 +54,6 @@ const (
 	OpenAICompatible
 	GeminiOpenAICompatible
 	Codex
+	ChatGPTSub
 	Dummy
 )

@@ -8,6 +8,7 @@ import (
 	"github.com/pai801/myapi/relay/adaptor/aws"
 	"github.com/pai801/myapi/relay/adaptor/baidu"
 	"github.com/pai801/myapi/relay/adaptor/cloudflare"
+	"github.com/pai801/myapi/relay/adaptor/chatgptsub"
 	"github.com/pai801/myapi/relay/adaptor/codex"
 	"github.com/pai801/myapi/relay/adaptor/cohere"
 	"github.com/pai801/myapi/relay/adaptor/coze"
@@ -67,6 +68,10 @@ func GetAdaptor(apiType int) adaptor.Adaptor {
 		return &replicate.Adaptor{}
 	case apitype.Codex:
 		return &codex.Adaptor{
+			OpenAiImpl: &openai.Adaptor{},
+		}
+	case apitype.ChatGPTSub:
+		return &chatgptsub.Adaptor{
 			OpenAiImpl: &openai.Adaptor{},
 		}
 	}

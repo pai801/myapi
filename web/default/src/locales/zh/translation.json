@@ -136,7 +136,8 @@
         "zhipu": "按照如下格式输入：APIKey|SecretKey",
         "spark": "按照如下格式输入：APPID|APISecret|APIKey",
         "fastgpt": "按照如下格式输入：APIKey-AppId，例如：fastgpt-0sp2gtvfdgyi4k30jwlgwf1i-64f335d84283f05518e9e041",
-        "tencent": "按照如下格式输入：AppId|SecretId|SecretKey"
+        "tencent": "按照如下格式输入：AppId|SecretId|SecretKey",
+        "chatgpt_sub": "ChatGPT 订阅会话令牌（__Secure-next-auth.session-token）或 Bearer token"
       }
     }
   },

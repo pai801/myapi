@@ -53,7 +53,8 @@ var ChannelBaseURLs = []string{
 	"https://dashscope.aliyuncs.com",            // 49
 	"",                                          // 50
 	"https://generativelanguage.googleapis.com/v1beta/openai/", // 51
-	"", // 52 (Codex)
+	"",                     // 52 (Codex)
+	"https://chatgpt.com", // 53 (ChatGPTSub)
 }
 
 func init() {

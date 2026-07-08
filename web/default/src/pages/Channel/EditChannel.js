@@ -22,6 +22,8 @@ function type2secretPrompt(type, t) {
       return t('channel.edit.key_prompts.fastgpt');
     case 23:
       return t('channel.edit.key_prompts.tencent');
+    case 53:
+      return t('channel.edit.key_prompts.chatgpt_sub');
     default:
       return t('channel.edit.key_prompts.default');
   }

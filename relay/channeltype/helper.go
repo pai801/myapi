@@ -43,6 +43,8 @@ func ToAPIType(channelType int) int {
 		apiType = apitype.Proxy
 	case Codex:
 		apiType = apitype.Codex
+	case ChatGPTSub:
+		apiType = apitype.ChatGPTSub
 	}
 
 	return apiType

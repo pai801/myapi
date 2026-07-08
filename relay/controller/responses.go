@@ -50,7 +50,7 @@ func RelayResponsesHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	}
 
 	// 普通 /v1/responses 接口的原有处理逻辑
-	if ctxMeta.APIType == apitype.Codex {
+	if ctxMeta.APIType == apitype.Codex || ctxMeta.APIType == apitype.ChatGPTSub {
 		return relayResponsesDirect(c, ctxMeta)
 	}
 

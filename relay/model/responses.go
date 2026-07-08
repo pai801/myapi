@@ -135,6 +135,7 @@ type OutputTokensDetails struct {
 // ResponsesStreamEvent is a streaming event for Responses API
 type ResponsesStreamEvent struct {
 	ID         string             `json:"id,omitempty"`
+	ItemID     string             `json:"item_id,omitempty"`
 	Item       *ResponsesItem     `json:"item,omitempty"`
 	Model      string             `json:"model,omitempty"`
 	Output     []ResponsesItem    `json:"output,omitempty"`

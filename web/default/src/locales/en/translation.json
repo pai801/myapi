@@ -136,7 +136,8 @@
         "zhipu": "Enter in format: APIKey|SecretKey",
         "spark": "Enter in format: APPID|APISecret|APIKey",
         "fastgpt": "Enter in format: APIKey-AppId, e.g.: fastgpt-0sp2gtvfdgyi4k30jwlgwf1i-64f335d84283f05518e9e041",
-        "tencent": "Enter in format: AppId|SecretId|SecretKey"
+        "tencent": "Enter in format: AppId|SecretId|SecretKey",
+        "chatgpt_sub": "ChatGPT subscription session token (__Secure-next-auth.session-token) or Bearer token"
       }
     }
   },
