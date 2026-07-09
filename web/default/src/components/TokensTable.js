@@ -60,13 +60,6 @@ const TokensTable = () => {
     { key: 'lobe', text: t('token.copy_options.lobe'), value: 'lobechat' },
   ];
 
-  const OPEN_LINK_OPTIONS = [
-    { key: 'next', text: t('token.copy_options.next'), value: 'next' },
-    { key: 'ama', text: t('token.copy_options.ama'), value: 'ama' },
-    { key: 'opencat', text: t('token.copy_options.opencat'), value: 'opencat' },
-    { key: 'lobe', text: t('token.copy_options.lobe'), value: 'lobechat' },
-  ];
-
   const [tokens, setTokens] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
@@ -167,35 +160,6 @@ const TokensTable = () => {
       showWarning(t('token.messages.copy_failed'));
       setSearchKeyword(url);
     }
-  };
-
-  const onOpenLink = async (type, key) => {
-    let status = localStorage.getItem('status');
-    let serverAddress = '';
-    if (status) {
-      status = JSON.parse(status);
-      serverAddress = status.server_address;
-    }
-    if (serverAddress === '') {
-      serverAddress = window.location.origin;
-    }
-    let encodedServerAddress = encodeURIComponent(serverAddress);
-    let defaultUrl = `https://app.nextchat.dev/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
-    let url;
-    switch (type) {
-      case 'ama':
-        url = `ama://set-api-key?server=${encodedServerAddress}&key=sk-${key}`;
-        break;
-
-      case 'opencat':
-        url = `opencat://team/join?domain=${encodedServerAddress}&token=sk-${key}`;
-        break;
-
-      default:
-        url = defaultUrl;
-    }
-
-    window.open(url, '_blank');
   };
 
   const manageToken = async (id, action, idx) => {
@@ -352,15 +316,6 @@ const TokensTable = () => {
                 },
               }));
 
-              const openLinkOptionsWithHandlers = OPEN_LINK_OPTIONS.map(
-                (option) => ({
-                  ...option,
-                  onClick: async () => {
-                    await onOpenLink(option.value, token.key);
-                  },
-                })
-              );
-
               return (
                 <Table.Row key={token.id}>
                   <Table.Cell>
@@ -406,21 +361,6 @@ const TokensTable = () => {
                           className='button icon'
                           floating
                           options={copyOptionsWithHandlers}
-                          trigger={<></>}
-                        />
-                      </Button.Group>{' '}
-                      <Button.Group color='olive' size={'tiny'}>
-                        <Button
-                          size={'tiny'}
-                          positive
-                          onClick={() => onOpenLink('', token.key)}
-                        >
-                          {t('token.buttons.chat')}
-                        </Button>
-                        <Dropdown
-                          className='button icon'
-                          floating
-                          options={openLinkOptionsWithHandlers}
                           trigger={<></>}
                         />
                       </Button.Group>{' '}
@@ -472,42 +412,37 @@ const TokensTable = () => {
             })}
         </Table.Body>
 
-        <Table.Footer>
-          <Table.Row>
-            <Table.HeaderCell colSpan='5'>
-              <div className='scroll-x-nowrap'>
-                <Button size='small' as={Link} to='/token/add' loading={loading}>
-                  {t('token.buttons.add')}
-                </Button>
-                <Button size='small' onClick={refresh} loading={loading}>
-                  {t('token.buttons.refresh')}
-                </Button>
-                <Dropdown
-                  placeholder={t('token.sort.placeholder')}
-                  selection
-                  options={[
-                    { key: '', text: t('token.sort.default'), value: '' },
-                  ]}
-                  value={orderBy}
-                  onChange={handleOrderByChange}
-                  style={{ marginLeft: '10px' }}
-                />
-                <Pagination
-                  floated='right'
-                  activePage={activePage}
-                  onPageChange={onPaginationChange}
-                  size='small'
-                  siblingRange={1}
-                  totalPages={
-                    Math.ceil(tokens.length / ITEMS_PER_PAGE) +
-                    (tokens.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                  }
-                />
-              </div>
-            </Table.HeaderCell>
-          </Table.Row>
-        </Table.Footer>
       </Table>
+      </div>
+      <div className='table-footer-toolbar scroll-x-nowrap'>
+        <Button size='small' as={Link} to='/token/add' loading={loading}>
+          {t('token.buttons.add')}
+        </Button>
+        <Button size='small' onClick={refresh} loading={loading}>
+          {t('token.buttons.refresh')}
+        </Button>
+        <Dropdown
+          placeholder={t('token.sort.placeholder')}
+          selection
+          options={[
+            { key: '', text: t('token.sort.default'), value: '' },
+          ]}
+          value={orderBy}
+          onChange={handleOrderByChange}
+          style={{ marginLeft: '10px' }}
+        />
+        <Pagination
+          className='table-footer-pagination'
+          floated='right'
+          activePage={activePage}
+          onPageChange={onPaginationChange}
+          size='small'
+          siblingRange={1}
+          totalPages={
+            Math.ceil(tokens.length / ITEMS_PER_PAGE) +
+            (tokens.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
+          }
+        />
       </div>
     </>
   );

@@ -678,74 +678,69 @@ const ChannelsTable = () => {
             })}
         </Table.Body>
 
-        <Table.Footer>
-          <Table.Row>
-            <Table.HeaderCell colSpan={showDetail ? '10' : '8'}>
-              <div className='scroll-x-nowrap'>
-                <Button size='tiny' as={Link} to='/channel/add' loading={loading}>
-                  {t('channel.buttons.add')}
-                </Button>
-                <Button
-                  size='tiny'
-                  loading={loading}
-                  onClick={() => {
-                    testChannels('all');
-                  }}
-                >
-                  {t('channel.buttons.test_all')}
-                </Button>
-                <Button
-                  size='tiny'
-                  loading={loading}
-                  onClick={() => {
-                    testChannels('disabled');
-                  }}
-                >
-                  {t('channel.buttons.test_disabled')}
-                </Button>
-                <Popup
-                  trigger={
-                    <Button size='tiny' loading={loading}>
-                      {t('channel.buttons.delete_disabled')}
-                    </Button>
-                  }
-                  on='click'
-                  flowing
-                  hoverable
-                >
-                  <Button
-                    size='tiny'
-                    loading={loading}
-                    negative
-                    onClick={deleteAllDisabledChannels}
-                  >
-                    {t('channel.buttons.confirm_delete_disabled')}
-                  </Button>
-                </Popup>
-                <Button size='tiny' onClick={refresh} loading={loading}>
-                  {t('channel.buttons.refresh')}
-                </Button>
-                <Button size='tiny' onClick={toggleShowDetail}>
-                  {showDetail
-                    ? t('channel.buttons.hide_detail')
-                    : t('channel.buttons.show_detail')}
-                </Button>
-                <Pagination
-                  floated='right'
-                  activePage={activePage}
-                  onPageChange={onPaginationChange}
-                  size='tiny'
-                  siblingRange={1}
-                  totalPages={
-                    Math.ceil(channels.length / ITEMS_PER_PAGE) +
-                    (channels.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                  }
-                />
-              </div>
-            </Table.HeaderCell>
-          </Table.Row>
-        </Table.Footer>
       </Table>
+      </div>
+      <div className='table-footer-toolbar scroll-x-nowrap'>
+        <Button size='tiny' as={Link} to='/channel/add' loading={loading}>
+          {t('channel.buttons.add')}
+        </Button>
+        <Button
+          size='tiny'
+          loading={loading}
+          onClick={() => {
+            testChannels('all');
+          }}
+        >
+          {t('channel.buttons.test_all')}
+        </Button>
+        <Button
+          size='tiny'
+          loading={loading}
+          onClick={() => {
+            testChannels('disabled');
+          }}
+        >
+          {t('channel.buttons.test_disabled')}
+        </Button>
+        <Popup
+          trigger={
+            <Button size='tiny' loading={loading}>
+              {t('channel.buttons.delete_disabled')}
+            </Button>
+          }
+          on='click'
+          flowing
+          hoverable
+        >
+          <Button
+            size='tiny'
+            loading={loading}
+            negative
+            onClick={deleteAllDisabledChannels}
+          >
+            {t('channel.buttons.confirm_delete_disabled')}
+          </Button>
+        </Popup>
+        <Button size='tiny' onClick={refresh} loading={loading}>
+          {t('channel.buttons.refresh')}
+        </Button>
+        <Button size='tiny' onClick={toggleShowDetail}>
+          {showDetail
+            ? t('channel.buttons.hide_detail')
+            : t('channel.buttons.show_detail')}
+        </Button>
+        <Pagination
+          className='table-footer-pagination'
+          floated='right'
+          activePage={activePage}
+          onPageChange={onPaginationChange}
+          size='tiny'
+          siblingRange={1}
+          totalPages={
+            Math.ceil(channels.length / ITEMS_PER_PAGE) +
+            (channels.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
+          }
+        />
       </div>
     </>
   );

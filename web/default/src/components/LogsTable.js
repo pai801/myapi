@@ -677,73 +677,68 @@ const LogsTable = () => {
             })}
         </Table.Body>
 
-        <Table.Footer>
-          <Table.Row>
-            <Table.HeaderCell colSpan={'11'}>
-              <div className='scroll-x-nowrap'>
-                <Select
-                  placeholder={t('log.type.select')}
-                  options={LOG_OPTIONS}
-                  style={{ marginRight: '8px' }}
-                  name='logType'
-                  value={logType}
-                  onChange={(e, { name, value }) => {
-                    setLogType(value);
-                  }}
-                />
-                <Button size='small' onClick={refresh} loading={loading}>
-                  {t('log.buttons.refresh')}
-                </Button>
-                <span className='hide-on-mobile' style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                  {t('pagination.jump_to')}
-                  <input
-                    type='text'
-                    value={jumpPage}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      if (val === '' || /^\d+$/.test(val)) {
-                        setJumpPage(val);
-                      }
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleJumpPage();
-                    }}
-                    placeholder={t('pagination.page_placeholder')}
-                    style={{
-                      width: '48px',
-                      padding: '4px 6px',
-                      border: '1px solid rgba(34,36,38,.15)',
-                      borderRadius: '4px',
-                      textAlign: 'center',
-                      fontSize: '13px',
-                    }}
-                  />
-                  {t('pagination.page')}
-                  <Button
-                    size='mini'
-                    onClick={handleJumpPage}
-                    disabled={loading}
-                  >
-                    GO
-                  </Button>
-                </span>
-                <Pagination
-                  floated='right'
-                  activePage={activePage}
-                  onPageChange={onPaginationChange}
-                  size='small'
-                  siblingRange={1}
-                  firstItem={{ content: t('pagination.first_page'), 'aria-label': t('pagination.first_page_aria') }}
-                  lastItem={{ content: t('pagination.last_page'), 'aria-label': t('pagination.last_page_aria') }}
-                  totalPages={
-                    Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
-                  }
-                />
-              </div>
-            </Table.HeaderCell>
-          </Table.Row>
-        </Table.Footer>
       </Table>
+      </div>
+      <div className='table-footer-toolbar scroll-x-nowrap'>
+        <Select
+          placeholder={t('log.type.select')}
+          options={LOG_OPTIONS}
+          style={{ marginRight: '8px' }}
+          name='logType'
+          value={logType}
+          onChange={(e, { name, value }) => {
+            setLogType(value);
+          }}
+        />
+        <Button size='small' onClick={refresh} loading={loading}>
+          {t('log.buttons.refresh')}
+        </Button>
+        <span className='hide-on-mobile' style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+          {t('pagination.jump_to')}
+          <input
+            type='text'
+            value={jumpPage}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === '' || /^\d+$/.test(val)) {
+                setJumpPage(val);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleJumpPage();
+            }}
+            placeholder={t('pagination.page_placeholder')}
+            style={{
+              width: '48px',
+              padding: '4px 6px',
+              border: '1px solid rgba(34,36,38,.15)',
+              borderRadius: '4px',
+              textAlign: 'center',
+              fontSize: '13px',
+            }}
+          />
+          {t('pagination.page')}
+          <Button
+            size='mini'
+            onClick={handleJumpPage}
+            disabled={loading}
+          >
+            GO
+          </Button>
+        </span>
+        <Pagination
+          className='table-footer-pagination'
+          floated='right'
+          activePage={activePage}
+          onPageChange={onPaginationChange}
+          size='small'
+          siblingRange={1}
+          firstItem={{ content: t('pagination.first_page'), 'aria-label': t('pagination.first_page_aria') }}
+          lastItem={{ content: t('pagination.last_page'), 'aria-label': t('pagination.last_page_aria') }}
+          totalPages={
+            Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
+          }
+        />
       </div>
     </>
   );

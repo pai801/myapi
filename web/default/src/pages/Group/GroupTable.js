@@ -137,29 +137,26 @@ const GroupTable = () => {
             </Table.Row>
           )}
         </Table.Body>
-        <Table.Footer>
-          <Table.Row>
-            <Table.HeaderCell colSpan='4'>
-              <Button
-                size='tiny'
-                positive
-                onClick={handleAdd}
-                style={{ marginRight: 8 }}
-              >
-                <Icon name='add' /> {t('group.add')}
-              </Button>
-              <Pagination
-                floated='right'
-                activePage={activePage}
-                onPageChange={onPaginationChange}
-                size='tiny'
-                siblingRange={1}
-                totalPages={totalPages}
-              />
-            </Table.HeaderCell>
-          </Table.Row>
-        </Table.Footer>
       </Table>
+      <div className='table-footer-toolbar scroll-x-nowrap'>
+        <Button
+          size='tiny'
+          positive
+          onClick={handleAdd}
+          style={{ marginRight: 8 }}
+        >
+          <Icon name='add' /> {t('group.add')}
+        </Button>
+        <Pagination
+          className='table-footer-pagination'
+          floated='right'
+          activePage={activePage}
+          onPageChange={onPaginationChange}
+          size='tiny'
+          siblingRange={1}
+          totalPages={totalPages}
+        />
+      </div>
       <EditGroup
         open={modalOpen}
         group={editingGroup}

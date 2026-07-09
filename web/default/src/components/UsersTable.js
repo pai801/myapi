@@ -238,35 +238,30 @@ const UsersTable = () => {
             })}
         </Table.Body>
 
-        <Table.Footer>
-          <Table.Row>
-            <Table.HeaderCell colSpan='7'>
-              <div className='scroll-x-nowrap'>
-                <Button size='small' as={Link} to='/user/add' loading={loading}>
-                  {t('user.buttons.add')}
-                </Button>
-                <Button
-                  size='small'
-                  icon='refresh'
-                  onClick={refreshUsers}
-                  loading={loading}
-                />
-                <Pagination
-                  floated='right'
-                  activePage={activePage}
-                  onPageChange={onPaginationChange}
-                  size='small'
-                  siblingRange={1}
-                  totalPages={
-                    Math.ceil(users.length / ITEMS_PER_PAGE) +
-                    (users.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                  }
-                />
-              </div>
-            </Table.HeaderCell>
-          </Table.Row>
-        </Table.Footer>
       </Table>
+      </div>
+      <div className='table-footer-toolbar scroll-x-nowrap'>
+        <Button size='small' as={Link} to='/user/add' loading={loading}>
+          {t('user.buttons.add')}
+        </Button>
+        <Button
+          size='small'
+          icon='refresh'
+          onClick={refreshUsers}
+          loading={loading}
+        />
+        <Pagination
+          className='table-footer-pagination'
+          floated='right'
+          activePage={activePage}
+          onPageChange={onPaginationChange}
+          size='small'
+          siblingRange={1}
+          totalPages={
+            Math.ceil(users.length / ITEMS_PER_PAGE) +
+            (users.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
+          }
+        />
       </div>
     </>
   );

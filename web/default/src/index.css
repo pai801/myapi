@@ -28,6 +28,10 @@ code {
     font-size: 1.1em;
 }
 
+.table-footer-toolbar {
+    margin-top: 0.5em;
+}
+
 /* ===== Mobile First: <= 600px (手机竖屏) ===== */
 @media only screen and (max-width: 600px) {
     .hide-on-mobile {
@@ -74,11 +78,11 @@ code {
         padding: 0 !important;
     }
 
-    /* 表格保持横向：按内容自然宽度排列，不压缩、不换行 */
+    /* 表格保持横向：按内容自然宽度排列，不强制撑满容器，避免首列吞掉多余宽度 */
     .ui.table {
         font-size: 0.82em !important;
-        width: auto !important;        /* 不强制 100%，按内容宽度排列 */
-        min-width: 100% !important;    /* 至少撑满容器宽度 */
+        width: max-content !important;     /* 以内容固有宽度布局，超出时交给外层横向滚动 */
+        min-width: max-content !important; /* 避免被 100% 最小宽度拉伸后把空白分配给首列 */
         table-layout: auto !important;
     }
 
@@ -189,6 +193,18 @@ code {
     flex-shrink: 0 !important;
   }
 
+  .table-footer-toolbar {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 0.5em !important;
+  }
+
+  .table-footer-pagination {
+    margin-left: auto !important;
+  }
+
   .ui.table tfoot .scroll-x-nowrap {
     align-items: center !important;
     gap: 6px !important;
@@ -217,10 +233,24 @@ code {
     flex-wrap: nowrap !important;
   }
 
+  .table-footer-toolbar .ui.pagination.menu {
+    float: none !important;
+    flex-wrap: wrap !important;
+    justify-content: flex-end !important;
+    min-height: auto !important;
+  }
+
+  .table-footer-toolbar.scroll-x-nowrap .ui.pagination.menu {
+    flex-wrap: nowrap !important;
+  }
+
   /* Select 下拉框和按钮在移动端不挤压 */
   .ui.table tfoot .ui.dropdown,
   .ui.table tfoot .ui.button,
-  .ui.table tfoot .ui.selection {
+  .ui.table tfoot .ui.selection,
+  .table-footer-toolbar .ui.dropdown,
+  .table-footer-toolbar .ui.button,
+  .table-footer-toolbar .ui.selection {
     flex-shrink: 0 !important;
   }
 
