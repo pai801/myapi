@@ -94,7 +94,8 @@ const GroupTable = () => {
 
   return (
     <div>
-      <Table basic='very' celled selectable compact>
+      <div className='table-scroll-wrapper'>
+      <Table unstackable basic={'very'} compact size='small'>
         <Table.Header>
           <Table.Row>
             <Table.HeaderCell>#</Table.HeaderCell>
@@ -138,6 +139,7 @@ const GroupTable = () => {
           )}
         </Table.Body>
       </Table>
+      </div>
       <div className='table-footer-toolbar scroll-x-nowrap'>
         <Button
           size='tiny'
