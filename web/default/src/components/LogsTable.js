@@ -595,6 +595,9 @@ const LogsTable = () => {
             .filter(log => log != null)
             .map((log, idx) => {
               if (log.deleted) return <></>;
+              const allTokensZero = (!log.prompt_tokens || log.prompt_tokens === 0) &&
+                (!log.completion_tokens || log.completion_tokens === 0) &&
+                (!log.quota || log.quota === 0);
               return (
                 <Table.Row key={log.id}>
                   <Table.Cell>
@@ -651,16 +654,16 @@ const LogsTable = () => {
                       </Table.Cell>
 
                       <Table.Cell className='hide-on-mobile'>
-                        {log.prompt_tokens ? log.prompt_tokens : ''}
+                        {allTokensZero ? '-' : (log.prompt_tokens || 0)}
                       </Table.Cell>
                       <Table.Cell className='hide-on-mobile'>
                         {log.cached_tokens ? (log.prompt_tokens && log.prompt_tokens > 0 ? `${log.cached_tokens} (${(log.cached_tokens / log.prompt_tokens * 100).toFixed(2)}%)` : log.cached_tokens) : ''}
                       </Table.Cell>
                       <Table.Cell className='hide-on-mobile'>
-                        {log.completion_tokens ? log.completion_tokens : ''}
+                        {allTokensZero ? '-' : (log.completion_tokens || 0)}
                       </Table.Cell>
                       <Table.Cell>
-                        {log.quota ? renderQuota(log.quota, t, 6) : ''}
+                        {allTokensZero ? '-' : (log.quota ? renderQuota(log.quota, t, 6) : '0')}
                       </Table.Cell>
                     </>
                   )}
