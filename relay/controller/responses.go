@@ -79,9 +79,13 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 	} else {
 		if modelName, ok := req["model"].(string); ok {
 			ctxMeta.OriginModelName = modelName
-			if ctxMeta.ActualModelName == "" {
+		}
+		if ctxMeta.ActualModelName == "" {
+			if modelName, ok := req["model"].(string); ok {
 				if mapped, ok := getMappedModelName(modelName, ctxMeta.ModelMapping); ok {
 					ctxMeta.ActualModelName = mapped
+				} else {
+					ctxMeta.ActualModelName = modelName
 				}
 			}
 		}
@@ -90,11 +94,23 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 		}
 	}
 
+	// 替换请求体中的 model 字段为映射后的实际模型名
+	upstreamBody := requestBody
+	if ctxMeta.OriginModelName != ctxMeta.ActualModelName && ctxMeta.ActualModelName != "" {
+		req["model"] = ctxMeta.ActualModelName
+		if modifiedBody, err := json.Marshal(req); err == nil {
+			upstreamBody = modifiedBody
+			logger.Log.Debugf("[responsesDirect] model mapped: %s -> %s", ctxMeta.OriginModelName, ctxMeta.ActualModelName)
+		} else {
+			logger.Log.Warnf("[responsesDirect] failed to marshal modified request body: %v", err)
+		}
+	}
+
 	// 存储请求体和请求头到 context 中
-	if len(requestBody) <= config.MaxLoggedBodySize {
-		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(requestBody))
+	if len(upstreamBody) <= config.MaxLoggedBodySize {
+		ctx = context.WithValue(ctx, CtxKeyRequestBody, string(upstreamBody))
 	} else {
-		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(requestBody)))
+		ctx = context.WithValue(ctx, CtxKeyRequestBody, fmt.Sprintf("[body too large: %d bytes]", len(upstreamBody)))
 	}
 	ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
 
@@ -120,7 +136,7 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 		ctx = context.WithValue(ctx, CtxKeyPreConsumedQuota, estimatedQuota)
 	}
 
-	resp, err := relayAdaptor.DoRequest(c, ctxMeta, bytes.NewBuffer(requestBody))
+	resp, err := relayAdaptor.DoRequest(c, ctxMeta, bytes.NewBuffer(upstreamBody))
 	if err != nil {
 		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		logger.Log.Errorf("[%s] %+v", "do request failed", err)
