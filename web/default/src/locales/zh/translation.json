@@ -98,6 +98,7 @@
       "buttons": {
         "cancel": "取消",
         "submit": "提交",
+        "fetch_models": "拉取模型",
         "fill_models": "填入相关模型",
         "fill_all": "填入所有模型",
         "clear": "清除所有模型",
@@ -109,7 +110,10 @@
         "models_required": "请至少选择一个模型！",
         "model_mapping_invalid": "模型映射必须是合法的 JSON 格式！",
         "update_success": "渠道更新成功！",
-        "create_success": "渠道创建成功！"
+        "create_success": "渠道创建成功！",
+        "base_url_required": "请先填写渠道地址！",
+        "fetch_models_success": "成功拉取 {{count}} 个模型",
+        "fetch_models_failed": "拉取模型列表失败，请检查渠道地址和密钥是否正确"
       },
       "spark_version": "模型版本",
       "spark_version_placeholder": "请输入星火大模型版本，注意是接口地址中的版本号，例如：v2.1",

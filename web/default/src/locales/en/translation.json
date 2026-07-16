@@ -98,6 +98,7 @@
       "buttons": {
         "cancel": "Cancel",
         "submit": "Submit",
+        "fetch_models": "Fetch Models",
         "fill_models": "Fill Related Models",
         "fill_all": "Fill All Models",
         "clear": "Clear All Models",
@@ -109,7 +110,10 @@
         "models_required": "Please select at least one model!",
         "model_mapping_invalid": "Model mapping must be valid JSON format!",
         "update_success": "Channel updated successfully!",
-        "create_success": "Channel created successfully!"
+        "create_success": "Channel created successfully!",
+        "base_url_required": "Please enter base URL first!",
+        "fetch_models_success": "Successfully fetched {{count}} models",
+        "fetch_models_failed": "Failed to fetch models. Please check base URL and API key."
       },
       "spark_version": "Model Version",
       "spark_version_placeholder": "Please enter Spark model version from API URL, e.g.: v2.1",

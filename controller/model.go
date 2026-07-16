@@ -2,12 +2,15 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/pai801/myapi/common/client"
 	"github.com/pai801/myapi/common/ctxkey"
 	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/model"
@@ -239,6 +242,162 @@ func GetUserAvailableModels(c *gin.Context) {
 		"data":    models,
 	})
 	return
+}
+
+type FetchModelsRequest struct {
+	BaseURL     string `json:"base_url"`
+	Key         string `json:"key"`
+	ChannelID   int    `json:"channel_id"`
+	ChannelType int    `json:"channel_type"`
+}
+
+type openAIModelListResponse struct {
+	Object string            `json:"object"`
+	Data   []openAIModelItem `json:"data"`
+}
+
+type openAIModelItem struct {
+	Id      string `json:"id"`
+	Object  string `json:"object"`
+	Created int    `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+// FetchChannelModels 从上游拉取模型列表。
+// 编辑渠道时传 channel_id（后端从 DB 取 key）；新增渠道时传 key。
+// base_url 优先用请求值，空则回退到 channeltype.ChannelBaseURLs。
+// 先尝试 {base_url}/v1/models，若返回非 2xx 则回退到 {base_url}/models。
+func FetchChannelModels(c *gin.Context) {
+	var req FetchModelsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	// —— 确定 key ——
+	apiKey := req.Key
+	if len(apiKey) == 0 && req.ChannelID > 0 {
+		channel, err := model.GetChannelById(req.ChannelID, true) // selectAll=true 包含 key
+		if err != nil {
+			logger.Log.Errorf("fetch models: failed to get channel %d: %v", req.ChannelID, err)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "failed to get channel: " + err.Error(),
+			})
+			return
+		}
+		apiKey = channel.Key
+	}
+
+	// —— 确定 base_url ——
+	baseURL := strings.TrimRight(req.BaseURL, "/")
+	if baseURL == "" {
+		if req.ChannelType > 0 && req.ChannelType < len(channeltype.ChannelBaseURLs) {
+			baseURL = strings.TrimRight(channeltype.ChannelBaseURLs[req.ChannelType], "/")
+		}
+	}
+	if baseURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "base_url is required (provide it or select a channel type with a default base URL)",
+		})
+		return
+	}
+	var urlsToTry []string
+	if strings.HasSuffix(baseURL, "/v1") {
+		urlsToTry = []string{
+			baseURL + "/models",
+		}
+	} else {
+		urlsToTry = []string{
+			baseURL + "/v1/models",
+			baseURL + "/models",
+		}
+	}
+
+	var lastErr error
+	var resp *http.Response
+	var fetchURL string
+	for _, u := range urlsToTry {
+		httpReq, err := http.NewRequestWithContext(c.Request.Context(), "GET", u, nil)
+		if err != nil {
+			logger.Log.Warnf("fetch models: failed to create request for %s: %v", u, err)
+			lastErr = err
+			continue
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		httpReq.Header.Set("Accept", "application/json")
+
+		resp, err = client.HTTPClient.Do(httpReq)
+		if err != nil {
+			logger.Log.Warnf("fetch models: request failed for %s: %v", u, err)
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			logger.Log.Warnf("fetch models: %s returned status %d: %s", u, resp.StatusCode, string(body))
+			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+			resp = nil // 关键：置 nil 避免后面走到解析已关闭 body 的逻辑
+			continue
+		}
+		fetchURL = u
+		break
+	}
+
+	if resp == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("failed to fetch models: %v", lastErr),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "failed to read response: " + err.Error(),
+		})
+		return
+	}
+
+	var modelListResp openAIModelListResponse
+	if err := json.Unmarshal(body, &modelListResp); err != nil {
+		logger.Log.Errorf("fetch models: failed to parse response from %s (body length %d): %v\nResponse body: %s",
+			fetchURL, len(body), err, truncateBody(body, 1024))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("failed to parse response from %s: %v", fetchURL, err),
+		})
+		return
+	}
+
+	modelIDs := make([]string, 0, len(modelListResp.Data))
+	for _, m := range modelListResp.Data {
+		if m.Id != "" {
+			modelIDs = append(modelIDs, m.Id)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    modelIDs,
+	})
+}
+
+// truncateBody 截断过长的响应体用于日志输出。
+func truncateBody(body []byte, maxLen int) string {
+	if len(body) <= maxLen {
+		return string(body)
+	}
+	return string(body[:maxLen]) + fmt.Sprintf("... (truncated %d more bytes)", len(body)-maxLen)
 }
 
 // getAllGroupsModels 返回所有分组模型的并集（用于管理员视角的模型可见性）。

@@ -60,6 +60,8 @@ const EditChannel = () => {
   const [basicModels, setBasicModels] = useState([]);
   const [fullModels, setFullModels] = useState([]);
   const [customModel, setCustomModel] = useState('');
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelKey, setModelKey] = useState(0);
   const [config, setConfig] = useState({
     region: '',
     sk: '',
@@ -147,6 +149,10 @@ const EditChannel = () => {
 
   useEffect(() => {
     let localModelOptions = [...originModelOptions];
+    if (!Array.isArray(inputs.models)) {
+      setModelOptions(localModelOptions);
+      return;
+    }
     inputs.models.forEach((model) => {
       if (!localModelOptions.find((option) => option.key === model)) {
         localModelOptions.push({
@@ -248,6 +254,50 @@ const EditChannel = () => {
     });
     setCustomModel('');
     handleInputChange(null, { name: 'models', value: localModels });
+  };
+
+  const fetchModelsFromBaseURL = async () => {
+    // 先记录当前已选中的模型
+    const prevSelectedModels = inputs.models;
+    setFetchingModels(true);
+    try {
+      let payload = {
+        channel_type: inputs.type,
+      };
+      if (isEdit) {
+        // 编辑渠道：传 channel_id，后端从 DB 取 key 和 base_url
+        payload.channel_id = parseInt(channelId);
+        payload.base_url = inputs.base_url;
+      } else {
+        // 新增渠道：前端传 key 和 base_url
+        payload.key = inputs.key;
+        payload.base_url = inputs.base_url;
+      }
+      let res = await API.post('/api/channel/fetch_models', payload);
+      const { success, message, data } = res.data;
+      if (success && Array.isArray(data)) {
+        let localModelOptions = data.map((model) => ({
+          key: model,
+          text: model,
+          value: model,
+        }));
+        // 保留之前已选模型中仍存在于新列表中的部分
+        let mergedModels = prevSelectedModels.filter((m) => data.includes(m));
+        // 先直接更新 modelOptions，再递增 key 强制下拉框重新挂载
+        // 注意：必须在 setModelKey 之前执行，否则 Dropdown 重新挂载时 modelOptions 还是旧值
+        setModelOptions(localModelOptions);
+        setOriginModelOptions(localModelOptions);
+        setFullModels(data);
+        setInputs((prev) => ({ ...prev, models: mergedModels }));
+        setModelKey((k) => k + 1);
+        showSuccess(t('channel.edit.messages.fetch_models_success', { count: data.length }));
+      } else {
+        showError(message || t('channel.edit.messages.fetch_models_failed'));
+      }
+    } catch (error) {
+      showError(error.message || t('channel.edit.messages.fetch_models_failed'));
+    }
+    setFetchingModels(false);
   };
 
   return (
@@ -432,6 +482,7 @@ const EditChannel = () => {
             {inputs.type !== 43 && (
               <Form.Field>
                 <Form.Dropdown
+                  key={modelKey}
                   label={t('channel.edit.models')}
                   placeholder={t('channel.edit.models_placeholder')}
                   name='models'
@@ -452,6 +503,13 @@ const EditChannel = () => {
             )}
             {inputs.type !== 43 && (
               <div style={{ lineHeight: '40px', marginBottom: '12px' }}>
+                <Button
+                  type={'button'}
+                  loading={fetchingModels}
+                  onClick={fetchModelsFromBaseURL}
+                >
+                  {t('channel.edit.buttons.fetch_models')}
+                </Button>
                 <Button
                   type={'button'}
                   onClick={() => {
