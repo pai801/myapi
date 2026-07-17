@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {useTranslation} from 'react-i18next';
-import {Card, Grid} from 'semantic-ui-react';
+import {Button, Card, Grid, Input} from 'semantic-ui-react';
 import {
   Bar,
   BarChart,
@@ -14,6 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 import axios from 'axios';
+import {isAdmin} from '../../helpers';
 import './Dashboard.css';
 
 // 在 Dashboard 组件内添加自定义配置
@@ -61,14 +62,21 @@ const Dashboard = () => {
     todayQuota: 0,
     todayTokens: 0,
   });
+  const [username, setUsername] = useState('');
+  const [queryKey, setQueryKey] = useState(0);
+  const isAdminUser = isAdmin();
 
   useEffect(() => {
     fetchDashboardData();
-  }, []);
+  }, [queryKey]);
 
   const fetchDashboardData = async () => {
     try {
-      const response = await axios.get('/api/user/dashboard');
+      let url = '/api/user/dashboard';
+      if (isAdminUser && username) {
+        url += `?username=${encodeURIComponent(username)}`;
+      }
+      const response = await axios.get(url);
       if (response.data.success) {
         const dashboardData = response.data.data || [];
         setData(dashboardData);
@@ -108,6 +116,16 @@ const Dashboard = () => {
     };
 
     setSummaryData(summary);
+  };
+
+  const handleStatQuery = () => {
+    setQueryKey((k) => k + 1);
+  };
+
+  const handleUsernameKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      handleStatQuery();
+    }
   };
 
   // 处理数据以供折线图使用，补充缺失的日期
@@ -235,6 +253,21 @@ const Dashboard = () => {
 
   return (
     <div className='dashboard-container'>
+      {isAdminUser && (
+        <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Input
+            size='small'
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            onKeyDown={handleUsernameKeyDown}
+            placeholder='用户名（留空=全部用户）'
+            style={{ width: '220px' }}
+          />
+          <Button size='small' primary onClick={handleStatQuery}>
+            查询
+          </Button>
+        </div>
+      )}
       {/* 三个并排的折线图 */}
       <Grid columns={3} stackable className='charts-grid'>
         <Grid.Column>

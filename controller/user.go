@@ -201,12 +201,24 @@ func GetUser(c *gin.Context) {
 }
 
 func GetUserDashboard(c *gin.Context) {
+	role := c.GetInt(ctxkey.Role)
 	id := c.GetInt(ctxkey.Id)
 	now := time.Now()
 	startOfDay := now.Truncate(24*time.Hour).AddDate(0, 0, -6).Unix()
 	endOfDay := now.Truncate(24 * time.Hour).Add(24*time.Hour - time.Second).Unix()
 
-	dashboards, err := model.SearchLogsByDayAndModel(id, int(startOfDay), int(endOfDay))
+	targetUsername := c.Query("username")
+
+	// 管理员：可传 username 参数查指定用户或全部（不传=全部）
+	if role >= model.RoleAdminUser {
+		if targetUsername != "" {
+			id = 0 // 用 username 过滤而非 userId
+		} else {
+			id = 0 // 查询所有用户
+		}
+	}
+
+	dashboards, err := model.SearchLogsByDayAndModel(id, int(startOfDay), int(endOfDay), targetUsername)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
