@@ -153,7 +153,7 @@ func AddToken(c *gin.Context) {
 		Key:          random.GenerateKey(),
 		CreatedTime:  helper.GetTimestamp(),
 		AccessedTime: helper.GetTimestamp(),
-		Models:       model.SimplifyModelsField(token.Models),
+		Models:       token.Models,
 		Subnet:       token.Subnet,
 		ModelMapping: token.ModelMapping,
 		Group:        token.Group,
@@ -231,7 +231,7 @@ func UpdateToken(c *gin.Context) {
 	} else {
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
-		cleanToken.Models = model.SimplifyModelsField(token.Models)
+		cleanToken.Models = token.Models
 		cleanToken.Subnet = token.Subnet
 		cleanToken.ModelMapping = token.ModelMapping
 		// 空分组兜底 default，防止前端未传时误覆盖 DB 值

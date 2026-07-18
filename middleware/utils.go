@@ -63,7 +63,8 @@ func isModelInList(modelName string, models string) bool {
 	simplified := model.SimplifyModelName(modelName)
 	modelList := strings.Split(models, ",")
 	for _, alias := range modelList {
-		if simplified == alias || strings.HasPrefix(alias, simplified) {
+		simplifiedAlias := model.SimplifyModelName(alias)
+		if simplified == simplifiedAlias || strings.HasPrefix(simplifiedAlias, simplified) {
 			return true
 		}
 	}
