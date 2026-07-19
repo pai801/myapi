@@ -63,6 +63,8 @@ const Dashboard = () => {
     todayTokens: 0,
   });
   const [username, setUsername] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [queryKey, setQueryKey] = useState(0);
   const isAdminUser = isAdmin();
 
@@ -73,8 +75,21 @@ const Dashboard = () => {
   const fetchDashboardData = async () => {
     try {
       let url = '/api/user/dashboard';
+      const params = [];
       if (isAdminUser && username) {
-        url += `?username=${encodeURIComponent(username)}`;
+        params.push(`username=${encodeURIComponent(username)}`);
+      }
+      if (startDate) {
+        params.push(`start_timestamp=${Math.floor(new Date(startDate).getTime() / 1000)}`);
+      }
+      if (endDate) {
+        // 结束日期设为当天最后一秒
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        params.push(`end_timestamp=${Math.floor(end.getTime() / 1000)}`);
+      }
+      if (params.length > 0) {
+        url += '?' + params.join('&');
       }
       const response = await axios.get(url);
       if (response.data.success) {
@@ -134,7 +149,10 @@ const Dashboard = () => {
 
     // 获取日期范围
     const dates = data.map((item) => item.Day);
-    const maxDate = new Date(); // 总是使用今天作为最后一天
+    const maxDate =
+      dates.length > 0
+        ? new Date(Math.max(...dates.map((d) => new Date(d))))
+        : new Date();
     let minDate =
       dates.length > 0
         ? new Date(Math.min(...dates.map((d) => new Date(d))))
@@ -176,7 +194,10 @@ const Dashboard = () => {
 
     // 获取日期范围
     const dates = data.map((item) => item.Day);
-    const maxDate = new Date(); // 总是使用今天作为最后一天
+    const maxDate =
+      dates.length > 0
+        ? new Date(Math.max(...dates.map((d) => new Date(d))))
+        : new Date();
     let minDate =
       dates.length > 0
         ? new Date(Math.min(...dates.map((d) => new Date(d))))
@@ -253,21 +274,47 @@ const Dashboard = () => {
 
   return (
     <div className='dashboard-container'>
-      {isAdminUser && (
-        <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+        {isAdminUser && (
           <Input
             size='small'
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             onKeyDown={handleUsernameKeyDown}
             placeholder='用户名（留空=全部用户）'
-            style={{ width: '220px' }}
+            style={{ width: '200px' }}
           />
-          <Button size='small' primary onClick={handleStatQuery}>
-            查询
-          </Button>
-        </div>
-      )}
+        )}
+        <label style={{ fontSize: '13px', color: '#A3AED0', whiteSpace: 'nowrap' }}>起</label>
+        <input
+          type='date'
+          value={startDate}
+          onChange={(e) => setStartDate(e.target.value)}
+          style={{
+            padding: '6px 10px',
+            border: '1px solid #e0e0e0',
+            borderRadius: '4px',
+            fontSize: '13px',
+            outline: 'none',
+          }}
+        />
+        <label style={{ fontSize: '13px', color: '#A3AED0', whiteSpace: 'nowrap' }}>止</label>
+        <input
+          type='date'
+          value={endDate}
+          onChange={(e) => setEndDate(e.target.value)}
+          style={{
+            padding: '6px 10px',
+            border: '1px solid #e0e0e0',
+            borderRadius: '4px',
+            fontSize: '13px',
+            outline: 'none',
+          }}
+        />
+        <Button size='small' primary onClick={handleStatQuery}>
+          查询
+        </Button>
+      </div>
       {/* 三个并排的折线图 */}
       <Grid columns={3} stackable className='charts-grid'>
         <Grid.Column>

@@ -204,8 +204,16 @@ func GetUserDashboard(c *gin.Context) {
 	role := c.GetInt(ctxkey.Role)
 	id := c.GetInt(ctxkey.Id)
 	now := time.Now()
-	startOfDay := now.Truncate(24*time.Hour).AddDate(0, 0, -6).Unix()
-	endOfDay := now.Truncate(24 * time.Hour).Add(24*time.Hour - time.Second).Unix()
+
+	// 解析时间范围参数，支持自定义查询区间
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	if startTimestamp == 0 {
+		startTimestamp = now.Truncate(24*time.Hour).AddDate(0, 0, -6).Unix()
+	}
+	if endTimestamp == 0 {
+		endTimestamp = now.Truncate(24*time.Hour).Add(24*time.Hour - time.Second).Unix()
+	}
 
 	targetUsername := c.Query("username")
 
@@ -218,7 +226,7 @@ func GetUserDashboard(c *gin.Context) {
 		}
 	}
 
-	dashboards, err := model.SearchLogsByDayAndModel(id, int(startOfDay), int(endOfDay), targetUsername)
+	dashboards, err := model.SearchLogsByDayAndModel(id, int(startTimestamp), int(endTimestamp), targetUsername)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
