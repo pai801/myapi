@@ -64,19 +64,8 @@ func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Request, meta *meta.Meta) error {
-	for k, v := range c.Request.Header {
-		req.Header.Set(k, v[0])
-	}
-
-	// remove unnecessary headers
-	req.Header.Del("Host")
-	req.Header.Del("Content-Length")
-	req.Header.Del("Accept-Encoding")
-	req.Header.Del("Connection")
-
-	// set authorization header
+	channelhelper.SetupCommonRequestHeader(c, req, meta)
 	req.Header.Set("Authorization", meta.APIKey)
-
 	return nil
 }
 
