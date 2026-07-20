@@ -501,17 +501,41 @@ const Dashboard = () => {
                   tick={{ fontSize: 12, fill: '#A3AED0' }}
                 />
                 <Tooltip
-                  contentStyle={{
-                    background: '#fff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                  content={({active, payload, label}) => {
+                    if (!active || !payload) return null;
+                    const filtered = payload.filter(
+                      (item) => item.value !== 0
+                    );
+                    if (filtered.length === 0) return null;
+                    return (
+                      <div
+                        style={{
+                          background: '#fff',
+                          border: 'none',
+                          borderRadius: '4px',
+                          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                          padding: '8px 12px',
+                        }}
+                      >
+                        <p style={{margin: '0 0 6px', fontWeight: 600}}>
+                          {t('dashboard.statistics.tooltip.date')}:{' '}
+                          {formatDate(label)}
+                        </p>
+                        {filtered.map((entry, idx) => (
+                          <p
+                            key={idx}
+                            style={{
+                              color: entry.color,
+                              margin: '2px 0',
+                              fontSize: 13,
+                            }}
+                          >
+                            {entry.name}: {entry.value.toLocaleString()}
+                          </p>
+                        ))}
+                      </div>
+                    );
                   }}
-                  labelFormatter={(label) =>
-                    `${t('dashboard.statistics.tooltip.date')}: ${formatDate(
-                      label
-                    )}`
-                  }
                 />
                 <Legend
                   wrapperStyle={{
