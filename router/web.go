@@ -15,7 +15,7 @@ import (
 
 func SetWebRouter(router *gin.Engine, buildFS embed.FS) {
 	indexPageData, _ := buildFS.ReadFile("web/build/default/index.html")
-	router.Use(gzip.Gzip(gzip.DefaultCompression))
+	router.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/api/log/active/events"})))
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
 	router.Use(static.Serve("/", common.EmbedFolder(buildFS, "web/build/default")))
