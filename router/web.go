@@ -15,7 +15,15 @@ import (
 
 func SetWebRouter(router *gin.Engine, buildFS embed.FS) {
 	indexPageData, _ := buildFS.ReadFile("web/build/default/index.html")
-	router.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/api/log/active/events"})))
+	// 全局 gzip 会缓冲 SSE 响应，因此只对非 API 路径（静态文件）应用
+	router.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if !strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/v1/") {
+			gzip.Gzip(gzip.DefaultCompression)(c)
+			return
+		}
+		c.Next()
+	})
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
 	router.Use(static.Serve("/", common.EmbedFolder(buildFS, "web/build/default")))

@@ -86,7 +86,7 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/self/search", middleware.UserAuth(), controller.SearchUserLogs)
 		logRoute.GET("/active", middleware.AdminAuth(), controller.GetAllActiveLogs)
 		logRoute.GET("/:id", middleware.AdminAuth(), controller.GetLogDetail)
-		// SSE 路由必须绕过 gzip 压缩，否则响应会被缓冲
+		// SSE 端点：Web 路由中的全局 gzip 已跳过 /api/ 路径，不会缓冲
 		// OPTIONS preflight 不经过 AdminAuth（跨域请求不带 cookie）
 		router.OPTIONS("/api/log/active/events", controller.HandleSSEOptions)
 		router.GET("/api/log/active/events", middleware.AdminAuth(), controller.StreamActiveLogs)
