@@ -20,6 +20,7 @@ import (
 	"github.com/pai801/myapi/common/logger"
 	dbmodel "github.com/pai801/myapi/model"
 	relay2 "github.com/pai801/myapi/relay"
+	"github.com/pai801/myapi/relay/active"
 	"github.com/pai801/myapi/relay/adaptor/codex"
 	"github.com/pai801/myapi/relay/adaptor/openai"
 	"github.com/pai801/myapi/relay/apitype"
@@ -658,7 +659,7 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 	groupRatio := dbmodel.GetGroupModelRatio(meta.Group)
 	logContent := fmt.Sprintf("Responses API - 倍率：%.2f × %.2f × 分组%.2f", modelRatio, completionRatio, groupRatio)
 
-	dbmodel.RecordConsumeLog(ctx, &dbmodel.Log{
+	logRecord := &dbmodel.Log{
 		UserId:            meta.UserId,
 		ChannelId:         meta.ChannelId,
 		PromptTokens:      promptTokens,
@@ -675,7 +676,32 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 		RequestBody:       reqBody,
 		ResponseBody:      respBody,
 		RequestHeader:     reqHeader,
-	})
+	}
+	dbmodel.RecordConsumeLog(ctx, logRecord)
+
+	if logRecord.Id > 0 {
+		active.BroadcastComplete(&active.LogRecordData{
+			Id:               logRecord.Id,
+			UserId:           logRecord.UserId,
+			CreatedAt:        logRecord.CreatedAt,
+			Content:          logRecord.Content,
+			Username:         logRecord.Username,
+			TokenName:        logRecord.TokenName,
+			ModelName:        logRecord.ModelName,
+			Quota:            logRecord.Quota,
+			PromptTokens:     logRecord.PromptTokens,
+			CompletionTokens: logRecord.CompletionTokens,
+			CachedTokens:     logRecord.CachedTokens,
+			ChannelId:        logRecord.ChannelId,
+			RequestId:        logRecord.RequestId,
+			ElapsedTime:      logRecord.ElapsedTime,
+			IsStream:         logRecord.IsStream,
+			ChannelName:      logRecord.ChannelName,
+			HasRequestBody:   logRecord.RequestBody != "",
+			HasResponseBody:  logRecord.ResponseBody != "",
+			HasRequestHeader: logRecord.RequestHeader != "",
+		})
+	}
 
 	dbmodel.UpdateUserUsedQuotaAndRequestCount(meta.UserId, quota)
 	dbmodel.UpdateChannelUsedQuota(meta.ChannelId, quota)

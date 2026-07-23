@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Button,
   Form,
@@ -25,6 +25,7 @@ import { ITEMS_PER_PAGE } from '../constants';
 import { renderColorLabel, renderQuota } from '../helpers/render';
 import { Link } from 'react-router-dom';
 import DetailDialog from './DetailDialog';
+import ActiveRequestsPanel from './ActiveRequestsPanel';
 
 function renderTimestamp(timestamp, request_id) {
   return (
@@ -137,6 +138,9 @@ const LogsTable = () => {
   const [showStat, setShowStat] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
+  const activePageRef = useRef(1);
+  // 同步 activePage 到 ref，供 SSE 事件处理器读取最新值
+  useEffect(() => { activePageRef.current = activePage; }, [activePage]);
   const [totalLogs, setTotalLogs] = useState(0);
   const [jumpPage, setJumpPage] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
@@ -146,6 +150,9 @@ const LogsTable = () => {
   const [selectedLogItem, setSelectedLogItem] = useState(null);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [activeLogs, setActiveLogs] = useState([]);
+  const [selectedActiveLog, setSelectedActiveLog] = useState(null);
+  const [activeDetailOpen, setActiveDetailOpen] = useState(false);
 
   const handleDetailClick = async (logItem) => {
     if (detailLoading) return;
@@ -168,6 +175,15 @@ const LogsTable = () => {
 
   const handleDetailClose = () => {
     setDetailDialogOpen(false);
+  };
+
+  const handleActiveDetailClick = (log) => {
+    setSelectedActiveLog(log);
+    setActiveDetailOpen(true);
+  };
+
+  const handleActiveDetailClose = () => {
+    setActiveDetailOpen(false);
   };
 
   const [inputs, setInputs] = useState({
@@ -304,6 +320,51 @@ const LogsTable = () => {
     refresh().then();
   }, [logType]);
 
+  // SSE 实时推送活跃请求（仅管理员）
+  useEffect(() => {
+    if (!isAdminUser) return;
+
+    const baseUrl = process.env.REACT_APP_SERVER || '';
+    const es = new EventSource(`${baseUrl}/api/log/active/events`, { withCredentials: true });
+
+    es.addEventListener('start', (e) => {
+      const evt = JSON.parse(e.data);
+      setActiveLogs(prev => {
+        // upsert: 快照 + start 事件竞态导致同一 request_id 可能出现两次
+        if (prev.some(r => r.request_id === evt.data.request_id)) return prev;
+        return [...prev, evt.data];
+      });
+    });
+
+    es.addEventListener('update', (e) => {
+      const evt = JSON.parse(e.data);
+      setActiveLogs(prev => prev.map(r =>
+        r.request_id === evt.data.request_id ? evt.data : r
+      ));
+    });
+
+    es.addEventListener('end', (e) => {
+      const evt = JSON.parse(e.data);
+      setActiveLogs(prev => prev.filter(r => r.request_id !== evt.request_id));
+    });
+
+    es.addEventListener('complete', (e) => {
+      const evt = JSON.parse(e.data);
+      const log = evt.log;
+      if (!log || activePageRef.current !== 1) return;
+      // 完整 DB 日志，仅补充 type 字段（固定为消费日志）
+      const newLog = { ...log, type: 2 };
+      setPageData(prev => {
+        const next = [newLog, ...prev];
+        if (next.length > ITEMS_PER_PAGE) next.pop();
+        return next;
+      });
+      setTotalLogs(prev => prev + 1);
+    });
+
+    return () => es.close();
+  }, [isAdminUser]);
+
   const searchLogs = async () => {
     if (searchKeyword === '') {
       // if keyword is blank, load files instead.
@@ -355,6 +416,16 @@ const LogsTable = () => {
   return (
     <>
       <DetailDialog open={detailDialogOpen} onClose={handleDetailClose} logItem={selectedLogItem} />
+      <ActiveRequestsPanel
+        logs={activeLogs}
+        onDetailClick={handleActiveDetailClick}
+      />
+      <DetailDialog
+        open={activeDetailOpen}
+        onClose={handleActiveDetailClose}
+        logItem={selectedActiveLog}
+        isActive={true}
+      />
       <Header as='h3'>
         {t('log.usage_details')}（{t('log.total_quota')}：
         {showStat && renderQuota(stat.quota, t)}

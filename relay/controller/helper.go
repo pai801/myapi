@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/pai801/myapi/common/helper"
+	"github.com/pai801/myapi/relay/active"
 	"github.com/pai801/myapi/relay/constant/role"
 
 	"github.com/gin-gonic/gin"
@@ -135,7 +136,7 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 		requestHeader = v.(string)
 	}
 
-	model.RecordConsumeLog(ctx, &model.Log{
+	logRecord := &model.Log{
 		UserId:            meta.UserId,
 		ChannelId:         meta.ChannelId,
 		PromptTokens:      promptTokens,
@@ -152,7 +153,33 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 		RequestBody:       requestBody,
 		ResponseBody:      responseBody,
 		RequestHeader:     requestHeader,
-	})
+	}
+	model.RecordConsumeLog(ctx, logRecord)
+
+	// DB 写入成功后广播 complete 事件，推送完整日志到前端
+	if logRecord.Id > 0 {
+		active.BroadcastComplete(&active.LogRecordData{
+			Id:               logRecord.Id,
+			UserId:           logRecord.UserId,
+			CreatedAt:        logRecord.CreatedAt,
+			Content:          logRecord.Content,
+			Username:         logRecord.Username,
+			TokenName:        logRecord.TokenName,
+			ModelName:        logRecord.ModelName,
+			Quota:            logRecord.Quota,
+			PromptTokens:     logRecord.PromptTokens,
+			CompletionTokens: logRecord.CompletionTokens,
+			CachedTokens:     logRecord.CachedTokens,
+			ChannelId:        logRecord.ChannelId,
+			RequestId:        logRecord.RequestId,
+			ElapsedTime:      logRecord.ElapsedTime,
+			IsStream:         logRecord.IsStream,
+			ChannelName:      logRecord.ChannelName,
+			HasRequestBody:   logRecord.RequestBody != "",
+			HasResponseBody:  logRecord.ResponseBody != "",
+			HasRequestHeader: logRecord.RequestHeader != "",
+		})
+	}
 	model.UpdateUserUsedQuotaAndRequestCount(meta.UserId, quota)
 	model.UpdateChannelUsedQuota(meta.ChannelId, quota)
 }

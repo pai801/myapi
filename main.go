@@ -4,6 +4,7 @@ import (
 	"embed"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -19,6 +20,7 @@ import (
 	"github.com/pai801/myapi/controller"
 	"github.com/pai801/myapi/middleware"
 	"github.com/pai801/myapi/model"
+	"github.com/pai801/myapi/relay/active"
 	"github.com/pai801/myapi/relay/adaptor/openai"
 	"github.com/pai801/myapi/router"
 )
@@ -88,6 +90,14 @@ func main() {
 		logger.Log.Infof("batch update enabled with interval " + strconv.Itoa(config.BatchUpdateInterval) + "s")
 		model.InitBatchUpdater()
 	}
+	// 启动活跃请求 TTL 清理：每 30 秒清理过期条目
+	// TTL 与 RELAY_TIMEOUT 联动：有超时设置时 TTL = 超时 + 2 分钟宽限期
+	// RELAY_TIMEOUT=0（无超时）时使用 30 分钟兜底 TTL
+	cleanupTTL := 30 * time.Minute
+	if config.RelayTimeout > 0 {
+		cleanupTTL = time.Duration(config.RelayTimeout)*time.Second + 2*time.Minute
+	}
+	active.StartCleanupLoop(30*time.Second, cleanupTTL)
 	if config.EnableMetric {
 		logger.Log.Infof("metric enabled, will disable channel if too much request failed")
 	}

@@ -77,7 +77,7 @@ DetailField.propTypes = {
   collapsible: PropTypes.bool,
 };
 
-export default function DetailDialog({ open, onClose, logItem }) {
+export default function DetailDialog({ open, onClose, logItem, isActive }) {
   const fields = [];
 
   if (!logItem) return null;
@@ -100,7 +100,7 @@ export default function DetailDialog({ open, onClose, logItem }) {
   };
 
   const formattedResponse = formatJSON(logItem.response_body);
-  if (formattedResponse) {
+  if (formattedResponse && !isActive) {
     fields.push({ label: '响应体', value: formattedResponse, copyable: true, collapsible: true });
   }
 
@@ -118,7 +118,7 @@ export default function DetailDialog({ open, onClose, logItem }) {
       className='log-detail-modal'
     >
       <Modal.Header>
-        详情
+        {isActive ? 'Active Request Detail' : '详情'}
       </Modal.Header>
       <Modal.Content scrolling>
         {fields.map((field, index) => (
@@ -142,4 +142,5 @@ DetailDialog.propTypes = {
   open: PropTypes.bool.isRequired,
   onClose: PropTypes.func.isRequired,
   logItem: PropTypes.object,
+  isActive: PropTypes.bool,
 };

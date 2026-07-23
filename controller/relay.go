@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pai801/myapi/common"
@@ -18,7 +19,9 @@ import (
 	"github.com/pai801/myapi/middleware"
 	dbmodel "github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/monitor"
+	"github.com/pai801/myapi/relay/active"
 	"github.com/pai801/myapi/relay/controller"
+	metaPkg "github.com/pai801/myapi/relay/meta"
 	"github.com/pai801/myapi/relay/model"
 	"github.com/pai801/myapi/relay/relaymode"
 )
@@ -61,6 +64,12 @@ func Relay(c *gin.Context) {
 	if requestModel == "" {
 		requestModel = "auto"
 	}
+	requestId := c.GetString(helper.RequestIdKey)
+	meta := metaPkg.GetByContext(c)
+	if activeReq := buildActiveRequest(c, meta, requestId); activeReq != nil {
+		active.Global.Add(activeReq)
+		defer active.Global.Remove(requestId)
+	}
 	bizErr := relayHelper(c, relayMode)
 	if bizErr == nil {
 		middleware.AffinityGlobal.Set(userId, requestModel, channelId)
@@ -71,7 +80,6 @@ func Relay(c *gin.Context) {
 	channelName := c.GetString(ctxkey.ChannelName)
 	group := c.GetString(ctxkey.Group)
 	go processChannelRelayError(ctx, userId, channelId, channelName, *bizErr)
-	requestId := c.GetString(helper.RequestIdKey)
 	retryTimes := config.RetryTimes
 	if !shouldRetry(c, bizErr) {
 		logger.Log.Infof("shouldRetry=false statusCode=%d requestId=%s lastFailedChannel=%d", bizErr.StatusCode, requestId, lastFailedChannelId)
@@ -90,6 +98,13 @@ func Relay(c *gin.Context) {
 		logger.Log.Infof("retry attempt=%d remaining=%d failedChannel=%d selectedChannel=%d model=%s requestId=%s",
 			retryTimes-i+1, i, lastFailedChannelId, channel.Id, suggestedModel, requestId)
 		middleware.SetupContextForSelectedChannel(c, channel, suggestedModel)
+		if active.Global.Get(requestId) != nil {
+			active.Global.Update(requestId, func(req *active.ActiveRequest) {
+				req.ChannelID = channel.Id
+				req.ChannelName = channel.Name
+				req.ModelName = suggestedModel
+			})
+		}
 		requestBody, err := common.GetRequestBody(c)
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
 		bizErr = relayHelper(c, relayMode)
@@ -296,4 +311,65 @@ func RelayNotFound(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{
 		"error": err,
 	})
+}
+
+// detectStreamFromBody 从请求体中解析 stream 字段，判断是否为流式请求
+func detectStreamFromBody(c *gin.Context) bool {
+	rawBody, err := common.GetRequestBody(c)
+	if err != nil || len(rawBody) == 0 {
+		return false
+	}
+	var bodyMap map[string]any
+	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+		return false
+	}
+	if stream, ok := bodyMap["stream"]; ok {
+		if b, ok := stream.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// buildActiveRequest 构造活跃请求对象，非流式请求返回 nil
+func buildActiveRequest(c *gin.Context, m *metaPkg.Meta, requestId string) *active.ActiveRequest {
+	if !detectStreamFromBody(c) {
+		return nil
+	}
+	req := &active.ActiveRequest{
+		RequestID:   requestId,
+		UserID:      m.UserId,
+		TokenName:   m.TokenName,
+		ModelName:   m.OriginModelName,
+		ChannelID:   m.ChannelId,
+		ChannelName: m.ChannelName,
+		Group:       m.Group,
+		IsStream:    true,
+		StartedAt:   time.Now().UnixMilli(),
+		RelayMode:   m.Mode,
+	}
+	rawBody, _ := common.GetRequestBody(c)
+	if len(rawBody) > 0 {
+		bodyStr := string(rawBody)
+		if len(bodyStr) <= config.MaxLoggedBodySize {
+			req.RequestBody = bodyStr
+		} else {
+			req.RequestBody = fmt.Sprintf("[body too large: %d bytes]", len(rawBody))
+		}
+		req.HasRequestBody = true
+	}
+	// MaskAuthorizationHeader 内部已 JSON 序列化，直接使用返回值，避免双重编码
+	headerStr := controller.MaskAuthorizationHeader(c.Request.Header)
+	if headerStr != "{}" {
+		req.RequestHeader = headerStr
+		req.HasRequestHeader = true
+	}
+	req.Username = c.GetString(ctxkey.Username)
+	if req.Username == "" {
+		// TokenAuth 中间件不设置 username（仅 WebAuth 设置），手动查
+		if user, err := dbmodel.GetUserById(req.UserID, false); err == nil {
+			req.Username = user.Username
+		}
+	}
+	return req
 }

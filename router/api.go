@@ -84,7 +84,12 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/search", middleware.AdminAuth(), controller.SearchAllLogs)
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
 		logRoute.GET("/self/search", middleware.UserAuth(), controller.SearchUserLogs)
+		logRoute.GET("/active", middleware.AdminAuth(), controller.GetAllActiveLogs)
 		logRoute.GET("/:id", middleware.AdminAuth(), controller.GetLogDetail)
+		// SSE 路由必须绕过 gzip 压缩，否则响应会被缓冲
+		// OPTIONS preflight 不经过 AdminAuth（跨域请求不带 cookie）
+		router.OPTIONS("/api/log/active/events", controller.HandleSSEOptions)
+		router.GET("/api/log/active/events", middleware.AdminAuth(), controller.StreamActiveLogs)
 		groupRoute := apiRouter.Group("/group")
 		groupRoute.Use(middleware.AdminAuth())
 		{
