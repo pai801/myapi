@@ -51,7 +51,7 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
       </Header>
       {!collapsed && (
         <div className='table-scroll-wrapper'>
-        <Table compact basic='very' size='small'>
+        <Table unstackable compact basic='very' size='small'>
           <Table.Header>
             <Table.Row>
               <Table.HeaderCell width={2.4}>

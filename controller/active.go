@@ -37,6 +37,7 @@ func StreamActiveLogs(c *gin.Context) {
 	c.Writer.Header().Set("Access-Control-Allow-Origin", c.Request.Header.Get("Origin"))
 	c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 	c.Writer.WriteHeader(http.StatusOK)
+	c.Writer.Flush()
 
 	sub := active.Subscribe()
 	defer active.Unsubscribe(sub)
