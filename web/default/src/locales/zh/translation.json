@@ -520,7 +520,9 @@
   "footer": {
     "built_by": "由",
     "built_by_name": "JustSong",
-    "license": "基于One Api构建，源代码遵循",
+    "license_before": "基于",
+    "one_api": "One Api",
+    "license_after": "构建，源代码遵循",
     "mit": "MIT 协议"
   },
   "home": {

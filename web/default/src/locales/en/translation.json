@@ -522,7 +522,9 @@
   "footer": {
     "built_by": "built by",
     "built_by_name": "JustSong",
-    "license": ", built based on One API, source code is licensed under the",
+    "license_before": ", built based on",
+    "one_api": "One API",
+    "license_after": ", source code is licensed under the",
     "mit": "MIT License"
   },
   "home": {
