@@ -83,6 +83,45 @@ func TestTTFTWriter_FirstWriteOnly(t *testing.T) {
 	}
 }
 
+func TestTTFTWriter_WriteStringRecordsStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	m := &meta.Meta{IsStream: true, StartTime: time.Now().Add(-80 * time.Millisecond)}
+	wrapTTFTWriter(c, m)
+
+	// 透传/转换流式路径使用 c.Writer.WriteString 写 SSE，必须同样触发埋点
+	if _, err := c.Writer.WriteString("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n"); err != nil {
+		t.Fatalf("unexpected WriteString error: %v", err)
+	}
+	ttft := c.GetInt64(ctxkey.FirstTokenTime)
+	if ttft <= 0 {
+		t.Fatalf("expected TTFT recorded via WriteString, got %d", ttft)
+	}
+	if ttft < 40 || ttft > 500 {
+		t.Fatalf("expected TTFT around 80ms, got %d", ttft)
+	}
+}
+
+func TestTTFTWriter_WriteStringNonStreamingKeepsZero(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	m := &meta.Meta{IsStream: false, StartTime: time.Now().Add(-80 * time.Millisecond)}
+	wrapTTFTWriter(c, m)
+
+	if _, err := c.Writer.WriteString(`{"id":"1"}`); err != nil {
+		t.Fatalf("unexpected WriteString error: %v", err)
+	}
+	if ttft := c.GetInt64(ctxkey.FirstTokenTime); ttft != 0 {
+		t.Fatalf("expected no TTFT for non-streaming WriteString, got %d", ttft)
+	}
+}
+
 func TestGetFirstTokenTime_DefaultZero(t *testing.T) {
 	if got := getFirstTokenTime(context.Background()); got != 0 {
 		t.Fatalf("expected 0 from empty ctx, got %d", got)

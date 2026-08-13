@@ -41,6 +41,8 @@ var CtxKeyPreConsumedQuota = "pre_consumed_quota"
 // 非流式请求不记录（FirstTokenTime 保持 0）。首次写出通常即 SSE 首帧/首个 data 行。
 // 持有 meta 指针而非重新 GetByContext：StartTime 基准与 ElapsedTime 一致，
 // IsStream 在包装后可能被入口逻辑更新，写时读取实时值。
+// 必须同时覆盖 Write 与 WriteString：内嵌接口的 WriteString 会直接转发到底层 writer，
+// 绕过本包装的 Write 埋点（如透传/转换流式路径用 c.Writer.WriteString 写 SSE）。
 type ttftWriter struct {
 	gin.ResponseWriter
 	c    *gin.Context
@@ -49,13 +51,31 @@ type ttftWriter struct {
 }
 
 func (w *ttftWriter) Write(data []byte) (int, error) {
-	if !w.set {
-		w.set = true
-		if w.meta != nil && w.meta.IsStream {
-			w.c.Set(ctxkey.FirstTokenTime, time.Since(w.meta.StartTime).Milliseconds())
-		}
-	}
+	w.markFirstToken()
 	return w.ResponseWriter.Write(data)
+}
+
+func (w *ttftWriter) WriteString(s string) (int, error) {
+	w.markFirstToken()
+	return w.ResponseWriter.Write([]byte(s))
+}
+
+// markFirstToken 首次写出时记录首字耗时，并同步到活跃请求（供前端实时 SSE 展示）。
+func (w *ttftWriter) markFirstToken() {
+	if w.set {
+		return
+	}
+	w.set = true
+	if w.meta == nil || !w.meta.IsStream {
+		return
+	}
+	ms := time.Since(w.meta.StartTime).Milliseconds()
+	w.c.Set(ctxkey.FirstTokenTime, ms)
+	if rid := w.c.GetString(helper.RequestIdKey); rid != "" {
+		active.Global.Update(rid, func(req *active.ActiveRequest) {
+			req.FirstTokenMs = ms
+		})
+	}
 }
 
 // wrapTTFTWriter 在 relay 入口包装 ResponseWriter，用于记录流式首字耗时。

@@ -84,6 +84,9 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
               <Table.HeaderCell width={1.5}>
                 {t('log.table.token_name')}
               </Table.HeaderCell>
+              <Table.HeaderCell width={1.2}>
+                {t('log.table.first_token_time')}
+              </Table.HeaderCell>
               <Table.HeaderCell width={1.5}>
                 Elapsed
               </Table.HeaderCell>
@@ -141,6 +144,15 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
                     )}
                     <Table.Cell>
                       {log.token_name ? renderColorLabel(log.token_name) : ''}
+                    </Table.Cell>
+                    <Table.Cell>
+                      {log.first_token_ms ? (
+                        <Label basic size='mini' color='teal'>
+                          {log.first_token_ms} ms
+                        </Label>
+                      ) : (
+                        '-'
+                      )}
                     </Table.Cell>
                     <Table.Cell>
                       <Label basic size='mini' color={getColorByElapsedTime(elapsed)}>

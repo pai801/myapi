@@ -570,7 +570,7 @@ const LogsTable = () => {
               onClick={() => {
                 sortLog('model_name');
               }}
-              width={3}
+              width={2.9}
             >
               {t('log.table.model')}
             </Table.HeaderCell>
@@ -590,7 +590,7 @@ const LogsTable = () => {
               onClick={() => {
                 sortLog('first_token_time');
               }}
-              width={1}
+              width={0.8}
             >
               {t('log.table.first_token_time')}
             </Table.HeaderCell>
@@ -600,7 +600,7 @@ const LogsTable = () => {
               onClick={() => {
                 sortLog('elapsed_time');
               }}
-              width={1}
+              width={0.8}
             >
               {t('log.table.elapsed_time')}
             </Table.HeaderCell>

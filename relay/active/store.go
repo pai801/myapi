@@ -17,6 +17,7 @@ type ActiveRequest struct {
 	IsStream         bool   `json:"is_stream"`
 	StartedAt        int64  `json:"started_at"`
 	ElapsedMs        int64  `json:"elapsed_ms"`
+	FirstTokenMs     int64  `json:"first_token_ms"` // 首字耗时（TTFT，ms），首字写出后由 ttftWriter 实时更新
 	RelayMode        int    `json:"relay_mode"`
 	RequestBody      string `json:"request_body"`
 	RequestHeader    string `json:"request_header"`
