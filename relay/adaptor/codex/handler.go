@@ -488,10 +488,14 @@ func finalizeStreamCapture(c *gin.Context, capture *model.ResponsesStreamCapture
 	} else if usage == nil {
 		return
 	}
-	if len(capture.Frames) > 0 || capture.Response != nil {
-		if respJSON, err := json.Marshal(capture); err == nil {
+	// 日志 ResponseBody 只存聚合后的完整 response（供日志列表查看返回数据），
+	// 不再写入 frames 原始帧。frames 捕获逻辑保留，排查 SSE 流问题时打 debug 摘要。
+	// 外层保留 {"response":...} 包装，与历史日志结构一致（仅少了 frames 字段）。
+	if capture.Response != nil {
+		if respJSON, err := json.Marshal(map[string]any{"response": capture.Response}); err == nil {
 			c.Set(ctxkey.ResponseBody, string(respJSON))
 		}
+		logger.Log.Debugf("[finalizeStreamCapture] response %s stored, frames=%d", capture.Response.ID, len(capture.Frames))
 	}
 }
 

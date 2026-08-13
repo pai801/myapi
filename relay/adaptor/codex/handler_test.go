@@ -226,7 +226,7 @@ func TestStreamResponsesHandler_FlushesHeadersBeforeFirstEventRead(t *testing.T)
 	<-doneCh
 }
 
-func TestStreamResponsesHandler_CapturesStructuredFramesAndCollapsesOutputTextDelta(t *testing.T) {
+func TestStreamResponsesHandler_StoresAggregatedResponseOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	stream := strings.Join([]string{
@@ -273,57 +273,13 @@ func TestStreamResponsesHandler_CapturesStructuredFramesAndCollapsesOutputTextDe
 	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
 		t.Fatalf("unmarshal capture json: %v", err)
 	}
-
-	frames, ok := capture["frames"].([]interface{})
-	if !ok {
-		t.Fatalf("expected frames array, got %#v", capture["frames"])
-	}
-	if len(frames) != 4 {
-		t.Fatalf("expected capture to keep 4 frames without pure delta noise, got %d: %#v", len(frames), frames)
-	}
-
-	first, ok := frames[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected first frame object, got %#v", frames[0])
-	}
-	if first["event"] != "response.created" {
-		t.Fatalf("expected first frame event preserved, got %#v", first["event"])
-	}
-	if _, ok := first["data"].(map[string]interface{}); !ok {
-		t.Fatalf("expected first frame data to stay structured JSON object, got %#v", first["data"])
-	}
-
-	deltaFound := false
-	outputItemFound := false
-	for _, frame := range frames {
-		fm := frame.(map[string]interface{})
-		if fm["event"] == "response.output_item.done" {
-			outputItemFound = true
-		}
-		if fm["event"] == "response.output_text.delta" {
-			deltaFound = true
-			data := fm["data"].(map[string]interface{})
-			if data["delta"] != "Hello" {
-				t.Fatalf("expected delta fragments to be aggregated into Hello, got %#v", data["delta"])
-			}
-		}
-		if fm["event"] == "response.reasoning_summary_text.delta" {
-			t.Fatalf("did not expect reasoning summary delta frame to be preserved: %#v", fm)
-		}
-	}
-	if !deltaFound {
-		t.Fatalf("expected one aggregated output_text.delta frame in capture")
-	}
-	if !outputItemFound {
-		t.Fatalf("expected output_item.done frame to be preserved for fallback")
+	if _, ok := capture["frames"]; ok {
+		t.Fatalf("did not expect frames array in stored response body")
 	}
 
 	respJSON, ok := capture["response"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected completed response in capture, got %#v", capture["response"])
-	}
-	if _, ok := capture["output_items"]; ok {
-		t.Fatalf("did not expect separate output_items array in serialized capture")
 	}
 	if respJSON["id"] != "resp_1" {
 		t.Fatalf("expected completed response id preserved, got %#v", respJSON["id"])
@@ -333,6 +289,20 @@ func TestStreamResponsesHandler_CapturesStructuredFramesAndCollapsesOutputTextDe
 	}
 	if respJSON["usage"].(map[string]interface{})["total_tokens"] != float64(3) {
 		t.Fatalf("expected usage preserved, got %#v", respJSON["usage"])
+	}
+	// 聚合结果：completed 快照 output 为空时，output_items 累积兜底（保留完整 item 快照）
+	output, ok := respJSON["output"].([]interface{})
+	if !ok || len(output) != 1 {
+		t.Fatalf("expected fallback output item aggregated, got %#v", output)
+	}
+	item := output[0].(map[string]interface{})
+	content, _ := item["content"].([]interface{})
+	if len(content) != 1 {
+		t.Fatalf("expected one content block, got %#v", content)
+	}
+	part := content[0].(map[string]interface{})
+	if part["text"] != "Hello" {
+		t.Fatalf("expected aggregated output text Hello, got %#v", part["text"])
 	}
 }
 
@@ -584,10 +554,6 @@ func TestStreamResponsesHandler_SuccessTerminalOrdering(t *testing.T) {
 
 	var capture struct {
 		Response *model.ResponsesResponse `json:"response"`
-		Frames   []struct {
-			Event string `json:"event"`
-			Done  bool   `json:"done"`
-		} `json:"frames"`
 	}
 	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
 		t.Fatalf("unmarshal capture json: %v", err)
@@ -603,31 +569,6 @@ func TestStreamResponsesHandler_SuccessTerminalOrdering(t *testing.T) {
 	}
 	if len(capture.Response.Output) != 1 {
 		t.Fatalf("expected captured final response output preserved, got %#v", capture.Response.Output)
-	}
-	completedCount := 0
-	completedIndex := -1
-	doneIndex := -1
-	outputDoneIndex := -1
-	for i, frame := range capture.Frames {
-		if frame.Event == "response.output_item.done" {
-			outputDoneIndex = i
-		}
-		if frame.Event == "response.completed" {
-			completedCount++
-			completedIndex = i
-		}
-		if frame.Done {
-			doneIndex = i
-		}
-	}
-	if completedCount != 1 {
-		t.Fatalf("expected exactly one response.completed frame, got %#v", capture.Frames)
-	}
-	if completedIndex < 0 || doneIndex < 0 || completedIndex >= doneIndex {
-		t.Fatalf("expected response.completed frame before done frame, got %#v", capture.Frames)
-	}
-	if outputDoneIndex < 0 || outputDoneIndex >= completedIndex {
-		t.Fatalf("expected output item completion before response.completed, got %#v", capture.Frames)
 	}
 	if capture.Response.Usage.TotalTokens != 3 {
 		t.Fatalf("expected captured final response usage preserved, got %#v", capture.Response.Usage)
@@ -723,11 +664,6 @@ func TestStreamResponsesHandler_InterleavedOutputToolStableTerminal(t *testing.T
 
 	var capture struct {
 		Response *model.ResponsesResponse `json:"response"`
-		Frames   []struct {
-			Event string      `json:"event"`
-			Done  bool        `json:"done"`
-			Data  interface{} `json:"data"`
-		} `json:"frames"`
 	}
 	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
 		t.Fatalf("unmarshal capture json: %v", err)
@@ -746,43 +682,6 @@ func TestStreamResponsesHandler_InterleavedOutputToolStableTerminal(t *testing.T
 	}
 	if len(capture.Response.Output) != 2 {
 		t.Fatalf("expected captured final response output preserved, got %#v", capture.Response.Output)
-	}
-
-	messageDoneFrameIndex := -1
-	toolDoneFrameIndex := -1
-	completedFrameIndex := -1
-	doneFrameIndex := -1
-	completedCount := 0
-	for i, frame := range capture.Frames {
-		if frame.Event == "response.output_item.done" {
-			data, _ := frame.Data.(map[string]interface{})
-			item, _ := data["item"].(map[string]interface{})
-			if item["id"] == "msg_interleaved" {
-				messageDoneFrameIndex = i
-			}
-			if item["id"] == "fc_interleaved" && item["type"] == "function_call" && item["status"] == "completed" {
-				toolDoneFrameIndex = i
-			}
-		}
-		if frame.Event == "response.completed" {
-			completedCount++
-			completedFrameIndex = i
-		}
-		if frame.Done {
-			doneFrameIndex = i
-		}
-	}
-	if completedCount != 1 {
-		t.Fatalf("expected exactly one response.completed frame, got %#v", capture.Frames)
-	}
-	if messageDoneFrameIndex < 0 || messageDoneFrameIndex >= completedFrameIndex {
-		t.Fatalf("expected assistant output completion frame before response.completed, got %#v", capture.Frames)
-	}
-	if toolDoneFrameIndex < 0 || toolDoneFrameIndex >= completedFrameIndex {
-		t.Fatalf("expected tool completion frame before response.completed, got %#v", capture.Frames)
-	}
-	if completedFrameIndex < 0 || doneFrameIndex < 0 || completedFrameIndex >= doneFrameIndex {
-		t.Fatalf("expected response.completed frame before done frame, got %#v", capture.Frames)
 	}
 }
 
@@ -1321,10 +1220,6 @@ func TestStreamResponsesHandler_MissingCompletedSafeReconstruction(t *testing.T)
 
 	var capture struct {
 		Response *model.ResponsesResponse `json:"response"`
-		Frames   []struct {
-			Event string `json:"event"`
-			Done  bool   `json:"done"`
-		} `json:"frames"`
 	}
 	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
 		t.Fatalf("unmarshal reconstructed capture: %v", err)
@@ -1346,22 +1241,6 @@ func TestStreamResponsesHandler_MissingCompletedSafeReconstruction(t *testing.T)
 	}
 	if capture.Response.Output[0].ID != "msg_missing_completed" {
 		t.Fatalf("expected reconstructed output item preserved, got %#v", capture.Response.Output[0])
-	}
-	completedCount := 0
-	doneCount := 0
-	for _, frame := range capture.Frames {
-		if frame.Event == "response.completed" {
-			completedCount++
-		}
-		if frame.Done {
-			doneCount++
-		}
-	}
-	if completedCount != 1 {
-		t.Fatalf("expected one synthetic response.completed frame in capture, got %#v", capture.Frames)
-	}
-	if doneCount != 1 {
-		t.Fatalf("expected one done frame in capture, got %#v", capture.Frames)
 	}
 }
 
@@ -1457,30 +1336,8 @@ func TestStreamResponsesHandler_DeltaNoiseDoesNotCorruptTerminalSemantics(t *tes
 	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
 		t.Fatalf("unmarshal noisy capture json: %v", err)
 	}
-	frames := capture["frames"].([]interface{})
-	completedCount := 0
-	deltaCount := 0
-	for _, frame := range frames {
-		fm := frame.(map[string]interface{})
-		if fm["event"] == "response.completed" {
-			completedCount++
-		}
-		if fm["event"] == "response.output_text.delta" {
-			deltaCount++
-			data := fm["data"].(map[string]interface{})
-			if data["delta"] != "clean text" {
-				t.Fatalf("expected noisy output deltas collapsed to clean text, got %#v", data["delta"])
-			}
-		}
-		if event, _ := fm["event"].(string); strings.HasSuffix(event, ".delta") && event != "response.output_text.delta" {
-			t.Fatalf("expected non-output delta noise to stay out of capture frames, got %#v", fm)
-		}
-	}
-	if completedCount != 1 {
-		t.Fatalf("expected one completed frame in noisy capture, got %#v", frames)
-	}
-	if deltaCount != 1 {
-		t.Fatalf("expected one aggregated output_text delta frame in noisy capture, got %#v", frames)
+	if _, ok := capture["frames"]; ok {
+		t.Fatalf("did not expect frames array in stored response body")
 	}
 	respJSON := capture["response"].(map[string]interface{})
 	if respJSON["status"] != "completed" {
@@ -2447,8 +2304,8 @@ func TestStreamResponsesHandler_ReadErrorAfterStreamBeginsEmitsTerminalErrorEven
 	}
 	if rawBody := c.GetString(ctxkey.ResponseBody); rawBody == "" {
 		t.Fatalf("expected capture body to be stored on stream read error")
-	} else if !strings.Contains(rawBody, `"event":"response.output_text.delta"`) || !strings.Contains(rawBody, `"delta":"Hello"`) {
-		t.Fatalf("expected last delta frame captured before read error, got %q", rawBody)
+	} else if !strings.Contains(rawBody, `"status":"failed"`) || !strings.Contains(rawBody, `"message":"unexpected EOF"`) {
+		t.Fatalf("expected aggregated response marked failed with read error details, got %q", rawBody)
 	}
 }
 
