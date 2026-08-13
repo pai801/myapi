@@ -78,7 +78,9 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 			case "none":
 				chatReq["reasoning_effort"] = "none"
 			case "auto":
-				chatReq["reasoning_effort"] = "auto"
+				// auto 不是上游 chat 端点的合法枚举（如 DeepSeek: none/minimal/low/medium/high/xhigh/max），
+				// 映射到 high（各上游普遍支持的默认档位）而非透传 auto 导致 400。
+				chatReq["reasoning_effort"] = "high"
 			case "minimal":
 				chatReq["reasoning_effort"] = "low"
 			case "low":
@@ -89,8 +91,11 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 				chatReq["reasoning_effort"] = "high"
 			case "xhigh":
 				chatReq["reasoning_effort"] = "xhigh"
+			case "max":
+				chatReq["reasoning_effort"] = "max"
 			default:
-				chatReq["reasoning_effort"] = "auto"
+				// 未识别值同样兜底 high（原先兜底 auto 会导致 400，Codex 默认 effort=max 曾落入此分支）
+				chatReq["reasoning_effort"] = "high"
 			}
 		}
 	}

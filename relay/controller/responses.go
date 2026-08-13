@@ -21,10 +21,12 @@ import (
 	dbmodel "github.com/pai801/myapi/model"
 	relay2 "github.com/pai801/myapi/relay"
 	"github.com/pai801/myapi/relay/active"
+	"github.com/pai801/myapi/relay/adaptor"
 	"github.com/pai801/myapi/relay/adaptor/codex"
 	"github.com/pai801/myapi/relay/adaptor/openai"
 	"github.com/pai801/myapi/relay/apitype"
 	billingratio "github.com/pai801/myapi/relay/billing/ratio"
+	"github.com/pai801/myapi/relay/channeltype"
 	"github.com/pai801/myapi/relay/constant"
 	metaPkg "github.com/pai801/myapi/relay/meta"
 	"github.com/pai801/myapi/relay/model"
@@ -51,7 +53,8 @@ func RelayResponsesHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	}
 
 	// 普通 /v1/responses 接口的原有处理逻辑
-	if ctxMeta.APIType == apitype.Codex || ctxMeta.APIType == apitype.ChatGPTSub {
+	// DeepSeek 官方已原生支持 Responses 协议（V4-Flash 起），直接透传避免转换层损失（如 effort=max 被误映射为 auto 导致 400）
+	if ctxMeta.APIType == apitype.Codex || ctxMeta.APIType == apitype.ChatGPTSub || ctxMeta.ChannelType == channeltype.DeepSeek {
 		return relayResponsesDirect(c, ctxMeta)
 	}
 
@@ -149,7 +152,7 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 		return relayErrorHandler(resp)
 	}
 
-	usage, relayErr := relayAdaptor.DoResponse(c, resp, ctxMeta)
+	usage, relayErr := handleResponsesDirect(c, resp, ctxMeta, relayAdaptor)
 	if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
 		ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
 	}
@@ -392,6 +395,113 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	go postConsumeQuotaForResponses(ctx, finalUsage, ctxMeta, ratio, modelRatio, reqBody, respBody, reqHeader)
 
 	return nil
+}
+
+// responsesUsage 解析 responses 协议的 usage 字段（DeepSeek 原生透传用）。
+// responses 协议 token 字段为 input_tokens/output_tokens，与 chat 协议（prompt_tokens/completion_tokens）不同。
+type responsesUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+	InputTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+}
+
+// toModelUsage 把 responses usage 映射到网关内部 Usage（用于扣费与日志）。
+func (u *responsesUsage) toModelUsage() *model.Usage {
+	if u == nil {
+		return nil
+	}
+	usage := &model.Usage{
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0 {
+		usage.PromptTokensDetails = &model.PromptTokensDetails{CachedTokens: u.InputTokensDetails.CachedTokens}
+	}
+	return usage
+}
+
+// handleResponsesDirect 处理 responses 原生透传的响应。
+// 上游为 DeepSeek 等原生支持 Responses 协议的 OpenAI 兼容渠道时使用：
+// openai adaptor 的 DoResponse 只认 chat 格式（choices/usage.prompt_tokens），
+// responses 格式（顶层 usage.input_tokens）会提取失真，流式下甚至不转发任何 SSE 数据，
+// 因此这里直接原样透传响应，并单独按 responses 格式提取 usage。
+func handleResponsesDirect(c *gin.Context, resp *http.Response, meta *metaPkg.Meta, relayAdaptor adaptor.Adaptor) (*model.Usage, *model.ErrorWithStatusCode) {
+	if meta.ChannelType == channeltype.DeepSeek {
+		if meta.IsStream {
+			return handleResponsesDirectStream(c, resp)
+		}
+		return handleResponsesDirectNonStream(c, resp)
+	}
+	// Codex / ChatGPTSub 等渠道走各自适配器（已支持 responses 格式）
+	return relayAdaptor.DoResponse(c, resp, meta)
+}
+
+func handleResponsesDirectNonStream(c *gin.Context, resp *http.Response) (*model.Usage, *model.ErrorWithStatusCode) {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, openai.ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
+	}
+	_ = resp.Body.Close()
+
+	// 兜底：上游 200 但 body 为错误 JSON（如 effort 非法）时直接返回错误，不转发
+	var payload struct {
+		Error *model.Error    `json:"error"`
+		Usage *responsesUsage `json:"usage"`
+	}
+	_ = json.Unmarshal(responseBody, &payload)
+	if payload.Error != nil && payload.Error.Message != "" {
+		return nil, &model.ErrorWithStatusCode{Error: *payload.Error, StatusCode: resp.StatusCode}
+	}
+
+	for k, v := range resp.Header {
+		c.Writer.Header().Set(k, v[0])
+	}
+	c.Writer.WriteHeader(resp.StatusCode)
+	_, _ = c.Writer.Write(responseBody)
+
+	c.Set(ctxkey.ResponseBody, string(responseBody))
+	return payload.Usage.toModelUsage(), nil
+}
+
+func handleResponsesDirectStream(c *gin.Context, resp *http.Response) (*model.Usage, *model.ErrorWithStatusCode) {
+	common.SetEventStreamHeaders(c)
+	c.Writer.WriteHeader(http.StatusOK)
+
+	// 逐行原样转发 SSE 事件（response.created → ... → response.completed，无 [DONE]），
+	// 同时从 response.completed 事件中提取 usage 用于扣费。
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, constant.ScannerBufferInitial), constant.ScannerBufferMax)
+	var usage *model.Usage
+	for scanner.Scan() {
+		line := scanner.Text()
+		if _, err := c.Writer.WriteString(line + "\n"); err != nil {
+			break
+		}
+		if strings.HasPrefix(line, "data: ") {
+			var evt struct {
+				Type     string `json:"type"`
+				Response *struct {
+					Usage *responsesUsage `json:"usage"`
+				} `json:"response"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &evt); err == nil {
+				if evt.Type == "response.completed" && evt.Response != nil {
+					usage = evt.Response.Usage.toModelUsage()
+				}
+			}
+		}
+	}
+	c.Writer.Flush()
+	_ = resp.Body.Close()
+
+	if usage == nil {
+		usage = &model.Usage{}
+	}
+	return usage, nil
 }
 
 type chatResponsesStreamResult struct {

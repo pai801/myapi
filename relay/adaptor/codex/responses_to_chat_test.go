@@ -1763,3 +1763,45 @@ func TestConvertChatResponseToResponsesWithContext_ToolCallIDMissing(t *testing.
 		So(item["name"], ShouldEqual, "get_weather")
 	})
 }
+
+func TestConvertResponsesToChatRequest_ReasoningEffortMapping(t *testing.T) {
+	Convey("ConvertResponsesToChatRequest: reasoning.effort 映射表", t, func() {
+		reqBase := func(effort string) []byte {
+			body, _ := json.Marshal(map[string]interface{}{
+				"model":     "gpt-test",
+				"reasoning": map[string]interface{}{"effort": effort},
+			})
+			return body
+		}
+
+		Convey("max → reasoning_effort=max（回归：Codex 默认发 max，之前落入 default 被映射成 auto）", func() {
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("max"), false))
+			So(chatReq["reasoning_effort"], ShouldEqual, "max")
+		})
+
+		Convey("none/low/medium/high/xhigh 正常映射", func() {
+			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("none"), false))["reasoning_effort"], ShouldEqual, "none")
+			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("low"), false))["reasoning_effort"], ShouldEqual, "low")
+			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("medium"), false))["reasoning_effort"], ShouldEqual, "medium")
+			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("high"), false))["reasoning_effort"], ShouldEqual, "high")
+			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("xhigh"), false))["reasoning_effort"], ShouldEqual, "xhigh")
+		})
+
+		Convey("auto → 映射为 high（上游枚举不含 auto，透传会 400）", func() {
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("auto"), false))
+			So(chatReq["reasoning_effort"], ShouldEqual, "high")
+		})
+
+		Convey("未知 effort → 兜底 high（不再兜底 auto）", func() {
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("ultra"), false))
+			So(chatReq["reasoning_effort"], ShouldEqual, "high")
+		})
+
+		Convey("无 reasoning 字段 → 不设置 reasoning_effort", func() {
+			body, _ := json.Marshal(map[string]interface{}{"model": "gpt-test"})
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", body, false))
+			_, has := chatReq["reasoning_effort"]
+			So(has, ShouldBeFalse)
+		})
+	})
+}

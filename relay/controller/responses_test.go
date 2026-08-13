@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/ctxkey"
 )
 
 type errReader struct {
@@ -542,5 +543,127 @@ func TestRelayResponsesConverted_StreamFailedTerminalStaysSSEForResponseFailedEv
 	}
 	if strings.Contains(body, `status_code`) || strings.Contains(body, `"status":502`) {
 		t.Fatalf("expected no HTTP 502-style payload after SSE headers committed, got %q", body)
+	}
+}
+
+func TestHandleResponsesDirectNonStream_PassthroughAndUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	body := `{"id":"resp_x","object":"response","status":"completed","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"input_tokens_details":{"cached_tokens":40}},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	usage, relayErr := handleResponsesDirectNonStream(c, resp)
+	if relayErr != nil {
+		t.Fatalf("expected no relay error, got %+v", relayErr)
+	}
+	if usage == nil || usage.PromptTokens != 100 || usage.CompletionTokens != 50 || usage.TotalTokens != 150 {
+		t.Fatalf("expected usage 100/50/150, got %+v", usage)
+	}
+	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.CachedTokens != 40 {
+		t.Fatalf("expected cached tokens 40, got %+v", usage.PromptTokensDetails)
+	}
+	if recorder.Body.String() != body {
+		t.Fatalf("expected passthrough body, got %q", recorder.Body.String())
+	}
+	if c.GetString(ctxkey.ResponseBody) != body {
+		t.Fatalf("expected response body stored in ctx, got %q", c.GetString(ctxkey.ResponseBody))
+	}
+}
+
+func TestHandleResponsesDirectNonStream_ErrorBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"bad effort","type":"invalid_request_error","code":"invalid_request_error"}}`)),
+	}
+
+	_, relayErr := handleResponsesDirectNonStream(c, resp)
+	if relayErr == nil {
+		t.Fatal("expected relay error for error body")
+	}
+	if !strings.Contains(relayErr.Error.Message, "bad effort") {
+		t.Fatalf("expected error message forwarded, got %q", relayErr.Error.Message)
+	}
+}
+
+func TestHandleResponsesDirectStream_PassthroughAndUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_s","object":"response","status":"in_progress"}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"hi"}`,
+		"",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_s","object":"response","status":"completed","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}`,
+		"",
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(stream)),
+	}
+
+	usage, relayErr := handleResponsesDirectStream(c, resp)
+	if relayErr != nil {
+		t.Fatalf("expected no relay error, got %+v", relayErr)
+	}
+	if usage == nil || usage.PromptTokens != 10 || usage.CompletionTokens != 20 || usage.TotalTokens != 30 {
+		t.Fatalf("expected usage 10/20/30 from response.completed, got %+v", usage)
+	}
+	got := recorder.Body.String()
+	for _, want := range []string{`event: response.created`, `event: response.output_text.delta`, `event: response.completed`, `"input_tokens":10`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected SSE passthrough containing %q, got %q", want, got)
+		}
+	}
+}
+
+func TestHandleResponsesDirectStream_NoUsageEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`event: response.created`,
+			`data: {"type":"response.created","response":{"id":"resp_s"}}`,
+			"",
+		}, "\n"))),
+	}
+
+	usage, relayErr := handleResponsesDirectStream(c, resp)
+	if relayErr != nil {
+		t.Fatalf("expected no relay error, got %+v", relayErr)
+	}
+	if usage == nil {
+		t.Fatal("expected non-nil usage (empty) so quota rollback path works")
+	}
+	if usage.TotalTokens != 0 {
+		t.Fatalf("expected zero usage, got %+v", usage)
 	}
 }
