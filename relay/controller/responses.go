@@ -473,22 +473,27 @@ func handleResponsesDirectStream(c *gin.Context, resp *http.Response) (*model.Us
 
 	// 逐行原样转发 SSE 事件（response.created → ... → response.completed，无 [DONE]），
 	// 同时从 response.completed 事件中提取 usage 用于扣费。
+	// 响应体记录：SSE 流无整体 body，通过 responsesStreamAccumulator 把各事件合并成
+	// 等价于非流式响应的完整 JSON（快照整体吸收、delta 增量拼接），存入 ctxkey.ResponseBody 供日志展示。
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, constant.ScannerBufferInitial), constant.ScannerBufferMax)
 	var usage *model.Usage
+	acc := newResponsesStreamAccumulator()
 	for scanner.Scan() {
 		line := scanner.Text()
 		if _, err := c.Writer.WriteString(line + "\n"); err != nil {
 			break
 		}
 		if strings.HasPrefix(line, "data: ") {
+			payload := strings.TrimPrefix(line, "data: ")
+			acc.addPayload([]byte(payload))
 			var evt struct {
 				Type     string `json:"type"`
 				Response *struct {
 					Usage *responsesUsage `json:"usage"`
 				} `json:"response"`
 			}
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &evt); err == nil {
+			if err := json.Unmarshal([]byte(payload), &evt); err == nil {
 				if evt.Type == "response.completed" && evt.Response != nil {
 					usage = evt.Response.Usage.toModelUsage()
 				}
@@ -498,10 +503,194 @@ func handleResponsesDirectStream(c *gin.Context, resp *http.Response) (*model.Us
 	c.Writer.Flush()
 	_ = resp.Body.Close()
 
+	if body := acc.buildResponseBody(); body != "" {
+		c.Set(ctxkey.ResponseBody, body)
+	}
+
 	if usage == nil {
 		usage = &model.Usage{}
 	}
 	return usage, nil
+}
+
+// responsesStreamAccumulator 把 responses 协议 SSE 事件合并为完整 response JSON（日志记录用）。
+// 对齐 openai adaptor 的 chatStreamAccumulator 模式：快照类事件（response.created/output_item.done/
+// response.completed）整体吸收字段，增量类事件（output_text.delta/function_call_arguments.delta）
+// 拼接文本，最终 buildResponseBody 输出等价于非流式响应体的完整 JSON。
+type responsesStreamAccumulator struct {
+	resp    map[string]any // 顶层 response 对象（含 output 数组）
+	output  []any          // 累积的 output items
+	curItem map[string]any // 当前正在累积文本/参数的 output item
+}
+
+func newResponsesStreamAccumulator() *responsesStreamAccumulator {
+	return &responsesStreamAccumulator{
+		resp: map[string]any{
+			"object": "response",
+			"output": []any{},
+		},
+	}
+}
+
+func (a *responsesStreamAccumulator) addPayload(payload []byte) {
+	var evt map[string]any
+	if err := json.Unmarshal(payload, &evt); err != nil {
+		return
+	}
+	evtType, _ := evt["type"].(string)
+	switch evtType {
+	case "response.created", "response.in_progress", "response.completed", "response.failed":
+		if resp, ok := evt["response"].(map[string]any); ok {
+			a.absorbResponse(resp)
+		}
+	case "response.output_item.added":
+		if item, ok := evt["item"].(map[string]any); ok {
+			a.absorbItem(item)
+		}
+	case "response.content_part.added":
+		if part, ok := evt["part"].(map[string]any); ok {
+			a.appendContentPart(part)
+		}
+	case "response.output_text.delta":
+		if delta, ok := evt["delta"].(string); ok {
+			a.appendOutputText(delta)
+		}
+	case "response.output_text.done":
+		if text, ok := evt["text"].(string); ok {
+			a.setOutputText(text)
+		}
+	case "response.function_call_arguments.delta":
+		if delta, ok := evt["delta"].(string); ok {
+			a.appendFunctionArgs(delta)
+		}
+	case "response.function_call_arguments.done":
+		if args, ok := evt["arguments"].(string); ok {
+			a.setFunctionArgs(args)
+		}
+	case "response.output_item.done":
+		if item, ok := evt["item"].(map[string]any); ok {
+			a.replaceItem(item)
+		}
+	}
+}
+
+// absorbResponse 吸收 response 快照字段；快照带完整 output 时整体替换，否则保留已累积的 output。
+func (a *responsesStreamAccumulator) absorbResponse(resp map[string]any) {
+	if output, ok := resp["output"].([]any); ok && len(output) > 0 {
+		a.output = output
+		a.resp["output"] = output
+	}
+	for k, v := range resp {
+		if k == "output" {
+			continue
+		}
+		a.resp[k] = v
+	}
+}
+
+// absorbItem 追加新的 output item（output_item.added）。
+func (a *responsesStreamAccumulator) absorbItem(item map[string]any) {
+	a.curItem = item
+	a.output = append(a.output, item)
+	a.resp["output"] = a.output
+}
+
+// appendContentPart 追加 content part；若当前 item 已有同类型占位 part 则跳过（避免重复）。
+func (a *responsesStreamAccumulator) appendContentPart(part map[string]any) {
+	if a.curItem == nil {
+		return
+	}
+	content, _ := a.curItem["content"].([]any)
+	partType, _ := part["type"].(string)
+	for _, cv := range content {
+		if cm, ok := cv.(map[string]any); ok {
+			if t, _ := cm["type"].(string); t == partType && t == "output_text" {
+				return
+			}
+		}
+	}
+	a.curItem["content"] = append(content, part)
+}
+
+// lastOutputTextPart 返回当前 item 的最后一个 output_text part（delta 文本的落点）。
+func (a *responsesStreamAccumulator) lastOutputTextPart() map[string]any {
+	if a.curItem == nil {
+		return nil
+	}
+	content, _ := a.curItem["content"].([]any)
+	for i := len(content) - 1; i >= 0; i-- {
+		if cm, ok := content[i].(map[string]any); ok {
+			if t, _ := cm["type"].(string); t == "output_text" {
+				return cm
+			}
+		}
+	}
+	return nil
+}
+
+// appendOutputText 把 output_text.delta 拼接到当前文本后。
+func (a *responsesStreamAccumulator) appendOutputText(delta string) {
+	part := a.lastOutputTextPart()
+	if part == nil {
+		return
+	}
+	text, _ := part["text"].(string)
+	part["text"] = text + delta
+}
+
+// setOutputText 用 output_text.done 的完整文本覆盖。
+func (a *responsesStreamAccumulator) setOutputText(text string) {
+	if part := a.lastOutputTextPart(); part != nil {
+		part["text"] = text
+	}
+}
+
+// appendFunctionArgs 把 function_call_arguments.delta 拼接到当前 item 的 arguments 后。
+func (a *responsesStreamAccumulator) appendFunctionArgs(delta string) {
+	if a.curItem == nil {
+		return
+	}
+	args, _ := a.curItem["arguments"].(string)
+	a.curItem["arguments"] = args + delta
+}
+
+// setFunctionArgs 用 function_call_arguments.done 的完整 arguments 覆盖。
+func (a *responsesStreamAccumulator) setFunctionArgs(args string) {
+	if a.curItem != nil {
+		a.curItem["arguments"] = args
+	}
+}
+
+// replaceItem 用 output_item.done 的完整 item 快照替换同 id 的累积 item（未匹配则追加）。
+func (a *responsesStreamAccumulator) replaceItem(item map[string]any) {
+	id, _ := item["id"].(string)
+	for i, v := range a.output {
+		m, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		if mid, _ := m["id"].(string); mid == id {
+			a.output[i] = item
+			if a.curItem != nil {
+				if curID, _ := a.curItem["id"].(string); curID == id {
+					a.curItem = item
+				}
+			}
+			a.resp["output"] = a.output
+			return
+		}
+	}
+	a.absorbItem(item)
+}
+
+// buildResponseBody 序列化合并后的完整 response JSON。
+func (a *responsesStreamAccumulator) buildResponseBody() string {
+	body, err := json.Marshal(a.resp)
+	if err != nil {
+		logger.Log.Errorf("buildResponseBody marshal failed: " + err.Error())
+		return ""
+	}
+	return string(body)
 }
 
 type chatResponsesStreamResult struct {

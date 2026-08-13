@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -611,8 +612,17 @@ func TestHandleResponsesDirectStream_PassthroughAndUsage(t *testing.T) {
 		`event: response.created`,
 		`data: {"type":"response.created","response":{"id":"resp_s","object":"response","status":"in_progress"}}`,
 		"",
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":"","annotations":[]}]}}`,
+		"",
 		`event: response.output_text.delta`,
-		`data: {"type":"response.output_text.delta","delta":"hi"}`,
+		`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":" World"}`,
+		"",
+		`event: response.output_text.done`,
+		`data: {"type":"response.output_text.done","item_id":"msg_1","output_index":0,"content_index":0,"text":"Hello World","annotations":[]}`,
 		"",
 		`event: response.completed`,
 		`data: {"type":"response.completed","response":{"id":"resp_s","object":"response","status":"completed","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}`,
@@ -632,10 +642,83 @@ func TestHandleResponsesDirectStream_PassthroughAndUsage(t *testing.T) {
 		t.Fatalf("expected usage 10/20/30 from response.completed, got %+v", usage)
 	}
 	got := recorder.Body.String()
-	for _, want := range []string{`event: response.created`, `event: response.output_text.delta`, `event: response.completed`, `"input_tokens":10`} {
+	for _, want := range []string{`event: response.created`, `event: response.output_item.added`, `event: response.output_text.delta`, `event: response.output_text.done`, `event: response.completed`, `"input_tokens":10`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected SSE passthrough containing %q, got %q", want, got)
 		}
+	}
+
+	// 日志记录：SSE 流应合并为完整 response JSON（delta 拼接 + 快照吸收）
+	var merged map[string]any
+	if err := json.Unmarshal([]byte(c.GetString(ctxkey.ResponseBody)), &merged); err != nil {
+		t.Fatalf("expected merged JSON body in ctx, got %q (err %v)", c.GetString(ctxkey.ResponseBody), err)
+	}
+	if merged["id"] != "resp_s" || merged["status"] != "completed" {
+		t.Fatalf("expected id/status absorbed from snapshots, got %+v", merged)
+	}
+	output, _ := merged["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected 1 merged output item, got %+v", output)
+	}
+	item, _ := output[0].(map[string]any)
+	content, _ := item["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content part, got %+v", content)
+	}
+	part, _ := content[0].(map[string]any)
+	if part["text"] != "Hello World" {
+		t.Fatalf("expected delta merged text \"Hello World\", got %q", part["text"])
+	}
+}
+
+func TestResponsesStreamAccumulator_MergesFunctionCallArguments(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	stream := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"get_weather","arguments":"","status":"in_progress"}}`,
+		"",
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"city\":\""}`,
+		"",
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"beijing\"}"}`,
+		"",
+		`event: response.function_call_arguments.done`,
+		`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"city\":\"beijing\"}"}`,
+		"",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_fc","object":"response","status":"completed","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}`,
+		"",
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(stream)),
+	}
+
+	if _, relayErr := handleResponsesDirectStream(c, resp); relayErr != nil {
+		t.Fatalf("expected no relay error, got %+v", relayErr)
+	}
+
+	var merged map[string]any
+	if err := json.Unmarshal([]byte(c.GetString(ctxkey.ResponseBody)), &merged); err != nil {
+		t.Fatalf("expected merged JSON body in ctx, got %q (err %v)", c.GetString(ctxkey.ResponseBody), err)
+	}
+	output, _ := merged["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("expected 1 merged function_call item, got %+v", output)
+	}
+	item, _ := output[0].(map[string]any)
+	if item["type"] != "function_call" || item["name"] != "get_weather" {
+		t.Fatalf("expected function_call item, got %+v", item)
+	}
+	if item["arguments"] != `{"city":"beijing"}` {
+		t.Fatalf("expected merged arguments, got %q", item["arguments"])
 	}
 }
 
@@ -665,5 +748,19 @@ func TestHandleResponsesDirectStream_NoUsageEvent(t *testing.T) {
 	}
 	if usage.TotalTokens != 0 {
 		t.Fatalf("expected zero usage, got %+v", usage)
+	}
+	gotBody := c.GetString(ctxkey.ResponseBody)
+	if gotBody == "" {
+		t.Fatal("expected merged JSON body stored in ctx")
+	}
+	var gotMap map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &gotMap); err != nil {
+		t.Fatalf("expected valid JSON in ctx, got %q (err %v)", gotBody, err)
+	}
+	if gotMap["id"] != "resp_s" {
+		t.Fatalf("expected created snapshot merged, got %q", gotBody)
+	}
+	if _, ok := gotMap["output"].([]any); !ok {
+		t.Fatalf("expected output array present, got %q", gotBody)
 	}
 }
