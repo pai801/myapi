@@ -244,6 +244,8 @@
       "completion_tokens": "Completion Tokens",
       "cached_tokens": "Cached Tokens",
       "quota": "Quota",
+      "first_token_time": "TTFT",
+      "elapsed_time": "Total",
       "detail": "Detail"
     },
     "messages": {

@@ -23,6 +23,7 @@ const (
 	SystemPrompt      = "system_prompt"
 	SuggestedModel    = "suggested_model"
 	ResponseBody      = "response_body"
+	FirstTokenTime    = "first_token_time"
 	TokenModelMapping      = "token_model_mapping"
 	PreConsumedQuota       = "pre_consumed_quota"
 )

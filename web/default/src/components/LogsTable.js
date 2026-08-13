@@ -104,15 +104,6 @@ function renderDetail(log) {
     <>
       {log.content}
       <br />
-      {log.elapsed_time && (
-        <Label
-          basic
-          size={'mini'}
-          color={getColorByElapsedTime(log.elapsed_time)}
-        >
-          {log.elapsed_time} ms
-        </Label>
-      )}
       {log.is_stream && (
         <>
           <Label size={'mini'} color='pink'>
@@ -593,6 +584,26 @@ const LogsTable = () => {
             >
               Stream
             </Table.HeaderCell>
+            <Table.HeaderCell
+              className='hide-on-mobile'
+              style={{ cursor: 'pointer' }}
+              onClick={() => {
+                sortLog('first_token_time');
+              }}
+              width={1}
+            >
+              {t('log.table.first_token_time')}
+            </Table.HeaderCell>
+            <Table.HeaderCell
+              className='hide-on-mobile'
+              style={{ cursor: 'pointer' }}
+              onClick={() => {
+                sortLog('elapsed_time');
+              }}
+              width={1}
+            >
+              {t('log.table.elapsed_time')}
+            </Table.HeaderCell>
             {showUserTokenQuota() && (
               <>
                 {isAdminUser && (
@@ -702,6 +713,18 @@ const LogsTable = () => {
                     <Label basic color={log.is_stream ? 'blue' : 'grey'} size='mini'>
                       {log.is_stream ? 'true' : 'false'}
                     </Label>
+                  </Table.Cell>
+                  <Table.Cell className='hide-on-mobile'>
+                    {log.first_token_time ? `${log.first_token_time} ms` : '-'}
+                  </Table.Cell>
+                  <Table.Cell className='hide-on-mobile'>
+                    {log.elapsed_time ? (
+                      <Label basic size='mini' color={getColorByElapsedTime(log.elapsed_time)}>
+                        {log.elapsed_time} ms
+                      </Label>
+                    ) : (
+                      '-'
+                    )}
                   </Table.Cell>
                   {showUserTokenQuota() && (
                     <>

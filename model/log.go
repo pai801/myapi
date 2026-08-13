@@ -28,7 +28,8 @@ type Log struct {
 	CachedTokens      int    `json:"cached_tokens" gorm:"default:0"` // 缓存命中的token数
 	ChannelId         int    `json:"channel" gorm:"index"`
 	RequestId         string `json:"request_id" gorm:"default:''"`
-	ElapsedTime       int64  `json:"elapsed_time" gorm:"default:0"` // unit is ms
+	ElapsedTime       int64  `json:"elapsed_time" gorm:"default:0"`      // unit is ms
+	FirstTokenTime    int64  `json:"first_token_time" gorm:"default:0"` // 首字耗时（TTFT），unit is ms；仅流式请求有值，非流式为 0
 	IsStream          bool   `json:"is_stream" gorm:"default:false"`
 	SystemPromptReset bool   `json:"system_prompt_reset" gorm:"default:false"`
 	ChannelName       string `json:"channel_name" gorm:"default:''"`
@@ -55,6 +56,7 @@ type LogListItem struct {
 	ChannelId         int    `json:"channel"`
 	RequestId         string `json:"request_id"`
 	ElapsedTime       int64  `json:"elapsed_time"`
+	FirstTokenTime    int64  `json:"first_token_time"`
 	IsStream          bool   `json:"is_stream"`
 	SystemPromptReset bool   `json:"system_prompt_reset"`
 	ChannelName       string `json:"channel_name"`
@@ -144,7 +146,7 @@ func buildAllLogsQuery(logType int, startTimestamp int64, endTimestamp int64, mo
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int) (logs []*LogListItem, err error) {
 	tx := buildAllLogsQuery(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel)
 	err = tx.Select(
-		"id, user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, is_stream, system_prompt_reset, channel_name, " +
+		"id, user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, first_token_time, is_stream, system_prompt_reset, channel_name, " +
 			"request_body != '' as has_request_body, response_body != '' as has_response_body, request_header != '' as has_request_header",
 	).Order("id desc").Limit(num).Offset(startIdx).Find(&logs).Error
 	return logs, err
@@ -181,7 +183,7 @@ func buildUserLogsQuery(userId int, logType int, startTimestamp int64, endTimest
 func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int) (logs []*LogListItem, err error) {
 	tx := buildUserLogsQuery(userId, logType, startTimestamp, endTimestamp, modelName, tokenName)
 	err = tx.Select(
-		"user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, is_stream, system_prompt_reset, channel_name, " +
+		"user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, first_token_time, is_stream, system_prompt_reset, channel_name, " +
 			"request_body != '' as has_request_body, response_body != '' as has_response_body, request_header != '' as has_request_header",
 	).Order("id desc").Limit(num).Offset(startIdx).Find(&logs).Error
 	return logs, err
@@ -196,7 +198,7 @@ func GetUserLogsCount(userId int, logType int, startTimestamp int64, endTimestam
 func SearchAllLogs(keyword string) (logs []*LogListItem, err error) {
 	err = LOG_DB.Where("type = ? or content LIKE ?", keyword, keyword+"%").
 		Select(
-			"id, user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, is_stream, system_prompt_reset, channel_name, "+
+			"id, user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, first_token_time, is_stream, system_prompt_reset, channel_name, "+
 				"request_body != '' as has_request_body, response_body != '' as has_response_body, request_header != '' as has_request_header",
 		).
 		Order("id desc").Limit(config.MaxRecentItems).Find(&logs).Error
@@ -206,7 +208,7 @@ func SearchAllLogs(keyword string) (logs []*LogListItem, err error) {
 func SearchUserLogs(userId int, keyword string) (logs []*LogListItem, err error) {
 	err = LOG_DB.Where("user_id = ? and type = ?", userId, keyword).
 		Select(
-			"user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, is_stream, system_prompt_reset, channel_name, "+
+			"user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, first_token_time, is_stream, system_prompt_reset, channel_name, "+
 				"request_body != '' as has_request_body, response_body != '' as has_response_body, request_header != '' as has_request_header",
 		).
 		Order("id desc").Limit(config.MaxRecentItems).Find(&logs).Error

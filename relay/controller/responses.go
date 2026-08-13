@@ -35,6 +35,8 @@ import (
 
 func RelayResponsesHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	ctxMeta := metaPkg.GetByContext(c)
+	// 包装 ResponseWriter 记录流式首字耗时（TTFT）
+	wrapTTFTWriter(c, ctxMeta)
 
 	// 对于 /v1/responses/compact 接口，只允许 Codex 渠道，否则返回错误
 	if ctxMeta.Mode == relaymode.ResponsesCompact {
@@ -155,6 +157,9 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 	usage, relayErr := handleResponsesDirect(c, resp, ctxMeta, relayAdaptor)
 	if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
 		ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
+	}
+	if ttft := c.GetInt64(ctxkey.FirstTokenTime); ttft > 0 {
+		ctx = context.WithValue(ctx, CtxKeyFirstTokenTime, ttft)
 	}
 	if relayErr != nil {
 		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
@@ -380,6 +385,9 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	}
 
 	// 后消费逻辑 - 在 goroutine 外提取需要从 ctx 读取的值
+	if ttft := c.GetInt64(ctxkey.FirstTokenTime); ttft > 0 {
+		ctx = context.WithValue(ctx, CtxKeyFirstTokenTime, ttft)
+	}
 	reqBody := ""
 	respBody := ""
 	reqHeader := ""
@@ -970,6 +978,7 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 		Content:           logContent,
 		IsStream:          meta.IsStream,
 		ElapsedTime:       helper.CalcElapsedTime(meta.StartTime),
+		FirstTokenTime:    getFirstTokenTime(ctx),
 		SystemPromptReset: false,
 		ChannelName:       meta.ChannelName,
 		RequestBody:       reqBody,
@@ -994,6 +1003,7 @@ func postConsumeQuotaForResponses(ctx context.Context, usage *model.Usage, meta 
 			ChannelId:        logRecord.ChannelId,
 			RequestId:        logRecord.RequestId,
 			ElapsedTime:      logRecord.ElapsedTime,
+			FirstTokenTime:   logRecord.FirstTokenTime,
 			IsStream:         logRecord.IsStream,
 			ChannelName:      logRecord.ChannelName,
 			HasRequestBody:   logRecord.RequestBody != "",

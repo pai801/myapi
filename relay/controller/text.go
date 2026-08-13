@@ -28,6 +28,8 @@ import (
 func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	ctx := c.Request.Context()
 	meta := meta.GetByContext(c)
+	// 包装 ResponseWriter 记录流式首字耗时（TTFT）
+	wrapTTFTWriter(c, meta)
 	// get & validate textRequest
 	textRequest, err := getAndValidateTextRequest(c, meta.Mode)
 	if err != nil {
@@ -114,6 +116,9 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	usage, respErr := adaptor.DoResponse(c, resp, meta)
 	if respBody := c.GetString(ctxkey.ResponseBody); respBody != "" {
 		ctx = context.WithValue(ctx, CtxKeyResponseBody, respBody)
+	}
+	if ttft := c.GetInt64(ctxkey.FirstTokenTime); ttft > 0 {
+		ctx = context.WithValue(ctx, CtxKeyFirstTokenTime, ttft)
 	}
 	if respErr != nil {
 		// Rollback pre-consumed quota

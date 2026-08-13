@@ -244,6 +244,8 @@
       "completion_tokens": "补全消耗",
       "cached_tokens": "缓存命中",
       "quota": "额度",
+      "first_token_time": "首字",
+      "elapsed_time": "总耗时",
       "detail": "详情"
     },
     "messages": {

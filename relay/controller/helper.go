@@ -6,20 +6,21 @@ import (
 	"math"
 	"net/http"
 	"strings"
-
-	"github.com/pai801/myapi/common/helper"
-	"github.com/pai801/myapi/relay/active"
-	"github.com/pai801/myapi/relay/constant/role"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/common/helper"
 	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/model"
+	"github.com/pai801/myapi/relay/active"
 	"github.com/pai801/myapi/relay/adaptor/openai"
 	billingratio "github.com/pai801/myapi/relay/billing/ratio"
 	"github.com/pai801/myapi/relay/channeltype"
 	"github.com/pai801/myapi/relay/controller/validator"
+	"github.com/pai801/myapi/relay/constant/role"
 	"github.com/pai801/myapi/relay/meta"
 	relaymodel "github.com/pai801/myapi/relay/model"
 	"github.com/pai801/myapi/relay/relaymode"
@@ -31,9 +32,44 @@ const (
 	CtxKeyRequestBody contextKey = iota
 	CtxKeyResponseBody
 	CtxKeyRequestHeader
+	CtxKeyFirstTokenTime
 )
 
 var CtxKeyPreConsumedQuota = "pre_consumed_quota"
+
+// ttftWriter 包装 gin.ResponseWriter：流式请求首次写出响应体时记录首字耗时（TTFT，ms）。
+// 非流式请求不记录（FirstTokenTime 保持 0）。首次写出通常即 SSE 首帧/首个 data 行。
+// 持有 meta 指针而非重新 GetByContext：StartTime 基准与 ElapsedTime 一致，
+// IsStream 在包装后可能被入口逻辑更新，写时读取实时值。
+type ttftWriter struct {
+	gin.ResponseWriter
+	c    *gin.Context
+	meta *meta.Meta
+	set  bool
+}
+
+func (w *ttftWriter) Write(data []byte) (int, error) {
+	if !w.set {
+		w.set = true
+		if w.meta != nil && w.meta.IsStream {
+			w.c.Set(ctxkey.FirstTokenTime, time.Since(w.meta.StartTime).Milliseconds())
+		}
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+// wrapTTFTWriter 在 relay 入口包装 ResponseWriter，用于记录流式首字耗时。
+func wrapTTFTWriter(c *gin.Context, m *meta.Meta) {
+	c.Writer = &ttftWriter{ResponseWriter: c.Writer, meta: m, c: c}
+}
+
+// getFirstTokenTime 从 context 读取流式首字耗时（ms），非流式/未记录时为 0。
+func getFirstTokenTime(ctx context.Context) int64 {
+	if v := ctx.Value(CtxKeyFirstTokenTime); v != nil {
+		return v.(int64)
+	}
+	return 0
+}
 
 func getAndValidateTextRequest(c *gin.Context, relayMode int) (*relaymodel.GeneralOpenAIRequest, error) {
 	textRequest := &relaymodel.GeneralOpenAIRequest{}
@@ -148,6 +184,7 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 		Content:           logContent,
 		IsStream:          meta.IsStream,
 		ElapsedTime:       helper.CalcElapsedTime(meta.StartTime),
+		FirstTokenTime:    getFirstTokenTime(ctx),
 		SystemPromptReset: systemPromptReset,
 		ChannelName:       meta.ChannelName,
 		RequestBody:       requestBody,
@@ -173,6 +210,7 @@ func postConsumeQuota(ctx context.Context, usage *relaymodel.Usage, meta *meta.M
 			ChannelId:        logRecord.ChannelId,
 			RequestId:        logRecord.RequestId,
 			ElapsedTime:      logRecord.ElapsedTime,
+			FirstTokenTime:   logRecord.FirstTokenTime,
 			IsStream:         logRecord.IsStream,
 			ChannelName:      logRecord.ChannelName,
 			HasRequestBody:   logRecord.RequestBody != "",

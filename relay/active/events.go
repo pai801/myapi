@@ -18,6 +18,7 @@ type LogRecordData struct {
 	ChannelId        int    `json:"channel"`
 	RequestId        string `json:"request_id"`
 	ElapsedTime      int64  `json:"elapsed_time"`
+	FirstTokenTime   int64  `json:"first_token_time"`
 	IsStream         bool   `json:"is_stream"`
 	ChannelName      string `json:"channel_name"`
 	HasRequestBody   bool   `json:"has_request_body"`
