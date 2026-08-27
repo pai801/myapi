@@ -104,6 +104,14 @@ const Dashboard = () => {
     }
   };
 
+  // 生成本地时区的 YYYY-MM-DD 日期 key，与后端返回格式保持一致
+  const formatLocalDateKey = (d) => {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
   const calculateSummary = (dashboardData) => {
     if (!Array.isArray(dashboardData) || dashboardData.length === 0) {
       setSummaryData({
@@ -114,7 +122,7 @@ const Dashboard = () => {
       return;
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = formatLocalDateKey(new Date());
     const todayData = dashboardData.filter((item) => item.Day === today);
 
     const summary = {
@@ -148,14 +156,21 @@ const Dashboard = () => {
     const dailyData = {};
 
     // 获取日期范围
-    const dates = data.map((item) => item.Day);
+    const dates = data
+      .map((item) => item.Day)
+      .filter(
+        (d) =>
+          typeof d === 'string' &&
+          /^\d{4}-\d{2}-\d{2}$/.test(d) &&
+          !isNaN(new Date(d + 'T00:00:00').getTime())
+      );
     const maxDate =
       dates.length > 0
-        ? new Date(Math.max(...dates.map((d) => new Date(d))))
+        ? new Date(Math.max(...dates.map((d) => new Date(d + 'T00:00:00'))))
         : new Date();
     let minDate =
       dates.length > 0
-        ? new Date(Math.min(...dates.map((d) => new Date(d))))
+        ? new Date(Math.min(...dates.map((d) => new Date(d + 'T00:00:00'))))
         : new Date();
 
     // 确保至少显示7天的数据
@@ -165,9 +180,9 @@ const Dashboard = () => {
       minDate = sevenDaysAgo;
     }
 
-    // 生成所有日期
-    for (let d = new Date(minDate); d <= maxDate; d.setDate(d.getDate() + 1)) {
-      const dateStr = d.toISOString().split('T')[0];
+    // 生成所有日期（按本地日期 key 比较，避免 maxDate 为 UTC 零点时漏掉最后一天）
+    for (let d = new Date(minDate); formatLocalDateKey(d) <= formatLocalDateKey(maxDate); d.setDate(d.getDate() + 1)) {
+      const dateStr = formatLocalDateKey(d);
       dailyData[dateStr] = {
         date: dateStr,
         requests: 0,
@@ -178,9 +193,13 @@ const Dashboard = () => {
 
     // 填充实际数据
     data.forEach((item) => {
-      dailyData[item.Day].requests += item.RequestCount;
-      dailyData[item.Day].quota += item.Quota / 1000000;
-      dailyData[item.Day].tokens += item.PromptTokens + item.CompletionTokens;
+      const day = item.Day;
+      if (typeof day !== 'string' || !day || !dailyData[day]) {
+        return;
+      }
+      dailyData[day].requests += item.RequestCount;
+      dailyData[day].quota += item.Quota / 1000000;
+      dailyData[day].tokens += item.PromptTokens + item.CompletionTokens;
     });
 
     return Object.values(dailyData).sort((a, b) =>
@@ -193,14 +212,21 @@ const Dashboard = () => {
     const timeData = {};
 
     // 获取日期范围
-    const dates = data.map((item) => item.Day);
+    const dates = data
+      .map((item) => item.Day)
+      .filter(
+        (d) =>
+          typeof d === 'string' &&
+          /^\d{4}-\d{2}-\d{2}$/.test(d) &&
+          !isNaN(new Date(d + 'T00:00:00').getTime())
+      );
     const maxDate =
       dates.length > 0
-        ? new Date(Math.max(...dates.map((d) => new Date(d))))
+        ? new Date(Math.max(...dates.map((d) => new Date(d + 'T00:00:00'))))
         : new Date();
     let minDate =
       dates.length > 0
-        ? new Date(Math.min(...dates.map((d) => new Date(d))))
+        ? new Date(Math.min(...dates.map((d) => new Date(d + 'T00:00:00'))))
         : new Date();
 
     // 确保至少显示7天的数据
@@ -210,9 +236,9 @@ const Dashboard = () => {
       minDate = sevenDaysAgo;
     }
 
-    // 生成所有日期
-    for (let d = new Date(minDate); d <= maxDate; d.setDate(d.getDate() + 1)) {
-      const dateStr = d.toISOString().split('T')[0];
+    // 生成所有日期（按本地日期 key 比较，避免 maxDate 为 UTC 零点时漏掉最后一天）
+    for (let d = new Date(minDate); formatLocalDateKey(d) <= formatLocalDateKey(maxDate); d.setDate(d.getDate() + 1)) {
+      const dateStr = formatLocalDateKey(d);
       timeData[dateStr] = {
         date: dateStr,
       };
@@ -226,7 +252,11 @@ const Dashboard = () => {
 
     // 填充实际数据
     data.forEach((item) => {
-      timeData[item.Day][item.ModelName] =
+      const day = item.Day;
+      if (typeof day !== 'string' || !day || !timeData[day]) {
+        return;
+      }
+      timeData[day][item.ModelName] =
         item.PromptTokens + item.CompletionTokens;
     });
 
