@@ -79,7 +79,8 @@ func Relay(c *gin.Context) {
 	lastFailedChannelId := channelId
 	channelName := c.GetString(ctxkey.ChannelName)
 	group := c.GetString(ctxkey.Group)
-	go processChannelRelayError(ctx, userId, channelId, channelName, *bizErr)
+	failedModel := c.GetString(ctxkey.SuggestedModel)
+	go processChannelRelayError(ctx, userId, channelId, channelName, failedModel, *bizErr)
 	retryTimes := config.RetryTimes
 	if !shouldRetry(c, bizErr) {
 		logger.Log.Infof("shouldRetry=false statusCode=%d requestId=%s lastFailedChannel=%d", bizErr.StatusCode, requestId, lastFailedChannelId)
@@ -116,8 +117,9 @@ func Relay(c *gin.Context) {
 		channelId = c.GetInt(ctxkey.ChannelId)
 		lastFailedChannelId = channelId
 		channelName = c.GetString(ctxkey.ChannelName)
+		failedModel = c.GetString(ctxkey.SuggestedModel)
 		logger.Log.Debugf("retry failed channel #%d status=%d requestId=%s", channelId, bizErr.StatusCode, requestId)
-		go processChannelRelayError(ctx, userId, channelId, channelName, *bizErr)
+		go processChannelRelayError(ctx, userId, channelId, channelName, failedModel, *bizErr)
 	}
 	if bizErr != nil {
 		logger.Log.Infof("all retries exhausted lastFailedChannel=%d status=%d requestId=%s model=%s group=%s",
@@ -276,16 +278,16 @@ func recordFailureLog(c *gin.Context, bizErr *model.ErrorWithStatusCode, channel
 	dbmodel.RecordConsumeLog(c.Request.Context(), log)
 }
 
-func processChannelRelayError(ctx context.Context, userId int, channelId int, channelName string, err model.ErrorWithStatusCode) {
-	logger.Log.Errorf("relay error (channel id %d, user id: %d): %s", channelId, userId, err.Message)
+func processChannelRelayError(ctx context.Context, userId int, channelId int, channelName string, failedModel string, err model.ErrorWithStatusCode) {
+	logger.Log.Errorf("relay error (channel id %d, user id: %d, model: %s): %s", channelId, userId, failedModel, err.Message)
 	// https://platform.openai.com/docs/guides/error-codes/api-errors
 	if monitor.ShouldDisableChannel(&err.Error, err.StatusCode) {
 		logger.Log.Infof("processChannelRelayError: disabling channel #%d (%s) reason=%q statusCode=%d", channelId, channelName, err.Message, err.StatusCode)
 		monitor.DisableChannel(channelId, channelName, err.Message)
 	} else {
-		logger.Log.Infof("processChannelRelayError: cooling down channel #%d (%s) reason=%q statusCode=%d", channelId, channelName, err.Message, err.StatusCode)
+		logger.Log.Infof("processChannelRelayError: cooling down channel #%d (%s) model=%s reason=%q statusCode=%d", channelId, channelName, failedModel, err.Message, err.StatusCode)
 		monitor.Emit(channelId, false)
-		middleware.CooldownGlobal.Put(channelId)
+		middleware.CooldownGlobal.Put(channelId, failedModel)
 	}
 }
 

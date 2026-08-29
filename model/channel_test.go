@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sync"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -30,5 +31,29 @@ func TestAutoGenerateModelsAlias(t *testing.T) {
 		c := Channel{Models: ""}
 		c.autoGenerateModelsAlias()
 		So(c.ModelsAlias, ShouldEqual, "")
+	})
+}
+
+// 并发 hammer 锁住 GetModels/GetAlias 懒初始化的加锁实现：
+// go test -race 下并发调用（含首次初始化）不得出现 DATA RACE
+func TestGetModelsAliasConcurrent(t *testing.T) {
+	Convey("16 goroutines concurrently call GetModels/GetAlias on one instance", t, func() {
+		c := &Channel{Id: 987654, Models: "m1,m2,m3", ModelsAlias: "a1,a2,a3"}
+
+		var wg sync.WaitGroup
+		for i := 0; i < 16; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 100; j++ {
+					_ = c.GetModels()
+					_ = c.GetAlias()
+				}
+			}()
+		}
+		wg.Wait()
+
+		So(c.GetModels(), ShouldResemble, []string{"m1", "m2", "m3"})
+		So(c.GetAlias(), ShouldResemble, []string{"a1", "a2", "a3"})
 	})
 }

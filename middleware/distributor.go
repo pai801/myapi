@@ -84,6 +84,18 @@ func selectAutoModel(channel *model.Channel) string {
 	}
 	if channel.Models != "" {
 		parts := channel.GetModels()
+		// auto 模式选模型时跳过冷却中的模型；全部冷却时兜底随机返回
+		// （全部冷却的渠道理论上已被 filterCoolingChannels 剔除，不会走到这里）
+		available := make([]string, 0, len(parts))
+		for _, p := range parts {
+			m := strings.TrimSpace(p)
+			if !CooldownGlobal.IsCoolingDown(channel.Id, m) {
+				available = append(available, m)
+			}
+		}
+		if len(available) > 0 {
+			return available[rand.Intn(len(available))]
+		}
 		return strings.TrimSpace(parts[rand.Intn(len(parts))])
 	}
 	return ""
@@ -133,6 +145,48 @@ func autoDistribute(ctx context.Context, group string, channels []*model.Channel
 	return ch, selectedModel, nil
 }
 
+// resolveAliasModelIndex 在渠道别名列表中定位 alias 的索引（别名与 Models 按下标一一对应）：
+// 精确 → canonical 等价 → 前缀，nonAutoDistribute 与 filterCoolingChannels 共用此匹配规则。
+// 未命中返回 -1。
+func resolveAliasModelIndex(ch *model.Channel, alias string) int {
+	aliasList := ch.GetAlias()
+	for idx, a := range aliasList {
+		if a == alias {
+			return idx
+		}
+	}
+	// 等价匹配必须先于前缀匹配，否则前缀可能抢先命中错误的别名索引
+	canonicalAlias := model.CanonicalizeSimplifiedName(alias)
+	for idx, a := range aliasList {
+		if model.CanonicalizeSimplifiedName(a) == canonicalAlias {
+			return idx
+		}
+	}
+	for idx, a := range aliasList {
+		if strings.HasPrefix(a, alias) {
+			return idx
+		}
+	}
+	return -1
+}
+
+// resolveSpecificChannelModel 将指定渠道路径的请求模型解析为该渠道的实际模型，
+// 使失败冷却写入的 key 与 filterCoolingChannels 查询的 key 同源；
+// 解析失败（渠道不支持该模型）时退化为原始请求模型
+func resolveSpecificChannelModel(channel *model.Channel, requestModel string) string {
+	alias := model.SimplifyModelName(requestModel)
+	// 空别名会使前缀匹配 HasPrefix(a, "") 恒真而错误命中 models[0]，直接退化为原始请求模型
+	if alias == "" {
+		return requestModel
+	}
+	idx := resolveAliasModelIndex(channel, alias)
+	models := channel.GetModels()
+	if idx >= 0 && idx < len(models) {
+		return models[idx]
+	}
+	return requestModel
+}
+
 func nonAutoDistribute(ctx context.Context, userId int, requestModel string, channels []*model.Channel) (*model.Channel, string, error) {
 	matched, alias := matchChannelsByAlias(requestModel, channels)
 	if len(matched) == 0 {
@@ -165,31 +219,7 @@ func nonAutoDistribute(ctx context.Context, userId int, requestModel string, cha
 	if ch == nil {
 		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
 	}
-	targedIdx := -1
-	for idx, a := range ch.GetAlias() {
-		if a == alias {
-			targedIdx = idx
-			break
-		}
-	}
-	// 等价匹配必须先于前缀匹配，否则前缀可能抢先命中错误的别名索引
-	if targedIdx <= -1 {
-		canonicalAlias := model.CanonicalizeSimplifiedName(alias)
-		for idx, a := range ch.GetAlias() {
-			if model.CanonicalizeSimplifiedName(a) == canonicalAlias {
-				targedIdx = idx
-				break
-			}
-		}
-	}
-	if targedIdx <= -1 {
-		for idx, a := range ch.GetAlias() {
-			if strings.HasPrefix(a, alias) {
-				targedIdx = idx
-				break
-			}
-		}
-	}
+	targedIdx := resolveAliasModelIndex(ch, alias)
 	if targedIdx <= -1 {
 		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
 	}
@@ -236,7 +266,8 @@ func Distribute() func(c *gin.Context) {
 				return
 			}
 			requestModel = c.GetString(ctxkey.RequestModel)
-			suggestedModel = requestModel
+			// 解析为渠道实际模型，使冷却 key 与过滤侧同源；解析失败退化为原始请求模型
+			suggestedModel = resolveSpecificChannelModel(channel, requestModel)
 		} else {
 			requestModel = c.GetString(ctxkey.RequestModel)
 			if requestModel == "" {
@@ -257,14 +288,58 @@ func Distribute() func(c *gin.Context) {
 	}
 }
 
-func filterCoolingChannels(channels []*model.Channel) []*model.Channel {
+// filterCoolingChannels 按 (渠道, 实际服务模型) 粒度剔除冷却中的渠道：
+//   - 非 auto：解析该渠道服务 requestModel 的实际模型，命中冷却才剔除；
+//     渠道不支持该模型时不因冷却剔除（交由后续匹配自然淘汰）。
+//   - auto：仅当渠道支持的全部模型都在冷却中才剔除，部分可用则保留。
+func filterCoolingChannels(channels []*model.Channel, requestModel string) []*model.Channel {
+	if requestModel == "auto" {
+		var result []*model.Channel
+		for _, ch := range channels {
+			if !isChannelFullyCooling(ch) {
+				result = append(result, ch)
+			}
+		}
+		return result
+	}
+
+	alias := model.SimplifyModelName(requestModel)
+	if alias == "" {
+		return channels
+	}
 	var result []*model.Channel
 	for _, ch := range channels {
-		if !CooldownGlobal.IsCoolingDown(ch.Id) {
+		models := ch.GetModels()
+		idx := resolveAliasModelIndex(ch, alias)
+		// 渠道不支持该请求模型（无别名命中或别名无对应模型）时不因冷却剔除
+		if idx < 0 || idx >= len(models) {
+			result = append(result, ch)
+			continue
+		}
+		if !CooldownGlobal.IsCoolingDown(ch.Id, models[idx]) {
 			result = append(result, ch)
 		}
 	}
 	return result
+}
+
+// isChannelFullyCooling 判断渠道支持的全部模型是否都在冷却中；
+// 渠道级条目（Put 时不带模型）覆盖该渠道全部模型，优先命中。
+func isChannelFullyCooling(ch *model.Channel) bool {
+	if CooldownGlobal.IsCoolingDown(ch.Id, "") {
+		return true
+	}
+	models := ch.GetModels()
+	// 渠道未配置模型时无具体模型可查，仅有渠道级条目生效（已在上面查过）
+	if len(models) == 0 {
+		return false
+	}
+	for _, m := range models {
+		if !CooldownGlobal.IsCoolingDown(ch.Id, m) {
+			return false
+		}
+	}
+	return true
 }
 
 func filterLastFailedChannel(channels []*model.Channel, lastFailedChannelId int) []*model.Channel {
@@ -282,7 +357,7 @@ func filterLastFailedChannel(channels []*model.Channel, lastFailedChannelId int)
 
 func SelectChannel(ctx context.Context, group, requestModel string, lastFailedChannelId int, userId int) (*model.Channel, string, error) {
 	channels := model.CacheGetGroupChannels(group)
-	channels = filterCoolingChannels(channels)
+	channels = filterCoolingChannels(channels, requestModel)
 	channels = filterLastFailedChannel(channels, lastFailedChannelId)
 	if len(channels) == 0 {
 		return nil, "", fmt.Errorf("no channels available for retry in group %s", group)

@@ -181,7 +181,7 @@ func ResetChannel(c *gin.Context) {
 		})
 		return
 	}
-	middleware.CooldownGlobal.Reset(id)
+	middleware.CooldownGlobal.ResetChannel(id)
 	channel, err := model.GetChannelById(id, false)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{

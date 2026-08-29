@@ -260,3 +260,117 @@ func TestNonAutoDistributeCanonicalBeforePrefix(t *testing.T) {
 		So(modelName, ShouldEqual, "deepseek-v4-flash-0731")
 	})
 }
+
+func TestFilterCoolingChannels(t *testing.T) {
+	Convey("非 auto：渠道 A 模型 m1 冷却时请求 m1 剔除 A，请求 m2 保留", t, func() {
+		channels := []*model.Channel{
+			{Name: "A", Id: 901, Models: "m1,m2", ModelsAlias: "m1,m2"},
+			{Name: "B", Id: 902, Models: "m1,m2", ModelsAlias: "m1,m2"},
+		}
+		CooldownGlobal.Put(901, "m1")
+		defer CooldownGlobal.ResetChannel(901)
+
+		// 请求 m1：A 的实际服务模型 m1 冷却 → 剔除 A
+		filtered := filterCoolingChannels(channels, "m1")
+		So(len(filtered), ShouldEqual, 1)
+		So(filtered[0].Id, ShouldEqual, 902)
+
+		// 请求 m2：A 的 m2 未冷却 → 保留 A
+		filtered = filterCoolingChannels(channels, "m2")
+		So(len(filtered), ShouldEqual, 2)
+	})
+
+	Convey("非 auto：渠道不支持请求模型时不因冷却剔除", t, func() {
+		channels := []*model.Channel{
+			{Name: "A", Id: 903, Models: "m1", ModelsAlias: "m1"},
+		}
+		CooldownGlobal.Put(903, "m1")
+		defer CooldownGlobal.ResetChannel(903)
+
+		filtered := filterCoolingChannels(channels, "other-model")
+		So(len(filtered), ShouldEqual, 1)
+	})
+
+	Convey("非 auto：canonical 等价别名按解析后的实际模型命中冷却", t, func() {
+		defer model.ResetCanonicalAliasForTest()
+		model.SetCanonicalAliasForTest("deepseekv4flash", "deepseekv4flash0731")
+
+		channels := []*model.Channel{
+			{Name: "A", Id: 904, Models: "deepseek-v4-flash-0731", ModelsAlias: "deepseekv4flash0731"},
+		}
+		CooldownGlobal.Put(904, "deepseek-v4-flash-0731")
+		defer CooldownGlobal.ResetChannel(904)
+
+		// 请求 deepseek-v4-flash 经等价匹配解析到实际模型 deepseek-v4-flash-0731 → 冷却剔除
+		filtered := filterCoolingChannels(channels, "deepseek-v4-flash")
+		So(len(filtered), ShouldEqual, 0)
+	})
+
+	Convey("auto：渠道部分模型冷却时保留，全部冷却时剔除", t, func() {
+		channels := []*model.Channel{
+			{Name: "A", Id: 905, Models: "m1,m2"},
+			{Name: "B", Id: 906, Models: "m3"},
+		}
+		CooldownGlobal.Put(905, "m1")
+		defer CooldownGlobal.ResetChannel(905)
+
+		// A 仅 m1 冷却 → 保留
+		filtered := filterCoolingChannels(channels, "auto")
+		So(len(filtered), ShouldEqual, 2)
+
+		// A 全部冷却 → 剔除
+		CooldownGlobal.Put(905, "m2")
+		filtered = filterCoolingChannels(channels, "auto")
+		So(len(filtered), ShouldEqual, 1)
+		So(filtered[0].Id, ShouldEqual, 906)
+	})
+
+	Convey("auto：渠道级冷却条目（空模型）剔除配置了模型的渠道", t, func() {
+		channels := []*model.Channel{
+			{Name: "A", Id: 910, Models: "m1,m2"},
+		}
+		CooldownGlobal.Put(910, "")
+		defer CooldownGlobal.ResetChannel(910)
+
+		filtered := filterCoolingChannels(channels, "auto")
+		So(len(filtered), ShouldEqual, 0)
+	})
+}
+
+func TestSelectAutoModelSkipsCooling(t *testing.T) {
+	Convey("selectAutoModel 跳过冷却中的模型", t, func() {
+		ch := &model.Channel{Id: 907, Models: "m1,m2"}
+		CooldownGlobal.Put(907, "m1")
+		defer CooldownGlobal.ResetChannel(907)
+
+		// 多次采样应始终落在未冷却的 m2 上
+		for i := 0; i < 20; i++ {
+			So(selectAutoModel(ch), ShouldEqual, "m2")
+		}
+	})
+}
+
+func TestResolveSpecificChannelModel(t *testing.T) {
+	Convey("指定渠道别名请求解析为实际模型，失败冷却后过滤侧按实际模型命中", t, func() {
+		ch := &model.Channel{Id: 908, Models: "gpt-4-turbo", ModelsAlias: "gpt4turbo"}
+
+		resolved := resolveSpecificChannelModel(ch, "gpt4turbo")
+		So(resolved, ShouldEqual, "gpt-4-turbo")
+
+		// 按解析结果 Put，过滤侧用原始别名请求应命中同一实际模型并剔除渠道
+		CooldownGlobal.Put(908, resolved)
+		defer CooldownGlobal.ResetChannel(908)
+		filtered := filterCoolingChannels([]*model.Channel{ch}, "gpt4turbo")
+		So(len(filtered), ShouldEqual, 0)
+	})
+
+	Convey("指定渠道不支持请求模型时退化为原始请求模型", t, func() {
+		ch := &model.Channel{Id: 909, Models: "gpt-4-turbo", ModelsAlias: "gpt4turbo"}
+		So(resolveSpecificChannelModel(ch, "other-model"), ShouldEqual, "other-model")
+	})
+
+	Convey("空 requestModel 退化为原始请求模型，不因空前缀误命中首个模型", t, func() {
+		ch := &model.Channel{Id: 911, Models: "m1,m2", ModelsAlias: "m1,m2"}
+		So(resolveSpecificChannelModel(ch, ""), ShouldEqual, "")
+	})
+}

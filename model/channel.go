@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/pai801/myapi/common/config"
@@ -132,7 +133,22 @@ func (channel *Channel) GetBaseURL() string {
 	return *channel.BaseURL
 }
 
+// channelLazyMuMap 按渠道 Id 提供懒初始化锁：Channel 会被 JSON 序列化/值拷贝，
+// 不能内嵌 sync.Mutex，故用包级锁表；同 Id 的实例共享一把锁，保证字段读写互斥
+var channelLazyMuMap sync.Map // map[int]*sync.Mutex
+
+func channelLazyMu(id int) *sync.Mutex {
+	if v, ok := channelLazyMuMap.Load(id); ok {
+		return v.(*sync.Mutex)
+	}
+	v, _ := channelLazyMuMap.LoadOrStore(id, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 func (channel *Channel) GetAlias() []string {
+	mu := channelLazyMu(channel.Id)
+	mu.Lock()
+	defer mu.Unlock()
 	if channel.alias == nil {
 		if channel.ModelsAlias == "" {
 			return nil
@@ -143,6 +159,9 @@ func (channel *Channel) GetAlias() []string {
 }
 
 func (channel *Channel) GetModels() []string {
+	mu := channelLazyMu(channel.Id)
+	mu.Lock()
+	defer mu.Unlock()
 	if channel.models == nil {
 		if channel.Models == "" {
 			return nil

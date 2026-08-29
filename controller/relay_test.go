@@ -118,7 +118,7 @@ func TestProcessChannelRelayErrorLogDecision(t *testing.T) {
 
 		// This should not panic — goes to cooldown path
 		So(func() {
-			processChannelRelayError(context.Background(), 1, 1, "test-ch", err)
+			processChannelRelayError(context.Background(), 1, 1, "test-ch", "test-model", err)
 		}, ShouldNotPanic)
 	})
 }
