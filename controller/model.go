@@ -185,7 +185,8 @@ func ListModels(c *gin.Context) {
 	}
 	availableOpenAIModels := make([]OpenAIModels, 0)
 	for _, m := range models {
-		if _, ok := modelSet[m.Id]; ok {
+		// 内置清单中同一 id 可能有多条（不同渠道类型），只输出首条，避免 /v1/models 出现重复模型
+		if modelSet[m.Id] {
 			modelSet[m.Id] = false
 			m.SupportedEndpointTypes = model.GetModelEndpointTypes(m.Id)
 			applyMetadataToModel(&m)
