@@ -30,3 +30,5 @@ response*.txt
 .claude
 .workbuddy
 .freebuff
+.zcode
+myapi.pid
