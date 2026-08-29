@@ -8,7 +8,8 @@
     "setting": "设置",
     "login": "登录",
     "logout": "注销",
-    "group": "分组管理"
+    "group": "分组管理",
+    "metadata": "模型元数据"
   },
   "group": {
     "management": "分组管理",
@@ -17,6 +18,70 @@
     "edit": "编辑分组",
     "delete_confirm": "确认删除该分组？",
     "add": "新建分组"
+  },
+  "metadata": {
+    "management": "模型元数据管理",
+    "table": {
+      "name": "模型名称",
+      "display_name": "显示名称",
+      "canonical_name": "等价主名",
+      "supported_in_api": "API 可用",
+      "priority": "优先级",
+      "context_window": "上下文窗口",
+      "truncation_policy": "截断策略",
+      "actions": "操作",
+      "no_data": "暂无数据",
+      "supported": "是",
+      "unsupported": "否"
+    },
+    "buttons": {
+      "add": "添加模型元数据",
+      "edit": "编辑",
+      "delete": "删除",
+      "submit": "提交",
+      "cancel": "取消"
+    },
+    "messages": {
+      "delete_confirm": "确认删除该模型元数据？",
+      "create_success": "模型元数据创建成功！",
+      "update_success": "模型元数据更新成功！",
+      "operation_success": "操作成功完成！",
+      "name_required": "请填写模型名称！"
+    },
+    "edit": {
+      "title_create": "创建模型元数据",
+      "title_edit": "编辑模型元数据",
+      "name": "模型名称",
+      "name_placeholder": "deepseek-v4-flash-0731",
+      "name_immutable_hint": "创建后不可修改",
+      "canonical_name": "等价主名",
+      "canonical_name_placeholder": "deepseek-v4-flash",
+      "canonical_name_tip": "填写后该模型与主名视为同一模型参与渠道精确匹配，留空则不归并",
+      "display_name": "显示名称",
+      "display_name_placeholder": "DeepSeek V4 Flash",
+      "visibility": "可见性",
+      "visibility_placeholder": "list",
+      "supported_in_api": "API 可用",
+      "priority": "优先级",
+      "priority_placeholder": "999",
+      "context_window": "上下文窗口",
+      "context_window_placeholder": "128000",
+      "max_output_tokens": "最大输出 Token 数",
+      "max_output_tokens_placeholder": "8192",
+      "default_reasoning_level": "默认推理级别",
+      "default_reasoning_level_placeholder": "medium",
+      "supported_reasoning_levels": "支持的推理级别",
+      "supported_reasoning_levels_placeholder": "low,medium,high",
+      "truncation_policy": "截断策略",
+      "truncation_policy_placeholder": "auto",
+      "input_modalities": "输入模态",
+      "input_modalities_placeholder": "text",
+      "output_modalities": "输出模态",
+      "output_modalities_placeholder": "text",
+      "supported_endpoint_types": "支持的端点类型",
+      "supported_endpoint_types_placeholder": "openai,openai-response",
+      "array_placeholder": "多个值请使用英文逗号分隔"
+    }
   },
   "channel": {
     "title": "管理渠道",

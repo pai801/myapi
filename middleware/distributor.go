@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,11 +50,15 @@ func matchChannelsByAlias(requestModel string, channels []*model.Channel) ([]*mo
 		return nil, ""
 	}
 
-	// First pass: exact match
+	// First pass: exact match with canonical equivalence
+	requestCanonical := model.CanonicalizeSimplifiedName(alias)
 	var exactMatches []*model.Channel
 	for _, ch := range channels {
-		if slices.Contains(ch.GetAlias(), alias) {
-			exactMatches = append(exactMatches, ch)
+		for _, a := range ch.GetAlias() {
+			if model.CanonicalizeSimplifiedName(a) == requestCanonical {
+				exactMatches = append(exactMatches, ch)
+				break
+			}
 		}
 	}
 	if len(exactMatches) > 0 {
@@ -167,6 +170,16 @@ func nonAutoDistribute(ctx context.Context, userId int, requestModel string, cha
 		if a == alias {
 			targedIdx = idx
 			break
+		}
+	}
+	// 等价匹配必须先于前缀匹配，否则前缀可能抢先命中错误的别名索引
+	if targedIdx <= -1 {
+		canonicalAlias := model.CanonicalizeSimplifiedName(alias)
+		for idx, a := range ch.GetAlias() {
+			if model.CanonicalizeSimplifiedName(a) == canonicalAlias {
+				targedIdx = idx
+				break
+			}
 		}
 	}
 	if targedIdx <= -1 {

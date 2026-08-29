@@ -8,7 +8,8 @@
     "setting": "Settings",
     "login": "Login",
     "logout": "Logout",
-    "group": "Group Management"
+    "group": "Group Management",
+    "metadata": "Model Metadata"
   },
   "group": {
     "management": "Group Management",
@@ -17,6 +18,70 @@
     "edit": "Edit Group",
     "delete_confirm": "Are you sure to delete this group?",
     "add": "Add Group"
+  },
+  "metadata": {
+    "management": "Model Metadata Management",
+    "table": {
+      "name": "Model Name",
+      "display_name": "Display Name",
+      "canonical_name": "Canonical Name",
+      "supported_in_api": "Supported in API",
+      "priority": "Priority",
+      "context_window": "Context Window",
+      "truncation_policy": "Truncation Policy",
+      "actions": "Actions",
+      "no_data": "No data",
+      "supported": "Yes",
+      "unsupported": "No"
+    },
+    "buttons": {
+      "add": "Add Model Metadata",
+      "edit": "Edit",
+      "delete": "Delete",
+      "submit": "Submit",
+      "cancel": "Cancel"
+    },
+    "messages": {
+      "delete_confirm": "Are you sure to delete this model metadata?",
+      "create_success": "Model metadata created successfully!",
+      "update_success": "Model metadata updated successfully!",
+      "operation_success": "Operation completed successfully!",
+      "name_required": "Please enter the model name!"
+    },
+    "edit": {
+      "title_create": "Create Model Metadata",
+      "title_edit": "Edit Model Metadata",
+      "name": "Model Name",
+      "name_placeholder": "deepseek-v4-flash-0731",
+      "name_immutable_hint": "Cannot be changed after creation",
+      "canonical_name": "Canonical Name",
+      "canonical_name_placeholder": "deepseek-v4-flash",
+      "canonical_name_tip": "When filled, this model is treated as the same model as its canonical name for exact channel matching; leave empty to disable merging",
+      "display_name": "Display Name",
+      "display_name_placeholder": "DeepSeek V4 Flash",
+      "visibility": "Visibility",
+      "visibility_placeholder": "list",
+      "supported_in_api": "Supported in API",
+      "priority": "Priority",
+      "priority_placeholder": "999",
+      "context_window": "Context Window",
+      "context_window_placeholder": "128000",
+      "max_output_tokens": "Max Output Tokens",
+      "max_output_tokens_placeholder": "8192",
+      "default_reasoning_level": "Default Reasoning Level",
+      "default_reasoning_level_placeholder": "medium",
+      "supported_reasoning_levels": "Supported Reasoning Levels",
+      "supported_reasoning_levels_placeholder": "low,medium,high",
+      "truncation_policy": "Truncation Policy",
+      "truncation_policy_placeholder": "auto",
+      "input_modalities": "Input Modalities",
+      "input_modalities_placeholder": "text",
+      "output_modalities": "Output Modalities",
+      "output_modalities_placeholder": "text",
+      "supported_endpoint_types": "Supported Endpoint Types",
+      "supported_endpoint_types_placeholder": "openai,openai-response",
+      "array_placeholder": "Separate multiple values with commas"
+    }
   },
   "channel": {
     "title": "Channel Management",

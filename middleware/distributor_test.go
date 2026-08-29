@@ -89,6 +89,9 @@ func TestAutoDistribute(t *testing.T) {
 func clearAffinity() {
 	AffinityGlobal.Remove(999, "gpt4turbo")
 	AffinityGlobal.Remove(999, "gpt35turbo")
+	// deepseek 系列供 canonical 等价组用例使用，affinity 以原始请求模型名为 key
+	AffinityGlobal.Remove(999, "deepseek-v4-flash")
+	AffinityGlobal.Remove(999, "deepseek-v4-flash-0731")
 }
 
 func TestNonAutoDistributeNoAffinity(t *testing.T) {
@@ -181,5 +184,79 @@ func TestNextAutoChannelRoundRobin(t *testing.T) {
 		// wraps around: reads index 0 before increment, returns A
 		So(ch.Name, ShouldEqual, "A")
 		So(idx, ShouldEqual, 0)
+	})
+}
+
+func TestMatchChannelsByAliasCanonical(t *testing.T) {
+	// 用后清理，避免污染其他用例
+	defer model.ResetCanonicalAliasForTest()
+
+	Convey("canonical equivalent models match both channels from either direction", t, func() {
+		model.SetCanonicalAliasForTest("deepseekv4flash", "deepseekv4flash0731")
+
+		channels := []*model.Channel{
+			{Name: "A", Id: 1, Models: "deepseek-v4-flash-0731", ModelsAlias: "deepseekv4flash0731"},
+			{Name: "B", Id: 2, Models: "deepseek-v4-flash", ModelsAlias: "deepseekv4flash"},
+		}
+
+		matchedByShort, _ := matchChannelsByAlias("deepseek-v4-flash", channels)
+		So(len(matchedByShort), ShouldEqual, 2)
+
+		matchedByLong, _ := matchChannelsByAlias("deepseek-v4-flash-0731", channels)
+		So(len(matchedByLong), ShouldEqual, 2)
+	})
+
+	Convey("nonAutoDistribute returns each channel's real model name via canonical match", t, func() {
+		model.SetCanonicalAliasForTest("deepseekv4flash", "deepseekv4flash0731")
+
+		clearAffinity()
+		chA := []*model.Channel{
+			{Name: "A", Id: 1, Models: "deepseek-v4-flash-0731", ModelsAlias: "deepseekv4flash0731"},
+		}
+		_, longName, err := nonAutoDistribute(context.Background(), 999, "deepseek-v4-flash", chA)
+		So(err, ShouldBeNil)
+		So(longName, ShouldEqual, "deepseek-v4-flash-0731")
+
+		clearAffinity()
+		chB := []*model.Channel{
+			{Name: "B", Id: 2, Models: "deepseek-v4-flash", ModelsAlias: "deepseekv4flash"},
+		}
+		_, shortName, err := nonAutoDistribute(context.Background(), 999, "deepseek-v4-flash-0731", chB)
+		So(err, ShouldBeNil)
+		So(shortName, ShouldEqual, "deepseek-v4-flash")
+	})
+}
+
+func TestCanonicalizeSimplifiedName(t *testing.T) {
+	Convey("canonicalize maps configured member to canonical name", t, func() {
+		defer model.ResetCanonicalAliasForTest()
+		model.SetCanonicalAliasForTest("deepseekv4flash", "deepseekv4flash0731")
+
+		So(model.CanonicalizeSimplifiedName("deepseekv4flash"), ShouldEqual, "deepseekv4flash0731")
+	})
+
+	Convey("canonicalize returns input unchanged when not configured", t, func() {
+		defer model.ResetCanonicalAliasForTest()
+
+		So(model.CanonicalizeSimplifiedName("gpt4turbo"), ShouldEqual, "gpt4turbo")
+	})
+}
+
+func TestNonAutoDistributeCanonicalBeforePrefix(t *testing.T) {
+	Convey("nonAutoDistribute resolves via canonical match before prefix match", t, func() {
+		defer model.ResetCanonicalAliasForTest()
+		model.SetCanonicalAliasForTest("deepseekv4flash", "deepseekv4flash0731")
+		clearAffinity()
+
+		// 别名 idx=0 满足前缀段、idx=1 满足 canonical 段：
+		// 若前缀段抢先应返回 models[0]，canonical 段先命中则返回 models[1]
+		channels := []*model.Channel{
+			{Name: "C", Id: 3, Models: "model-x,deepseek-v4-flash-0731", ModelsAlias: "deepseekv4flashx,deepseekv4flash0731"},
+		}
+
+		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "deepseek-v4-flash", channels)
+		So(err, ShouldBeNil)
+		So(ch.Id, ShouldEqual, 3)
+		So(modelName, ShouldEqual, "deepseek-v4-flash-0731")
 	})
 }

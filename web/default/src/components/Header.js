@@ -59,6 +59,12 @@ let headerButtons = [
     icon: 'object group',
     admin: true,
   },
+  {
+    name: 'header.metadata',
+    to: '/metadata',
+    icon: 'database',
+    admin: true,
+  },
 ];
 
 const Header = () => {
