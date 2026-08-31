@@ -3,7 +3,9 @@ package model
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -365,6 +367,98 @@ func SearchLogsByDayAndModel(userId, start, end int, username string) (LogStatis
 	args = append(args, start, end)
 
 	err = LOG_DB.Raw(query, args...).Scan(&LogStatistics).Error
+	if err != nil {
+		return LogStatistics, err
+	}
 
-	return LogStatistics, err
+	// 统计展示归一化：模型名统一小写，并按等价组主名归并；
+	// 元数据加载失败时降级为仅小写化（空映射），不得让 dashboard 报错
+	alias := map[string]string{}
+	metadataList, metaErr := GetAllModelMetadata()
+	if metaErr != nil {
+		logger.Log.Warnf("failed to load model metadata for dashboard statistics, fallback to lowercase only: %v", metaErr)
+	} else {
+		alias = buildCanonicalDisplayAlias(metadataList)
+	}
+	LogStatistics = normalizeLogStatistics(LogStatistics, alias)
+
+	return LogStatistics, nil
+}
+
+// normalizeLogStatistics 对统计行做展示归一化并按 (Day, ModelName) 合并数值字段：
+// 模型名先剥离 "/" 及其前的厂商前缀只取末段（展示口径与路由侧取末段一致，厂商前缀
+// 不参与统计维度），再统一小写；命中 alias（key=成员模型名的简化名，value=等价主名
+// 展示名）时归并到主名。纯函数便于无 DB 单测；alias 只做一级映射，与路由侧归并行为
+// 一致，不递归解析主名。
+func normalizeLogStatistics(stats []*LogStatistic, alias map[string]string) []*LogStatistic {
+	type logStatKey struct {
+		day  string
+		name string
+	}
+	merged := make(map[logStatKey]*LogStatistic)
+	for _, stat := range stats {
+		// 防御 nil 元素：纯函数可能被其他调用方复用，避免空指针 panic
+		if stat == nil {
+			continue
+		}
+		// 剥离厂商前缀只保留末段；不用 SimplifyModelName 做展示名，它会把连字符等
+		// 展示字符也去掉
+		display := stat.ModelName
+		if idx := strings.LastIndex(display, "/"); idx >= 0 {
+			display = display[idx+1:]
+		}
+		if display == "" {
+			// 病理输入（如 "vendor/"）剥离后为空，回退原名小写，避免产生空模型名行
+			display = stat.ModelName
+		}
+		name := strings.ToLower(display)
+		// 等价匹配按简化名（去分隔符）查表，与路由侧 canonicalAliasMap 的 key 口径一致；
+		// SimplifyModelName 本就只取末段，前缀剥离不影响该匹配
+		if canonical, ok := alias[SimplifyModelName(name)]; ok {
+			name = canonical
+		}
+		key := logStatKey{day: stat.Day, name: name}
+		if exist, ok := merged[key]; ok {
+			exist.RequestCount += stat.RequestCount
+			exist.Quota += stat.Quota
+			exist.PromptTokens += stat.PromptTokens
+			exist.CompletionTokens += stat.CompletionTokens
+			continue
+		}
+		merged[key] = &LogStatistic{
+			Day:              stat.Day,
+			ModelName:        name,
+			RequestCount:     stat.RequestCount,
+			Quota:            stat.Quota,
+			PromptTokens:     stat.PromptTokens,
+			CompletionTokens: stat.CompletionTokens,
+		}
+	}
+
+	result := make([]*LogStatistic, 0, len(merged))
+	for _, stat := range merged {
+		result = append(result, stat)
+	}
+	// 归并打乱了 SQL 的 ORDER BY 结果，这里恢复原输出顺序语义：按天升序、同天按模型名升序
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Day != result[j].Day {
+			return result[i].Day < result[j].Day
+		}
+		return result[i].ModelName < result[j].ModelName
+	})
+	return result
+}
+
+// buildCanonicalDisplayAlias 从模型元数据构建统计展示用的等价映射：
+// key=成员模型名的简化名，value=小写等价主名。路由侧全局 canonicalAliasMap 的值是
+// SimplifyModelName 的去符号形式，不适合做展示名，故单独构建而非复用。
+func buildCanonicalDisplayAlias(metadataList []*ModelMetadata) map[string]string {
+	alias := make(map[string]string)
+	for _, metadata := range metadataList {
+		if metadata == nil || metadata.CanonicalName == "" {
+			continue
+		}
+		alias[SimplifyModelName(metadata.Name)] = strings.ToLower(metadata.CanonicalName)
+	}
+	return alias
 }
