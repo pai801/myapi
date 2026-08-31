@@ -65,6 +65,11 @@ export function showError(error) {
   console.error(error);
   if (error.message) {
     if (error.name === 'AxiosError') {
+      if (!error.response) {
+        // 断网/超时等无响应场景，避免 showError 自身抛 TypeError
+        toast.error('错误：网络连接异常，请检查网络后重试！', showErrorOptions);
+        return;
+      }
       switch (error.response.status) {
         case 401:
           // toast.error('错误：未登录或登录已过期，请重新登录！', showErrorOptions);

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"gorm.io/gorm"
@@ -52,15 +53,15 @@ func GetMaxUserId() int {
 }
 
 func GetAllUsers(startIdx int, num int) (users []*User, err error) {
-	err = DB.Omit("password").Where("status != ?", UserStatusDeleted).Order("id desc").Limit(num).Offset(startIdx).Find(&users).Error
+	err = DB.Omit("password", "access_token").Where("status != ?", UserStatusDeleted).Order("id desc").Limit(num).Offset(startIdx).Find(&users).Error
 	return users, err
 }
 
 func SearchUsers(keyword string) (users []*User, err error) {
 	if !common.UsingPostgreSQL {
-		err = DB.Omit("password").Where("id = ? or username LIKE ? or email LIKE ? or display_name LIKE ?", keyword, keyword+"%", keyword+"%", keyword+"%").Find(&users).Error
+		err = DB.Omit("password", "access_token").Where("id = ? or username LIKE ? or email LIKE ? or display_name LIKE ?", keyword, keyword+"%", keyword+"%", keyword+"%").Find(&users).Error
 	} else {
-		err = DB.Omit("password").Where("username LIKE ? or email LIKE ? or display_name LIKE ?", keyword+"%", keyword+"%", keyword+"%").Find(&users).Error
+		err = DB.Omit("password", "access_token").Where("username LIKE ? or email LIKE ? or display_name LIKE ?", keyword+"%", keyword+"%", keyword+"%").Find(&users).Error
 	}
 	return users, err
 }
@@ -117,7 +118,15 @@ func (user *User) Insert(ctx context.Context) error {
 	return nil
 }
 
-func (user *User) Update(updatePassword bool) error {
+// Update 按显式列白名单写入。GORM struct Updates 会静默忽略零值字段，导致管理员把
+// quota 改为 0、清空 display_name 等操作失效，故改为 Select 白名单：选中列的零值也会落库。
+// password 不由调用方传入白名单，仅当 updatePassword 为 true 时自动写入（避免空串清空密码）；
+// username 为空串时跳过写入，避免把登录名清空（保持原先零值被忽略时的保护语义）。
+// 各调用方白名单：UpdateUser(username/display_name/role/status，quota 仅在请求显式携带时附加，
+// 见 controller 的 updateUserRequest)、UpdateSelf(username/display_name)、ManageUser(status)、
+// GenerateAccessToken(access_token)——UpdateSelf 等非管理员路径的敏感列
+// （role/quota/status/email 等）不进白名单，权限保护不再依赖"零值被忽略"的副作用。
+func (user *User) Update(updatePassword bool, columns ...string) error {
 	var err error
 	if updatePassword {
 		user.Password, err = common.Password2Hash(user.Password)
@@ -125,12 +134,37 @@ func (user *User) Update(updatePassword bool) error {
 			return err
 		}
 	}
+	selected := make([]string, 0, len(columns)+1)
+	for _, col := range columns {
+		if col == "username" && user.Username == "" {
+			continue
+		}
+		selected = append(selected, col)
+	}
+	if updatePassword {
+		selected = append(selected, "password")
+	}
+	if len(selected) == 0 {
+		return errors.New("没有可更新的字段")
+	}
 	if user.Status == UserStatusDisabled {
 		blacklist.BanUser(user.Id)
 	} else if user.Status == UserStatusEnabled {
 		blacklist.UnbanUser(user.Id)
 	}
-	err = DB.Model(user).Updates(user).Error
+	err = DB.Model(user).Select(selected).Updates(user).Error
+	if err == nil {
+		// ManageUser 禁用/启用、UpdateUser 等均经此路径，需同步失效用户状态缓存
+		_ = CacheInvalidateUserEnabled(user.Id)
+		// 管理员修正额度经此路径直写 DB 绝对值（不经 Increase/DecreaseUserQuota 增量路径），
+		// 必须回源刷新额度缓存，否则 TTL 窗口内额度检查仍用旧值；
+		// 仅本次更新列含 quota 时刷新，非额度更新（UpdateSelf/GenerateAccessToken 等）不产生该开销
+		if common.RedisEnabled && slices.Contains(selected, "quota") {
+			if uerr := CacheUpdateUserQuota(context.Background(), user.Id); uerr != nil {
+				logger.Log.Errorf("update user quota cache for user %d failed: %s", user.Id, uerr.Error())
+			}
+		}
+	}
 	return err
 }
 
@@ -143,6 +177,9 @@ func (user *User) Delete() error {
 	user.Username = fmt.Sprintf("deleted_%s", random.GetUUID())
 	user.Status = UserStatusDeleted
 	err := DB.Model(user).Updates(user).Error
+	if err == nil {
+		_ = CacheInvalidateUserEnabled(user.Id)
+	}
 	return err
 }
 
@@ -273,9 +310,19 @@ func IncreaseUserQuota(id int, quota int64) (err error) {
 	}
 	if config.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
-		return nil
+	} else {
+		if err = increaseUserQuota(id, quota); err != nil {
+			return err
+		}
 	}
-	return increaseUserQuota(id, quota)
+	// 退回/回滚同样增量同步 Redis 缓存，维持"缓存值 = DB 已落盘值 + 批量缓冲"恒等式；
+	// 同步失败仅记日志：DB 为权威状态，缓存误差由 PostConsumeReset/回源/TTL 收敛
+	if common.RedisEnabled {
+		if cerr := CacheIncreaseUserQuota(id, quota); cerr != nil {
+			logger.Log.Errorf("increase user quota cache for user %d failed: %s", id, cerr.Error())
+		}
+	}
+	return nil
 }
 
 func increaseUserQuota(id int, quota int64) (err error) {
@@ -289,9 +336,20 @@ func DecreaseUserQuota(id int, quota int64) (err error) {
 	}
 	if config.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUserQuota, id, -quota)
-		return nil
+	} else {
+		if err = decreaseUserQuota(id, quota); err != nil {
+			return err
+		}
 	}
-	return decreaseUserQuota(id, quota)
+	// 预扣/扣费成功后增量同步扣减 Redis 缓存：额度检查读的是缓存，
+	// 若不同步，批量间隔或 TTL 窗口内预扣对后续请求不可见，可被高并发持续透支
+	// （同步失败仅记日志：DB 为权威状态，缓存误差由 PostConsumeReset/回源/TTL 收敛）
+	if common.RedisEnabled {
+		if cerr := CacheDecreaseUserQuota(id, quota); cerr != nil {
+			logger.Log.Errorf("decrease user quota cache for user %d failed: %s", id, cerr.Error())
+		}
+	}
+	return nil
 }
 
 func decreaseUserQuota(id int, quota int64) (err error) {
@@ -299,8 +357,10 @@ func decreaseUserQuota(id int, quota int64) (err error) {
 	return err
 }
 
-// PostConsumeResetUserQuotaCache refreshes the cached user quota from DB after
-// the quota has already been updated in DB.
+// PostConsumeResetUserQuotaCache 在 DB 扣费完成后刷新用户额度缓存。
+// 批量模式下 DB 值尚未落盘，CacheUpdateUserQuota 会叠加批量缓冲差值后回写，
+// 避免用陈旧 DB 值覆盖缓存（见 getPendingUserQuotaDelta）；
+// 非批量模式 DB 已落盘，直接回读回写。
 func PostConsumeResetUserQuotaCache(ctx context.Context, userId int, consumedQuota int64) {
 	if common.RedisEnabled {
 		if err := CacheUpdateUserQuota(ctx, userId); err != nil {

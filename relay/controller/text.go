@@ -60,9 +60,15 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	// balance check
 	promptTokens := getPromptTokens(textRequest, meta.Mode)
 	meta.PromptTokens = promptTokens
+	// 预扣估算需纳入输出上限（max_completion_tokens 优先于 max_tokens，与上游语义一致），
+	// 否则低余额用户可用大输出参数把余额打成大负数
+	maxOutTokens := textRequest.MaxTokens
+	if textRequest.MaxCompletionTokens != nil && *textRequest.MaxCompletionTokens > 0 {
+		maxOutTokens = *textRequest.MaxCompletionTokens
+	}
 	estimatedQuota := int64(float64(500+promptTokens) * ratio)
-	if textRequest.MaxTokens != 0 {
-		estimatedQuota += int64(float64(textRequest.MaxTokens) * ratio)
+	if maxOutTokens > 0 {
+		estimatedQuota += int64(float64(maxOutTokens) * ratio)
 	}
 	userQuota, err := dbmodel.CacheGetUserQuota(ctx, meta.UserId)
 	if err != nil {

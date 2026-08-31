@@ -111,6 +111,9 @@ var RelayProxy = env.String("RELAY_PROXY", "")
 var UserContentRequestProxy = env.String("USER_CONTENT_REQUEST_PROXY", "")
 var UserContentRequestTimeout = env.Int("USER_CONTENT_REQUEST_TIMEOUT", 30)
 
+// TrustedProxies 逗号分隔的受信任代理 IP/CIDR；为空表示不信任任何代理，ClientIP 取直连地址
+var TrustedProxies = env.String("TRUSTED_PROXIES", "")
+
 var EnforceIncludeUsage = env.Bool("ENFORCE_INCLUDE_USAGE", false)
 var TestPrompt = env.String("TEST_PROMPT", "Output only your specific model name with no additional text.")
 

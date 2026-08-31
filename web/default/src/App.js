@@ -82,17 +82,21 @@ function App() {
       <Route
         path='/channel/edit/:id'
         element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditChannel />
-          </Suspense>
+          <PrivateRoute>
+            <Suspense fallback={<Loading></Loading>}>
+              <EditChannel />
+            </Suspense>
+          </PrivateRoute>
         }
       />
       <Route
         path='/channel/add'
         element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditChannel />
-          </Suspense>
+          <PrivateRoute>
+            <Suspense fallback={<Loading></Loading>}>
+              <EditChannel />
+            </Suspense>
+          </PrivateRoute>
         }
       />
       <Route
@@ -106,17 +110,21 @@ function App() {
       <Route
         path='/token/edit/:id'
         element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditToken />
-          </Suspense>
+          <PrivateRoute>
+            <Suspense fallback={<Loading></Loading>}>
+              <EditToken />
+            </Suspense>
+          </PrivateRoute>
         }
       />
       <Route
         path='/token/add'
         element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditToken />
-          </Suspense>
+          <PrivateRoute>
+            <Suspense fallback={<Loading></Loading>}>
+              <EditToken />
+            </Suspense>
+          </PrivateRoute>
         }
       />
       <Route
@@ -146,25 +154,31 @@ function App() {
       <Route
         path='/user/edit/:id'
         element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditUser />
-          </Suspense>
+          <PrivateRoute>
+            <Suspense fallback={<Loading></Loading>}>
+              <EditUser />
+            </Suspense>
+          </PrivateRoute>
         }
       />
       <Route
         path='/user/edit'
         element={
-          <Suspense fallback={<Loading></Loading>}>
-            <EditUser />
-          </Suspense>
+          <PrivateRoute>
+            <Suspense fallback={<Loading></Loading>}>
+              <EditUser />
+            </Suspense>
+          </PrivateRoute>
         }
       />
       <Route
         path='/user/add'
         element={
-          <Suspense fallback={<Loading></Loading>}>
-            <AddUser />
-          </Suspense>
+          <PrivateRoute>
+            <Suspense fallback={<Loading></Loading>}>
+              <AddUser />
+            </Suspense>
+          </PrivateRoute>
         }
       />
       <Route

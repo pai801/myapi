@@ -84,6 +84,8 @@ const ChannelsTable = () => {
   const [activePage, setActivePage] = useState(1);
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
+  // 搜索结果模式下禁用分页增量加载，避免全量数据混入搜索结果
+  const [searchMode, setSearchMode] = useState(false);
   const [updatingBalance, setUpdatingBalance] = useState(false);
   const [showPrompt, setShowPrompt] = useState(shouldShowPrompt(promptID));
   const [showDetail, setShowDetail] = useState(isShowDetail());
@@ -110,40 +112,53 @@ const ChannelsTable = () => {
   };
 
   const loadChannels = async (startIdx) => {
-    const res = await API.get(`/api/channel/?p=${startIdx}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      let localChannels = data.map(processChannelData);
-      if (startIdx === 0) {
-        setChannels(localChannels);
+    try {
+      const res = await API.get(`/api/channel/?p=${startIdx}`);
+      const { success, message, data } = res.data;
+      if (success) {
+        let localChannels = data.map(processChannelData);
+        if (startIdx === 0) {
+          setChannels(localChannels);
+        } else {
+          let newChannels = [...channels];
+          newChannels.splice(
+            startIdx * ITEMS_PER_PAGE,
+            data.length,
+            ...localChannels
+          );
+          setChannels(newChannels);
+        }
       } else {
-        let newChannels = [...channels];
-        newChannels.splice(
-          startIdx * ITEMS_PER_PAGE,
-          data.length,
-          ...localChannels
-        );
-        setChannels(newChannels);
+        showError(message);
       }
-    } else {
-      showError(message);
+    } finally {
+      // 复位必须放在 finally：初始加载/翻页/刷新任一环节失败都要解除表格遮罩
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const onPaginationChange = (e, { activePage }) => {
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
     (async () => {
-      if (activePage === Math.ceil(channels.length / ITEMS_PER_PAGE) + 1) {
+      if (
+        !searchMode &&
+        activePage === Math.ceil(channels.length / ITEMS_PER_PAGE) + 1
+      ) {
         // In this case we have to load more data and then append them.
         await loadChannels(activePage - 1);
       }
       setActivePage(activePage);
-    })();
+    })().catch(() => {});
   };
 
   const refresh = async () => {
     setLoading(true);
-    await loadChannels(activePage - 1);
+    setSearchMode(false);
+    try {
+      await loadChannels(activePage - 1);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const toggleShowDetail = () => {
@@ -152,12 +167,11 @@ const ChannelsTable = () => {
   };
 
   useEffect(() => {
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
     loadChannels(0)
       .then()
-      .catch((reason) => {
-        showError(reason);
-      });
-    loadChannelModels().then();
+      .catch(() => {});
+    loadChannelModels().then().catch(() => {});
   }, []);
 
   const manageChannel = async (id, action, idx, value) => {
@@ -292,23 +306,32 @@ const ChannelsTable = () => {
   };
 
   const searchChannels = async () => {
-    if (searchKeyword === '') {
-      // if keyword is blank, load files instead.
-      await loadChannels(0);
-      setActivePage(1);
-      return;
+    // 防重复提交：上一次搜索未返回前忽略再次提交，避免较慢的旧响应覆盖新结果
+    if (searching) return;
+    try {
+      if (searchKeyword === '') {
+        // if keyword is blank, load files instead.
+        setSearchMode(false);
+        await loadChannels(0);
+        setActivePage(1);
+        return;
+      }
+      setSearching(true);
+      setSearchMode(true);
+      const res = await API.get(
+        `/api/channel/search?keyword=${encodeURIComponent(searchKeyword)}`
+      );
+      const { success, message, data } = res.data;
+      if (success) {
+        let localChannels = data.map(processChannelData);
+        setChannels(localChannels);
+        setActivePage(1);
+      } else {
+        showError(message);
+      }
+    } finally {
+      setSearching(false);
     }
-    setSearching(true);
-    const res = await API.get(`/api/channel/search?keyword=${searchKeyword}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      let localChannels = data.map(processChannelData);
-      setChannels(localChannels);
-      setActivePage(1);
-    } else {
-      showError(message);
-    }
-    setSearching(false);
   };
 
   const switchTestModel = async (idx, model) => {
@@ -333,11 +356,6 @@ const ChannelsTable = () => {
     } else {
       showError(message);
     }
-    let newChannels = [...channels];
-    let realIdx = (activePage - 1) * ITEMS_PER_PAGE + idx;
-    newChannels[realIdx].response_time = time * 1000;
-    newChannels[realIdx].test_time = Date.now() / 1000;
-    setChannels(newChannels);
   };
 
   const testChannels = async (scope) => {

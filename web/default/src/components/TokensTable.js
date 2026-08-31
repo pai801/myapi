@@ -65,6 +65,8 @@ const TokensTable = () => {
   const [activePage, setActivePage] = useState(1);
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
+  // 搜索结果模式下禁用分页增量加载，避免全量数据混入搜索结果
+  const [searchMode, setSearchMode] = useState(false);
   const [orderBy, setOrderBy] = useState('');
   const [groupOptions, setGroupOptions] = useState([]);
   const [editingTokenId, setEditingTokenId] = useState(null);
@@ -84,42 +86,56 @@ const TokensTable = () => {
   }, []);
 
   const loadTokens = async (startIdx) => {
-    const res = await API.get(`/api/token/?p=${startIdx}&order=${orderBy}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      if (startIdx === 0) {
-        setTokens(data);
+    try {
+      const res = await API.get(`/api/token/?p=${startIdx}&order=${orderBy}`);
+      const { success, message, data } = res.data;
+      if (success) {
+        if (startIdx === 0) {
+          setTokens(data);
+        } else {
+          let newTokens = [...tokens];
+          newTokens.splice(startIdx * ITEMS_PER_PAGE, data.length, ...data);
+          setTokens(newTokens);
+        }
       } else {
-        let newTokens = [...tokens];
-        newTokens.splice(startIdx * ITEMS_PER_PAGE, data.length, ...data);
-        setTokens(newTokens);
+        showError(message);
       }
-    } else {
-      showError(message);
+    } finally {
+      // 复位必须放在 finally：初始加载/翻页/刷新任一环节失败都要解除表格遮罩
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const onPaginationChange = (e, { activePage }) => {
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
     (async () => {
-      if (activePage === Math.ceil(tokens.length / ITEMS_PER_PAGE) + 1) {
+      if (
+        !searchMode &&
+        activePage === Math.ceil(tokens.length / ITEMS_PER_PAGE) + 1
+      ) {
         await loadTokens(activePage - 1, orderBy);
       }
       setActivePage(activePage);
-    })();
+    })().catch(() => {});
   };
 
   const refresh = async () => {
     setLoading(true);
-    await loadTokens(activePage - 1);
+    setSearchMode(false);
+    try {
+      await loadTokens(activePage - 1);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
+    // 排序切换会重新拉取全量列表，复位搜索态
+    setSearchMode(false);
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
     loadTokens(0, orderBy)
       .then()
-      .catch((reason) => {
-        showError(reason);
-      });
+      .catch(() => {});
     fetchGroups().then();
   }, [orderBy, fetchGroups]);
 
@@ -214,22 +230,31 @@ const TokensTable = () => {
   };
 
   const searchTokens = async () => {
-    if (searchKeyword === '') {
-      await loadTokens(0);
-      setActivePage(1);
-      setOrderBy('');
-      return;
+    // 防重复提交：上一次搜索未返回前忽略再次提交，避免较慢的旧响应覆盖新结果
+    if (searching) return;
+    try {
+      if (searchKeyword === '') {
+        setSearchMode(false);
+        await loadTokens(0);
+        setActivePage(1);
+        setOrderBy('');
+        return;
+      }
+      setSearching(true);
+      setSearchMode(true);
+      const res = await API.get(
+        `/api/token/search?keyword=${encodeURIComponent(searchKeyword)}`
+      );
+      const { success, message, data } = res.data;
+      if (success) {
+        setTokens(data);
+        setActivePage(1);
+      } else {
+        showError(message);
+      }
+    } finally {
+      setSearching(false);
     }
-    setSearching(true);
-    const res = await API.get(`/api/token/search?keyword=${searchKeyword}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      setTokens(data);
-      setActivePage(1);
-    } else {
-      showError(message);
-    }
-    setSearching(false);
   };
 
   const handleKeywordChange = async (e, { value }) => {

@@ -8,7 +8,6 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
-	"net/http"
 	"regexp"
 	"strings"
 	"sync"
@@ -24,6 +23,8 @@ func IsImageUrl(url string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// HEAD 响应必须关闭 body 归还连接，否则每条含 URL 的图片消息泄漏一条连接
+	defer resp.Body.Close()
 	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/") {
 		return false, nil
 	}
@@ -61,7 +62,8 @@ func GetImageFromUrl(url string) (mimeType string, data string, err error) {
 	if !isImage {
 		return
 	}
-	resp, err := http.Get(url)
+	// 走 UserContentRequestHTTPClient 以继承代理与 UserContentRequestTimeout 配置，裸 http.Get 会同时绕过两者
+	resp, err := client.UserContentRequestHTTPClient.Get(url)
 	if err != nil {
 		return
 	}

@@ -1,6 +1,7 @@
 package xunfei
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -153,9 +155,10 @@ func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
 	return callUrl
 }
 
-func StreamHandler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*model.ErrorWithStatusCode, *model.Usage) {
+// 形参序与渠道密钥填写顺序(APPID|APIKey|APISecret 官方惯例)对齐，修复原先 username/签名密钥取参对调导致的 401
+func StreamHandler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIRequest, appId string, apiKey string, apiSecret string) (*model.ErrorWithStatusCode, *model.Usage) {
 	domain, authUrl := getXunfeiAuthUrl(meta.Config.APIVersion, apiKey, apiSecret)
-	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId)
+	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId, c.Request.Context())
 	if err != nil {
 		logger.Log.Errorf("[%s] %+v", "xunfei_request_failed", err)
 		return openai.ErrorWrapper(err, "xunfei_request_failed", http.StatusInternalServerError), nil
@@ -184,9 +187,10 @@ func StreamHandler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpe
 	return nil, &usage
 }
 
-func Handler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*model.ErrorWithStatusCode, *model.Usage) {
+// 形参序与渠道密钥填写顺序(APPID|APIKey|APISecret 官方惯例)对齐，修复原先 username/签名密钥取参对调导致的 401
+func Handler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIRequest, appId string, apiKey string, apiSecret string) (*model.ErrorWithStatusCode, *model.Usage) {
 	domain, authUrl := getXunfeiAuthUrl(meta.Config.APIVersion, apiKey, apiSecret)
-	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId)
+	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId, c.Request.Context())
 	if err != nil {
 		logger.Log.Errorf("[%s] %+v", "xunfei_request_failed", err)
 		return openai.ErrorWrapper(err, "xunfei_request_failed", http.StatusInternalServerError), nil
@@ -225,27 +229,57 @@ func Handler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIReq
 	return nil, &usage
 }
 
-func xunfeiMakeRequest(textRequest model.GeneralOpenAIRequest, domain, authUrl, appId string) (chan ChatResponse, chan bool, error) {
+func xunfeiMakeRequest(textRequest model.GeneralOpenAIRequest, domain, authUrl, appId string, ctx context.Context) (chan ChatResponse, chan bool, error) {
 	d := websocket.Dialer{
 		HandshakeTimeout: 5 * time.Second,
 	}
 	conn, resp, err := d.Dial(authUrl, nil)
 	if err != nil || resp.StatusCode != 101 {
+		// gorilla/websocket 握手失败时 resp 非 nil，必须关闭 body 释放底层连接，否则每次失败（如 401）泄漏一条 TLS 连接
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		return nil, nil, err
 	}
+	// 监控请求 ctx：客户端断开时主动关闭底层连接，解除阻塞中的读/写，防止 goroutine 与连接泄漏。
+	// 必须在首个 conn 读写之前启动，否则上游迟迟不发首帧时 ctx 取消无法解除阻塞
+	monitorDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-monitorDone:
+		}
+	}()
+
 	data := requestOpenAI2Xunfei(textRequest, appId, domain)
 	err = conn.WriteJSON(data)
 	if err != nil {
+		close(monitorDone)
+		_ = conn.Close()
 		return nil, nil, err
 	}
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
+		close(monitorDone)
+		_ = conn.Close()
 		return nil, nil, err
 	}
 
+	// dataChan 无缓冲：正常路径逐帧握手，保证末帧先于 stop 被消费，避免缓冲引入的末帧丢失竞争；
+	// 客户端断开（消费方不再读）时由 ctx 取消解除生产者阻塞，泄漏防护不回退
 	dataChan := make(chan ChatResponse)
-	stopChan := make(chan bool)
+	stopChan := make(chan bool, 1)
 	go func() {
+		defer func() {
+			close(monitorDone)
+			// ctx 取消路径 monitor 可能已关闭 conn，net.ErrClosed 属预期，降噪不打
+			if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				logger.Log.Errorf("error closing websocket connection: " + closeErr.Error())
+			}
+			// stopChan 带缓冲：消费方已退出时投递不再永久阻塞
+			stopChan <- true
+		}()
 		for {
 			if msg == nil {
 				_, msg, err = conn.ReadMessage()
@@ -261,16 +295,16 @@ func xunfeiMakeRequest(textRequest model.GeneralOpenAIRequest, domain, authUrl, 
 				break
 			}
 			msg = nil
-			dataChan <- response
+			select {
+			case dataChan <- response:
+			case <-ctx.Done():
+				// 客户端断开（消费方不再读），退出由 defer 关闭连接并投递 stop
+				return
+			}
 			if response.Payload.Choices.Status == 2 {
-				err := conn.Close()
-				if err != nil {
-					logger.Log.Errorf("error closing websocket connection: " + err.Error())
-				}
 				break
 			}
 		}
-		stopChan <- true
 	}()
 
 	return dataChan, stopChan, nil

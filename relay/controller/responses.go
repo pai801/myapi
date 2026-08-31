@@ -130,6 +130,10 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 		return openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
 	}
 	estimatedQuota := int64(float64(500+estimateResponsesPromptTokens(req)) * ratio)
+	// 预扣估算需纳入输出上限 max_output_tokens，否则低余额用户可用大输出参数把余额打成大负数
+	if maxOutputTokens := estimateResponsesMaxOutputTokens(req); maxOutputTokens > 0 {
+		estimatedQuota += int64(float64(maxOutputTokens) * ratio)
+	}
 	if userQuota < estimatedQuota {
 		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 	}
@@ -270,6 +274,10 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 		return openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
 	}
 	estimatedQuota := int64(float64(500+estimateResponsesPromptTokens(req)) * ratio)
+	// 预扣估算需纳入输出上限 max_output_tokens，否则低余额用户可用大输出参数把余额打成大负数
+	if maxOutputTokens := estimateResponsesMaxOutputTokens(req); maxOutputTokens > 0 {
+		estimatedQuota += int64(float64(maxOutputTokens) * ratio)
+	}
 	if userQuota < estimatedQuota {
 		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 	}
@@ -857,6 +865,23 @@ func formatSSEEvent(event codex.SSEEvent) string {
 		}
 	}
 	return b.String()
+}
+
+// maxOutputTokensCap 单请求输出上限，用于 clamp 预扣估算输入，防止极大值导致额度计算溢出
+const maxOutputTokensCap = 1_000_000
+
+// estimateResponsesMaxOutputTokens 提取 responses 请求的输出上限（max_output_tokens）。
+// 返回 0 表示未指定或非法，调用方保持默认兜底估算。
+// req 是 json.Unmarshal 产物（数字为 float64），1e300 级极大值直接 int() 转换会溢出为负数，
+// 使预扣额度变负；故转换前 clamp 到 maxOutputTokensCap
+func estimateResponsesMaxOutputTokens(req map[string]interface{}) int {
+	if v, ok := req["max_output_tokens"].(float64); ok && v > 0 {
+		if v > maxOutputTokensCap {
+			return maxOutputTokensCap
+		}
+		return int(v)
+	}
+	return 0
 }
 
 func estimateResponsesPromptTokens(req map[string]interface{}) int {

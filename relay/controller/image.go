@@ -177,6 +177,11 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	groupRatio := model.GetGroupModelRatio(meta.Group)
 	ratio := modelRatio * groupRatio
 	userQuota, err := model.CacheGetUserQuota(ctx, meta.UserId)
+	if err != nil {
+		// DB/Redis 抖动时必须 5xx 拒绝而非用 0 余额误报 403
+		logger.Log.Errorf("[%s] %+v", "get_user_quota_failed", err)
+		return openai.ErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
+	}
 
 	var quota int64
 	switch meta.ChannelType {
@@ -192,51 +197,67 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 	}
 
+	// Pre-consume to close race window between check and actual consumption
+	if err := model.DecreaseUserQuota(meta.UserId, quota); err != nil {
+		logger.Log.Errorf("pre-consume quota failed for user %d: %v", meta.UserId, err)
+		return openai.ErrorWrapper(err, "pre_consume_quota_failed", http.StatusInternalServerError)
+	}
+	ctx = context.WithValue(ctx, CtxKeyPreConsumedQuota, quota)
+
 	// do request
 	resp, err := adaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
+		rollbackImagePreConsumedQuota(ctx, meta.UserId)
 		logger.Log.Errorf("[%s] %+v", "do_request_failed", err)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 
-	defer func(ctx context.Context) {
-		if resp != nil &&
-			resp.StatusCode != http.StatusCreated && // replicate returns 201
-			resp.StatusCode != http.StatusOK {
-			return
-		}
-
-		err := model.DecreaseUserQuota(meta.UserId, quota)
-		if err != nil {
-			logger.Log.Errorf("error decrease user quota: " + err.Error())
-		}
-		// Force re-read from DB: delete Redis key, then CacheUpdateUserQuota fetches from DB
-		model.PostConsumeResetUserQuotaCache(ctx, meta.UserId, quota)
-		if quota != 0 {
-			tokenName := c.GetString(ctxkey.TokenName)
-			logContent := fmt.Sprintf("倍率：%.2f", modelRatio)
-			model.RecordConsumeLog(ctx, &model.Log{
-				UserId:           meta.UserId,
-				ChannelId:        meta.ChannelId,
-				PromptTokens:     0,
-				CompletionTokens: 0,
-				ModelName:        imageRequest.Model,
-				TokenName:        tokenName,
-				Quota:            int(quota),
-				Content:          logContent,
-			})
-			model.UpdateUserUsedQuotaAndRequestCount(meta.UserId, quota)
-			channelId := c.GetInt(ctxkey.ChannelId)
-			model.UpdateChannelUsedQuota(channelId, quota)
-		}
-	}(c.Request.Context())
-
 	// do response
 	_, respErr := adaptor.DoResponse(c, resp, meta)
 	if respErr != nil {
+		rollbackImagePreConsumedQuota(ctx, meta.UserId)
 		logger.Log.Errorf("respErr is not nil: %+v", respErr)
 		return respErr
 	}
 
+	// ImageHandler 不校验上游状态码（错误体原样透传给客户端）。三路回滚/结算语义：
+	// DoRequest 失败、DoResponse 出错、上游非 2xx（含 resp 为 nil）均回滚预扣且不结算，仅 2xx 成功路径结算。
+	// 与旧版 defer 的豁免语义存在差异：上游已返回 2xx 但 DoResponse 出错时，旧版仍扣费、新版回滚——
+	// 此时上游已产生成本，但用户未收到产物，故向用户退款
+	if resp == nil || (resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated) {
+		rollbackImagePreConsumedQuota(ctx, meta.UserId)
+		return nil
+	}
+
+	// 结算：图片按 N/size 定价，预扣额即最终扣费，无 usage 多退少补
+	model.PostConsumeResetUserQuotaCache(ctx, meta.UserId, quota)
+	if quota != 0 {
+		tokenName := c.GetString(ctxkey.TokenName)
+		logContent := fmt.Sprintf("倍率：%.2f", modelRatio)
+		model.RecordConsumeLog(ctx, &model.Log{
+			UserId:           meta.UserId,
+			ChannelId:        meta.ChannelId,
+			PromptTokens:     0,
+			CompletionTokens: 0,
+			ModelName:        imageRequest.Model,
+			TokenName:        tokenName,
+			Quota:            int(quota),
+			Content:          logContent,
+		})
+		model.UpdateUserUsedQuotaAndRequestCount(meta.UserId, quota)
+		channelId := c.GetInt(ctxkey.ChannelId)
+		model.UpdateChannelUsedQuota(channelId, quota)
+	}
+
 	return nil
+}
+
+// rollbackImagePreConsumedQuota 回滚图片请求的预扣额度并刷新额度缓存
+func rollbackImagePreConsumedQuota(ctx context.Context, userId int) {
+	if preConsumed, ok := ctx.Value(CtxKeyPreConsumedQuota).(int64); ok && preConsumed > 0 {
+		if err := model.IncreaseUserQuota(userId, preConsumed); err != nil {
+			logger.Log.Errorf("error rolling back pre-consumed image quota: " + err.Error())
+		}
+		model.PostConsumeResetUserQuotaCache(ctx, userId, preConsumed)
+	}
 }

@@ -2,6 +2,7 @@ package replicate
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -42,10 +43,16 @@ func ChatHandler(c *gin.Context, resp *http.Response) (
 		return openai.ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 
+	pollDeadline := time.Now().Add(taskPollTimeout)
 	for {
 		err = func() error {
-			// get task
-			taskReq, err := http.NewRequestWithContext(c.Request.Context(),
+			if time.Now().After(pollDeadline) {
+				return errors.Errorf("replicate task polling timeout after %s", taskPollTimeout)
+			}
+			// get task（单次请求绑定超时，防止挂死的 GET 无限占用 goroutine）
+			reqCtx, cancel := pollRequestContext(c.Request.Context(), pollDeadline)
+			defer cancel()
+			taskReq, err := http.NewRequestWithContext(reqCtx,
 				http.MethodGet, respData.URLs.Get, nil)
 			if err != nil {
 				return errors.Wrap(err, "new request")
@@ -88,7 +95,7 @@ func ChatHandler(c *gin.Context, resp *http.Response) (
 			}
 
 			// request stream url
-			responseText, err := chatStreamHandler(c, taskData.URLs.Stream)
+			responseText, err := chatStreamHandler(c, pollDeadline, taskData.URLs.Stream)
 			if err != nil {
 				return errors.Wrap(err, "chat stream handler")
 			}
@@ -119,9 +126,12 @@ const (
 	done        = "[DONE]"
 )
 
-func chatStreamHandler(c *gin.Context, streamUrl string) (responseText string, err error) {
+func chatStreamHandler(c *gin.Context, pollDeadline time.Time, streamUrl string) (responseText string, err error) {
 	// request stream endpoint
-	streamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, streamUrl, nil)
+	// 流式响应合法时长可能超过单请求 30s 上限，仅绑定轮询总 deadline，防挂死连接无限占用 goroutine
+	streamCtx, cancel := context.WithTimeout(c.Request.Context(), time.Until(pollDeadline))
+	defer cancel()
+	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamUrl, nil)
 	if err != nil {
 		return "", errors.Wrap(err, "new request to stream")
 	}

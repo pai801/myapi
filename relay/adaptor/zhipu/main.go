@@ -39,7 +39,12 @@ func GetToken(apikey string) string {
 
 	split := strings.Split(apikey, ".")
 	if len(split) != 2 {
-		logger.Log.Errorf("invalid zhipu key: " + apikey)
+		// 密钥含 secret 段，日志只保留 id 段；无法确认 id 段时输出占位符，避免明文泄漏
+		id := "<unknown>"
+		if len(split) > 1 && split[0] != "" {
+			id = split[0]
+		}
+		logger.Log.Errorf("invalid zhipu key: " + id)
 		return ""
 	}
 

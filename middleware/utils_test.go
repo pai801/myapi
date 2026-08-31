@@ -13,10 +13,11 @@ func TestIsModelInListAliasExact(t *testing.T) {
 	})
 }
 
-func TestIsModelInListAliasPrefix(t *testing.T) {
-	Convey("isModelInList with alias prefix match", t, func() {
-		// modelName="gpt-4" simplifies to "gpt4", which is a prefix of "gpt4turbo"
-		So(isModelInList("gpt-4", "gpt4turbo,gpt35turbo"), ShouldBeTrue)
+func TestIsModelInListRejectsPrefix(t *testing.T) {
+	Convey("isModelInList must not match by prefix", t, func() {
+		// modelName="gpt-4" simplifies to "gpt4"; "gpt4turbo" merely starts with it,
+		// prefix match would let a token restricted to a cheap model reach a pricier one
+		So(isModelInList("gpt-4", "gpt4turbo,gpt35turbo"), ShouldBeFalse)
 	})
 }
 
@@ -55,10 +56,10 @@ func TestIsModelInListOriginalNameExact(t *testing.T) {
 }
 
 func TestIsModelInListOriginalNamePrefix(t *testing.T) {
-	Convey("simplified request matches prefix of original stored name", t, func() {
-		// Request "gpt-4" simplifies to "gpt4", stored "gpt-4-turbo" simplifies to "gpt4turbo"
-		// "gpt4" is a prefix of "gpt4turbo"
-		So(isModelInList("gpt-4", "gpt-4-turbo,gpt-3.5-turbo"), ShouldBeTrue)
+	Convey("simplified request must not match prefix of original stored name", t, func() {
+		// Request "gpt-4" simplifies to "gpt4", stored "gpt-4-turbo" simplifies to "gpt4turbo";
+		// "gpt4" being a prefix of "gpt4turbo" must NOT grant access
+		So(isModelInList("gpt-4", "gpt-4-turbo,gpt-3.5-turbo"), ShouldBeFalse)
 	})
 }
 
@@ -77,8 +78,17 @@ func TestIsModelInListOriginalNameCaseInsensitive(t *testing.T) {
 func TestIsModelInListMixedOldNewData(t *testing.T) {
 	Convey("mixed old (simplified) and new (original) data", t, func() {
 		// Backward compat: old tokens stored simplified names, new tokens store original names
-		// Both must work with the same matching logic
-		So(isModelInList("gpt-4", "gpt4turbo,gpt-3.5-turbo"), ShouldBeTrue)
-		So(isModelInList("gpt-3.5", "gpt-4-turbo,gpt35turbo"), ShouldBeTrue)
+		// Both must work via exact match after simplification
+		So(isModelInList("gpt-4-turbo", "gpt4turbo,gpt-3.5-turbo"), ShouldBeTrue)
+		So(isModelInList("gpt-3.5-turbo", "gpt-4-turbo,gpt35turbo"), ShouldBeTrue)
+	})
+}
+
+func TestIsModelInListNoPrefixPrivilegeEscalation(t *testing.T) {
+	Convey("token restricted to o3-mini must not access o3", t, func() {
+		// 回归：请求名是允许名的真前缀时必须拒绝，防止越权到更贵模型
+		So(isModelInList("o3", "o3-mini"), ShouldBeFalse)
+		// 反方向同理：允许名是请求名的真前缀时也必须拒绝
+		So(isModelInList("o3-mini", "o3"), ShouldBeFalse)
 	})
 }

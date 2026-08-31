@@ -4,6 +4,7 @@ import (
 	"embed"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/sessions"
@@ -111,6 +112,21 @@ func main() {
 
 	// Initialize HTTP server
 	server := gin.New()
+	// 信任代理白名单：未配置 TRUSTED_PROXIES 时传 nil（不信任任何代理），ClientIP 直接取
+	// RemoteAddr，防止伪造 X-Forwarded-For 绕过令牌子网限制、IP 限流和 turnstile 校验
+	var trustedProxies []string
+	if config.TrustedProxies != "" {
+		for _, p := range strings.Split(config.TrustedProxies, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				trustedProxies = append(trustedProxies, p)
+			}
+		}
+	} else {
+		logger.Log.Infof("TRUSTED_PROXIES is not set: ClientIP will be the direct remote address; set it (comma-separated IPs/CIDRs) only when behind a reverse proxy")
+	}
+	if err := server.SetTrustedProxies(trustedProxies); err != nil {
+		logger.Log.Fatalf("failed to set trusted proxies: " + err.Error())
+	}
 	server.Use(gin.Recovery())
 	// This will cause SSE not to work!!!
 	//server.Use(gzip.Gzip(gzip.DefaultCompression))

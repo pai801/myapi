@@ -411,7 +411,9 @@ graph LR
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
+| `JWT_SECRET` | JWT 签名密钥，**必填**，未设置时服务拒绝启动 | 无（拒绝启动） |
 | `SESSION_SECRET` | 固定会话密钥（重启后 cookie 仍有效） | 无 |
+| `TRUSTED_PROXIES` | 可信代理 IP/网段，用于解析客户端真实 IP；未配置时不信任任何代理 | 无 |
 | `GLOBAL_API_RATE_LIMIT` | 单 IP 三分钟最大 API 请求数 | `480` |
 | `GLOBAL_WEB_RATE_LIMIT` | 单 IP 三分钟最大 Web 请求数 | `240` |
 

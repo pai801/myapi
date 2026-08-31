@@ -29,6 +29,8 @@ func nextAutoChannel(group string, channels []*model.Channel) (*model.Channel, i
 	}
 
 	idx := autoRoundRobinIndex[group]
+	// 渠道列表会收缩（渠道被自动禁用是常态），全局存储的索引可能越界，取值前先取模折回
+	idx %= len(channels)
 	autoRoundRobinIndex[group] = (idx + 1) % len(channels)
 	ch := channels[idx]
 	return ch, idx

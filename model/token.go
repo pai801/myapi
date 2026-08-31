@@ -91,12 +91,19 @@ func (t *Token) Insert() error {
 func (t *Token) Update() error {
 	var err error
 	err = DB.Model(t).Select("name", "status", "models", "subnet", "model_mapping", "group").Updates(t).Error
+	if err == nil {
+		// key 不在 Select 列表中，本路径不会修改 key，删旧 key 即可
+		_ = CacheInvalidateTokenByKey(t.Key)
+	}
 	return err
 }
 
 func (t *Token) Delete() error {
 	var err error
 	err = DB.Delete(t).Error
+	if err == nil {
+		_ = CacheInvalidateTokenByKey(t.Key)
+	}
 	return err
 }
 

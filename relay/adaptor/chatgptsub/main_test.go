@@ -2,20 +2,39 @@ package chatgptsub
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pai801/myapi/common"
 	"github.com/pai801/myapi/common/ctxkey"
+	dbmodel "github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/relay/meta"
 	"github.com/pai801/myapi/relay/model"
 	"github.com/pai801/myapi/relay/relaymode"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
+
+// TestMain 为包级测试初始化内存 DB：流式失败用例经生产 defer 上报后会异步触发
+// CheckAndDisable → model.GetChannelById，无 DB 时 gorm 全局为 nil 会 panic；
+// 内存库查无该渠道即优雅返回，与 model 包既有测试做法一致
+func TestMain(m *testing.M) {
+	common.UsingSQLite = true
+	db, err := gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{})
+	if err != nil {
+		panic("failed to open in-memory test db: " + err.Error())
+	}
+	dbmodel.DB = db
+	os.Exit(m.Run())
+}
 
 func setupGin() (*gin.Context, *httptest.ResponseRecorder) {
 	gin.SetMode(gin.TestMode)
@@ -817,4 +836,193 @@ func TestSSEStream_ChatCompletions_ErrorEvent(t *testing.T) {
 	assert.Contains(t, output, `"Something went wrong"`)
 	assert.Contains(t, output, `"internal_error"`)
 	assert.Contains(t, output, "[DONE]")
+}
+
+// 上游 response.completed 后不发 [DONE] 直接 EOF，网关仍须补发 [DONE] 且只发一次
+func TestSSEStream_ChatCompletions_CompletedNoDone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	sseData := []string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_no_done","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"hi"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_no_done","model":"gpt-4o","output":[],"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+		``,
+	}
+
+	streamStr := strings.Join(sseData, "\n")
+
+	c, w := setupGin()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(streamStr)),
+	}
+
+	m := testMeta()
+	m.IsStream = true
+	m.ActualModelName = "gpt-4o"
+
+	adpt := &Adaptor{}
+	usage, errWithCode := adpt.DoResponse(c, resp, m)
+	require.Nil(t, errWithCode)
+	require.NotNil(t, usage)
+
+		output := w.Body.String()
+	t.Logf("SSE completed-no-done output:\n%s", output)
+
+	assert.Contains(t, output, `"finish_reason":"stop"`)
+	assert.Equal(t, 1, strings.Count(output, "data: [DONE]"), "expected exactly one [DONE]")
+}
+
+// errReader 模拟上游流式传输中途异常断开（非 EOF，如连接重置）
+type errReader struct {
+	err error
+}
+
+func (r errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// 上游流读取异常（非 EOF）且未产出任何内容时，客户端必须收到带错误码的错误 delta 而非裸 [DONE]，
+// 否则会把失败误判为正常完成而不重试
+func TestSSEStream_ChatCompletions_StreamReadError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c, w := setupGin()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(errReader{err: errors.New("connection reset by peer")}),
+	}
+
+	m := testMeta()
+	m.IsStream = true
+	m.ActualModelName = "gpt-4o"
+
+	adpt := &Adaptor{}
+	usage, errWithCode := adpt.DoResponse(c, resp, m)
+	require.NotNil(t, errWithCode, "stream read error should be reported to caller")
+	assert.Nil(t, usage)
+
+	output := w.Body.String()
+	t.Logf("SSE stream-read-error output:\n%s", output)
+
+	// 必须携带错误 delta，错误码与返回的 ErrorWrapper 一致
+	assert.Contains(t, output, `"error"`)
+	assert.Contains(t, output, `"code":"stream_read_error"`)
+	assert.Contains(t, output, `"message":"connection reset by peer"`)
+	// 失败流不能出现正常完成的 finish_reason
+	assert.NotContains(t, output, `"finish_reason":"stop"`)
+	// 与 error 事件处理一致：错误 delta 后仍补发 [DONE] 收尾，且只发一次
+	assert.Equal(t, 1, strings.Count(output, "data: [DONE]"), "expected exactly one [DONE]")
+}
+
+// 部分内容下发后上游异常断流（非 EOF）：不得写 finish_reason:"stop" 伪装正常完成，
+// 客户端必须收到错误 delta
+func TestSSEStream_ChatCompletions_PartialThenError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 注意：读错误注入点之前的事件必须以空行正常终止，否则该事件会被丢弃、直接以错误返回
+	sseData := []string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_partial","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"partial "}`,
+		``,
+		``,
+	}
+
+	streamStr := strings.Join(sseData, "\n")
+
+	c, w := setupGin()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(io.MultiReader(
+			strings.NewReader(streamStr),
+			errReader{err: errors.New("connection reset by peer")},
+		)),
+	}
+
+	m := testMeta()
+	m.IsStream = true
+	m.ActualModelName = "gpt-4o"
+
+	adpt := &Adaptor{}
+	usage, errWithCode := adpt.DoResponse(c, resp, m)
+	require.NotNil(t, errWithCode, "stream read error should be reported to caller")
+	assert.Nil(t, usage)
+
+	output := w.Body.String()
+	t.Logf("SSE partial-then-error output:\n%s", output)
+
+	// 部分内容已正常下发
+	assert.Contains(t, output, `"content":"partial "`)
+	// 必须带错误 delta，且不得出现正常完成的 finish_reason
+	assert.Contains(t, output, `"code":"stream_read_error"`)
+	assert.NotContains(t, output, `"finish_reason":"stop"`)
+	assert.Equal(t, 1, strings.Count(output, "data: [DONE]"), "expected exactly one [DONE]")
+}
+
+// response.completed 处理完毕后连接才异常断开：响应已事实完成，
+// 不得补发误导性的 stream_read_error 错误 delta，仅按 completed-no-done 逻辑补发 [DONE]
+func TestSSEStream_ChatCompletions_CompletedThenError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	sseData := []string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_done_err","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"hi"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_done_err","model":"gpt-4o","output":[],"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+		// 末尾空行终止 completed 事件，随后注入读错误（模拟上游发完 completed 未发 [DONE] 即断连）
+		``,
+		``,
+	}
+
+	streamStr := strings.Join(sseData, "\n")
+
+	c, w := setupGin()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(io.MultiReader(
+			strings.NewReader(streamStr),
+			errReader{err: errors.New("connection reset by peer")},
+		)),
+	}
+
+	m := testMeta()
+	m.IsStream = true
+	m.ActualModelName = "gpt-4o"
+
+	adpt := &Adaptor{}
+	usage, errWithCode := adpt.DoResponse(c, resp, m)
+	// 上游断流错误仍上报调用方（渠道统计/重试），但不影响已事实完成的客户端流
+	require.NotNil(t, errWithCode)
+	require.NotNil(t, usage)
+	assert.Equal(t, 1, usage.PromptTokens)
+	assert.Equal(t, 2, usage.CompletionTokens)
+
+	output := w.Body.String()
+	t.Logf("SSE completed-then-error output:\n%s", output)
+
+	// completed 的正常 finish 已写
+	assert.Contains(t, output, `"finish_reason":"stop"`)
+	// 不得补发误导性错误 delta
+	assert.NotContains(t, output, `"stream_read_error"`)
+	assert.NotContains(t, output, `"error"`)
+	// 仍补发恰好一个 [DONE]
+	assert.Equal(t, 1, strings.Count(output, "data: [DONE]"), "expected exactly one [DONE]")
 }

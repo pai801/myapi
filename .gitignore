@@ -10,6 +10,7 @@ data
 /web/node_modules
 cmd.md
 .env
+.jwt_secret
 /myapi
 temp
 .DS_Store

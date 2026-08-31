@@ -33,7 +33,12 @@ const OperationSetting = () => {
           item.key === 'CompletionRatio' ||
           item.key === 'ModelEndpointTypes'
         ) {
-          item.value = JSON.stringify(JSON.parse(item.value), null, 2);
+          try {
+            item.value = JSON.stringify(JSON.parse(item.value), null, 2);
+          } catch (e) {
+            // 解析失败时保留原始字符串展示，避免页面空白
+            console.warn(`option ${item.key} is not valid JSON:`, e.message);
+          }
         }
         if (item.value === '{}') {
           item.value = '';

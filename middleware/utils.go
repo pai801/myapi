@@ -64,7 +64,9 @@ func isModelInList(modelName string, models string) bool {
 	modelList := strings.Split(models, ",")
 	for _, alias := range modelList {
 		simplifiedAlias := model.SimplifyModelName(alias)
-		if simplified == simplifiedAlias || strings.HasPrefix(simplifiedAlias, simplified) {
+		// 必须精确匹配：若允许名以请求名为前缀（HasPrefix(alias, request)），
+		// 令牌仅允许 o3-mini 时可越权请求 o3 等更贵模型；反向前缀同理
+		if simplified == simplifiedAlias {
 			return true
 		}
 	}

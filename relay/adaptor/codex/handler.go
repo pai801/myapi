@@ -315,18 +315,33 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 func readSSEEvent(r *bufio.Reader, maxBytes int) (sseEvent, error) {
 	var event sseEvent
 	var dataLines []string
+	var lineBuf []byte
 	for {
-		line, err := r.ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return sseEvent{}, err
-		}
-		if len(line) > 0 {
-			// RawSize 包含换行符，作为安全上限使用，略大于实际 wire bytes。
-			event.RawSize += len(line)
-			if event.RawSize > maxBytes {
-				return sseEvent{}, fmt.Errorf("sse event too large: %d > %d", event.RawSize, maxBytes)
+		var isEOF bool
+		for {
+			// 用 ReadSlice 按内部缓冲分片读取并逐片做配额检查：ReadString 会在遇到 \n 前
+			// 无界累积内存（配额只在整行读完后才生效），分片读取保证内存上界为 maxBytes
+			frag, ferr := r.ReadSlice('\n')
+			if len(frag) > 0 {
+				// RawSize 包含换行符，作为安全上限使用，略大于实际 wire bytes。
+				event.RawSize += len(frag)
+				if event.RawSize > maxBytes {
+					return sseEvent{}, fmt.Errorf("sse event too large: %d > %d", event.RawSize, maxBytes)
+				}
+				lineBuf = append(lineBuf, frag...)
 			}
+			if errors.Is(ferr, bufio.ErrBufferFull) {
+				// 分片已满但行未结束，继续读下一段
+				continue
+			}
+			if ferr != nil && !errors.Is(ferr, io.EOF) {
+				return sseEvent{}, ferr
+			}
+			isEOF = errors.Is(ferr, io.EOF)
+			break
 		}
+		line := string(lineBuf)
+		lineBuf = lineBuf[:0]
 		trimmed := strings.TrimRight(line, "\r\n")
 		if trimmed == "" {
 			if event.Event != "" || len(dataLines) > 0 {
@@ -334,13 +349,13 @@ func readSSEEvent(r *bufio.Reader, maxBytes int) (sseEvent, error) {
 				event.Done = event.Data == done
 				return event, nil
 			}
-			if errors.Is(err, io.EOF) {
+			if isEOF {
 				return sseEvent{}, io.EOF
 			}
 			continue
 		}
 		if strings.HasPrefix(trimmed, ":") {
-			if errors.Is(err, io.EOF) {
+			if isEOF {
 				return sseEvent{}, io.ErrUnexpectedEOF
 			}
 			continue
@@ -360,7 +375,7 @@ func readSSEEvent(r *bufio.Reader, maxBytes int) (sseEvent, error) {
 				}
 			}
 		}
-		if errors.Is(err, io.EOF) {
+		if isEOF {
 			if event.Event != "" || len(dataLines) > 0 {
 				event.Data = strings.Join(dataLines, "\n")
 				event.Done = event.Data == done

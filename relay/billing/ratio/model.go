@@ -17,6 +17,7 @@ const (
 )
 
 var modelRatioLock sync.RWMutex
+var completionRatioLock sync.RWMutex
 
 // ModelRatio
 // https://platform.openai.com/docs/models/model-endpoint-compatibility
@@ -26,97 +27,97 @@ var modelRatioLock sync.RWMutex
 // 1 === ￥0.014 / 1k tokens
 var ModelRatio = map[string]float64{
 	// https://openai.com/pricing
-	"gpt-4":                   15,
-	"gpt-4-0314":              15,
-	"gpt-4-0613":              15,
-	"gpt-4-32k":               30,
-	"gpt-4-32k-0314":          30,
-	"gpt-4-32k-0613":          30,
-	"gpt-4-1106-preview":      5,     // $0.01 / 1K tokens
-	"gpt-4-0125-preview":      5,     // $0.01 / 1K tokens
-	"gpt-4-turbo-preview":     5,     // $0.01 / 1K tokens
-	"gpt-4-turbo":             5,     // $0.01 / 1K tokens
-	"gpt-4-turbo-2024-04-09":  5,     // $0.01 / 1K tokens
-	"gpt-4o":                  2.5,   // $0.005 / 1K tokens
-	"chatgpt-4o-latest":       2.5,   // $0.005 / 1K tokens
-	"gpt-4o-2024-05-13":       2.5,   // $0.005 / 1K tokens
-	"gpt-4o-2024-08-06":       1.25,  // $0.0025 / 1K tokens
-	"gpt-4o-2024-11-20":       1.25,  // $0.0025 / 1K tokens
-	"gpt-4o-mini":             0.075, // $0.00015 / 1K tokens
-	"gpt-4o-mini-2024-07-18":  0.075, // $0.00015 / 1K tokens
-	"gpt-4-vision-preview":    5,     // $0.01 / 1K tokens
-	"gpt-3.5-turbo":           0.25,  // $0.0005 / 1K tokens
-	"gpt-3.5-turbo-0301":      0.75,
-	"gpt-3.5-turbo-0613":      0.75,
-	"gpt-3.5-turbo-16k":       1.5, // $0.003 / 1K tokens
-	"gpt-3.5-turbo-16k-0613":  1.5,
-	"gpt-3.5-turbo-instruct":  0.75, // $0.0015 / 1K tokens
-	"gpt-3.5-turbo-1106":      0.5,  // $0.001 / 1K tokens
-	"gpt-3.5-turbo-0125":      0.25, // $0.0005 / 1K tokens
-	"o1":                      7.5,  // $15.00 / 1M input tokens
-	"o1-2024-12-17":           7.5,
-	"o1-preview":              7.5, // $15.00 / 1M input tokens
-	"o1-preview-2024-09-12":   7.5,
-	"o1-mini":                 1.5, // $3.00 / 1M input tokens
-	"o1-mini-2024-09-12":      1.5,
-	"o3-mini":                 0.55,  // $1.10 / 1M input tokens
-	"o3-mini-2025-01-31":      0.55,
-	"davinci-002":             1,   // $0.002 / 1K tokens
-	"babbage-002":             0.2, // $0.0004 / 1K tokens
-	"text-ada-001":            0.2,
-	"text-babbage-001":        0.25,
-	"text-curie-001":          1,
-	"text-davinci-002":        10,
-	"text-davinci-003":        10,
-	"text-davinci-edit-001":   10,
-	"code-davinci-edit-001":   10,
-	"whisper-1":               15,  // $0.006 / minute -> $0.006 / 150 words -> $0.006 / 200 tokens -> $0.03 / 1k tokens
-	"whisper-large-v3":        15,
-	"whisper-large-v3-turbo":  10,  // ~$0.04 / hour, cheaper
+	"gpt-4":                      15,
+	"gpt-4-0314":                 15,
+	"gpt-4-0613":                 15,
+	"gpt-4-32k":                  30,
+	"gpt-4-32k-0314":             30,
+	"gpt-4-32k-0613":             30,
+	"gpt-4-1106-preview":         5,     // $0.01 / 1K tokens
+	"gpt-4-0125-preview":         5,     // $0.01 / 1K tokens
+	"gpt-4-turbo-preview":        5,     // $0.01 / 1K tokens
+	"gpt-4-turbo":                5,     // $0.01 / 1K tokens
+	"gpt-4-turbo-2024-04-09":     5,     // $0.01 / 1K tokens
+	"gpt-4o":                     2.5,   // $0.005 / 1K tokens
+	"chatgpt-4o-latest":          2.5,   // $0.005 / 1K tokens
+	"gpt-4o-2024-05-13":          2.5,   // $0.005 / 1K tokens
+	"gpt-4o-2024-08-06":          1.25,  // $0.0025 / 1K tokens
+	"gpt-4o-2024-11-20":          1.25,  // $0.0025 / 1K tokens
+	"gpt-4o-mini":                0.075, // $0.00015 / 1K tokens
+	"gpt-4o-mini-2024-07-18":     0.075, // $0.00015 / 1K tokens
+	"gpt-4-vision-preview":       5,     // $0.01 / 1K tokens
+	"gpt-3.5-turbo":              0.25,  // $0.0005 / 1K tokens
+	"gpt-3.5-turbo-0301":         0.75,
+	"gpt-3.5-turbo-0613":         0.75,
+	"gpt-3.5-turbo-16k":          1.5, // $0.003 / 1K tokens
+	"gpt-3.5-turbo-16k-0613":     1.5,
+	"gpt-3.5-turbo-instruct":     0.75, // $0.0015 / 1K tokens
+	"gpt-3.5-turbo-1106":         0.5,  // $0.001 / 1K tokens
+	"gpt-3.5-turbo-0125":         0.25, // $0.0005 / 1K tokens
+	"o1":                         7.5,  // $15.00 / 1M input tokens
+	"o1-2024-12-17":              7.5,
+	"o1-preview":                 7.5, // $15.00 / 1M input tokens
+	"o1-preview-2024-09-12":      7.5,
+	"o1-mini":                    1.5, // $3.00 / 1M input tokens
+	"o1-mini-2024-09-12":         1.5,
+	"o3-mini":                    0.55, // $1.10 / 1M input tokens
+	"o3-mini-2025-01-31":         0.55,
+	"davinci-002":                1,   // $0.002 / 1K tokens
+	"babbage-002":                0.2, // $0.0004 / 1K tokens
+	"text-ada-001":               0.2,
+	"text-babbage-001":           0.25,
+	"text-curie-001":             1,
+	"text-davinci-002":           10,
+	"text-davinci-003":           10,
+	"text-davinci-edit-001":      10,
+	"code-davinci-edit-001":      10,
+	"whisper-1":                  15, // $0.006 / minute -> $0.006 / 150 words -> $0.006 / 200 tokens -> $0.03 / 1k tokens
+	"whisper-large-v3":           15,
+	"whisper-large-v3-turbo":     10, // ~$0.04 / hour, cheaper
 	"distil-whisper-large-v3-en": 10,
-	"tts-1":                   7.5, // $0.015 / 1K characters
-	"tts-1-1106":              7.5,
-	"tts-1-hd":                15, // $0.030 / 1K characters
-	"tts-1-hd-1106":           15,
-	"davinci":                 10,
-	"curie":                   10,
-	"babbage":                 10,
-	"ada":                     10,
-	"text-embedding-ada-002":  0.05,
-	"text-embedding-3-small":  0.01,
-	"text-embedding-3-large":  0.065,
-	"text-search-ada-doc-001": 10,
-	"text-moderation-stable":  0.1,
-	"text-moderation-latest":  0.1,
+	"tts-1":                      7.5, // $0.015 / 1K characters
+	"tts-1-1106":                 7.5,
+	"tts-1-hd":                   15, // $0.030 / 1K characters
+	"tts-1-hd-1106":              15,
+	"davinci":                    10,
+	"curie":                      10,
+	"babbage":                    10,
+	"ada":                        10,
+	"text-embedding-ada-002":     0.05,
+	"text-embedding-3-small":     0.01,
+	"text-embedding-3-large":     0.065,
+	"text-search-ada-doc-001":    10,
+	"text-moderation-stable":     0.1,
+	"text-moderation-latest":     0.1,
 	// https://openai.com/pricing (2026)
-	"gpt-4.1":            1.0,   // $2.00 / 1M input tokens
-	"gpt-4.1-mini":       0.2,   // $0.40 / 1M input tokens
-	"gpt-4.1-nano":       0.05,  // $0.10 / 1M input tokens
-	"gpt-5":              0.625, // $1.25 / 1M input tokens
-	"gpt-5-2025-08-07":   0.625,
-	"gpt-5-2025-11-20":   0.625,
-	"gpt-5-mini":         0.075, // $0.15 / 1M input tokens
-	"gpt-5-nano":         0.025, // $0.05 / 1M input tokens
-	"gpt-5-chat":         0.375, // $0.75 / 1M input tokens
-	"gpt-5-pro":          6.25,  // $12.50 / 1M input tokens
-	"gpt-5.1":            0.4375, // $0.875 / 1M input tokens
-	"gpt-5.1-chat":       0.4375,
-	"gpt-5.2":            0.375, // $0.75 / 1M input tokens
-	"gpt-5.2-chat":       0.375,
-	"gpt-5.3-chat":       0.3,   // $0.60 / 1M input tokens
-	"gpt-5.4":            0.5,   // $1.00 / 1M input tokens
-	"gpt-5.4-mini":       0.05,  // $0.10 / 1M input tokens
-	"gpt-5.4-nano":       0.025, // $0.05 / 1M input tokens
-	"gpt-5.5":            2.5,   // $5.00 / 1M input tokens
-	"gpt-5.5-pro":        15.0,  // $30.00 / 1M input tokens
-	"o3":                 5.0, // $10.00 / 1M input tokens
-	"o3-pro":             75.0,  // $150.00 / 1M input tokens
-	"o4-mini":            0.55,  // $1.10 / 1M input tokens
-	"o1-pro":             75.0,  // $150.00 / 1M input tokens
-	"gpt-audio":          20.0,  // $40.00 / 1M input tokens
-	"gpt-audio-mini":     2.5,   // $5.00 / 1M input tokens
-	"dall-e-2":           0.02 * USD, // $0.016 - $0.020 / image
-	"dall-e-3":           0.04 * USD, // $0.040 - $0.120 / image
+	"gpt-4.1":          1.0,   // $2.00 / 1M input tokens
+	"gpt-4.1-mini":     0.2,   // $0.40 / 1M input tokens
+	"gpt-4.1-nano":     0.05,  // $0.10 / 1M input tokens
+	"gpt-5":            0.625, // $1.25 / 1M input tokens
+	"gpt-5-2025-08-07": 0.625,
+	"gpt-5-2025-11-20": 0.625,
+	"gpt-5-mini":       0.075,  // $0.15 / 1M input tokens
+	"gpt-5-nano":       0.025,  // $0.05 / 1M input tokens
+	"gpt-5-chat":       0.375,  // $0.75 / 1M input tokens
+	"gpt-5-pro":        6.25,   // $12.50 / 1M input tokens
+	"gpt-5.1":          0.4375, // $0.875 / 1M input tokens
+	"gpt-5.1-chat":     0.4375,
+	"gpt-5.2":          0.375, // $0.75 / 1M input tokens
+	"gpt-5.2-chat":     0.375,
+	"gpt-5.3-chat":     0.3,        // $0.60 / 1M input tokens
+	"gpt-5.4":          0.5,        // $1.00 / 1M input tokens
+	"gpt-5.4-mini":     0.05,       // $0.10 / 1M input tokens
+	"gpt-5.4-nano":     0.025,      // $0.05 / 1M input tokens
+	"gpt-5.5":          2.5,        // $5.00 / 1M input tokens
+	"gpt-5.5-pro":      15.0,       // $30.00 / 1M input tokens
+	"o3":               5.0,        // $10.00 / 1M input tokens
+	"o3-pro":           75.0,       // $150.00 / 1M input tokens
+	"o4-mini":          0.55,       // $1.10 / 1M input tokens
+	"o1-pro":           75.0,       // $150.00 / 1M input tokens
+	"gpt-audio":        20.0,       // $40.00 / 1M input tokens
+	"gpt-audio-mini":   2.5,        // $5.00 / 1M input tokens
+	"dall-e-2":         0.02 * USD, // $0.016 - $0.020 / image
+	"dall-e-3":         0.04 * USD, // $0.040 - $0.120 / image
 	// https://docs.anthropic.com/en/docs/about-claude/models
 	"claude-instant-1.2":         0.8 / 1000 * USD,
 	"claude-2.0":                 8.0 / 1000 * USD,
@@ -130,12 +131,12 @@ var ModelRatio = map[string]float64{
 	"claude-3-5-sonnet-latest":   3.0 / 1000 * USD,
 	"claude-3-opus-20240229":     15.0 / 1000 * USD,
 	// https://docs.anthropic.com/en/docs/about-claude/models (2026)
-	"claude-opus-4-20250514":     15.0 / 1000 * USD, // $15.00 / 1M input tokens
-	"claude-sonnet-4-20250514":   3.0 / 1000 * USD,  // $3.00 / 1M input tokens
-	"claude-opus-4-8":            15.0 / 1000 * USD, // $15.00 / 1M input tokens
-	"claude-sonnet-4-6":          3.0 / 1000 * USD,  // $3.00 / 1M input tokens
-	"claude-haiku-4-5-20251001":  0.8 / 1000 * USD,  // $0.80 / 1M input tokens
-	"claude-fable-5":             37.5 / 1000 * USD, // $37.50 / 1M input tokens
+	"claude-opus-4-20250514":    15.0 / 1000 * USD, // $15.00 / 1M input tokens
+	"claude-sonnet-4-20250514":  3.0 / 1000 * USD,  // $3.00 / 1M input tokens
+	"claude-opus-4-8":           15.0 / 1000 * USD, // $15.00 / 1M input tokens
+	"claude-sonnet-4-6":         3.0 / 1000 * USD,  // $3.00 / 1M input tokens
+	"claude-haiku-4-5-20251001": 0.8 / 1000 * USD,  // $0.80 / 1M input tokens
+	"claude-fable-5":            37.5 / 1000 * USD, // $37.50 / 1M input tokens
 	// https://cloud.baidu.com/doc/WENXINWORKSHOP/s/hlrk4akp7
 	"ERNIE-4.0-8K":       0.120 * RMB,
 	"ERNIE-3.5-8K":       0.012 * RMB,
@@ -173,15 +174,15 @@ var ModelRatio = map[string]float64{
 	"gemini-2.0-flash-thinking-exp-01-21": 0.075 * MILLI_USD,
 	"gemini-2.0-pro-exp-02-05":            1.25 * MILLI_USD,
 	// https://ai.google.dev/pricing (2026)
-	"gemini-2.5-pro":                       1.25 * MILLI_USD,  // $1.25 / 1M input tokens
-	"gemini-2.5-flash":                     0.15 * MILLI_USD,  // $0.15 / 1M input tokens
-	"gemini-2.5-flash-lite":                0.075 * MILLI_USD, // $0.075 / 1M input tokens
-	"gemini-2.5-flash-preview-05-20":       0.15 * MILLI_USD,  // same as 2.5-flash
-	"gemini-3-flash-preview":              0.15 * MILLI_USD,   // $0.15 / 1M input tokens
-	"gemini-3.1-pro-preview":              1.25 * MILLI_USD,   // $1.25 / 1M input tokens
-	"gemini-3.5-flash":                    0.15 * MILLI_USD,   // $0.15 / 1M input tokens
-	"gemini-embedding-001":                0.05 / 1000 * USD,  // $0.05 / 1M input tokens
-	"aqa":                                 1,
+	"gemini-2.5-pro":                 1.25 * MILLI_USD,  // $1.25 / 1M input tokens
+	"gemini-2.5-flash":               0.15 * MILLI_USD,  // $0.15 / 1M input tokens
+	"gemini-2.5-flash-lite":          0.075 * MILLI_USD, // $0.075 / 1M input tokens
+	"gemini-2.5-flash-preview-05-20": 0.15 * MILLI_USD,  // same as 2.5-flash
+	"gemini-3-flash-preview":         0.15 * MILLI_USD,  // $0.15 / 1M input tokens
+	"gemini-3.1-pro-preview":         1.25 * MILLI_USD,  // $1.25 / 1M input tokens
+	"gemini-3.5-flash":               0.15 * MILLI_USD,  // $0.15 / 1M input tokens
+	"gemini-embedding-001":           0.05 / 1000 * USD, // $0.05 / 1M input tokens
+	"aqa":                            1,
 	// https://open.bigmodel.cn/pricing
 	"glm-zero-preview": 0.01 * RMB,
 	"glm-4-plus":       0.05 * RMB,
@@ -286,8 +287,8 @@ var ModelRatio = map[string]float64{
 	"ali-stable-diffusion-xl":       8.00,
 	"ali-stable-diffusion-v1.5":     8.00,
 	"wanx-v1":                       8.00,
-	"deepseek-r1(17)":                   0.002 * RMB, // Ali channel RMB pricing
-	"deepseek-v3(17)":                   0.001 * RMB, // Ali channel RMB pricing
+	"deepseek-r1(17)":               0.002 * RMB, // Ali channel RMB pricing
+	"deepseek-v3(17)":               0.001 * RMB, // Ali channel RMB pricing
 	"deepseek-r1-distill-qwen-1.5b": 0.001 * RMB,
 	"deepseek-r1-distill-qwen-7b":   0.0005 * RMB,
 	"deepseek-r1-distill-qwen-14b":  0.001 * RMB,
@@ -341,16 +342,16 @@ var ModelRatio = map[string]float64{
 	"mistral-large-latest":  8.0 / 1000 * USD,
 	"mistral-embed":         0.1 / 1000 * USD,
 	// https://docs.mistral.ai/platform/pricing/ (2026)
-	"mistral-large-2603":            6.0 / 1000 * USD, // ~$6.00 / 1M input
-	"mistral-small-2603":            1.0 / 1000 * USD, // ~$1.00 / 1M input
-	"codestral-2603":                1.0 / 1000 * USD, // coding model
-	"codestral-latest":              1.0 / 1000 * USD,
-	"pixtral-large-2603":            6.0 / 1000 * USD, // vision model
-	"pixtral-large-latest":          6.0 / 1000 * USD,
-	"ministral-3b-2603":             0.04 / 1000 * USD,
-	"ministral-8b-2603":             0.1 / 1000 * USD,
-	"ministral-14b-2603":            0.2 / 1000 * USD,
-	"mistral-embed-2603":            0.1 / 1000 * USD,
+	"mistral-large-2603":   6.0 / 1000 * USD, // ~$6.00 / 1M input
+	"mistral-small-2603":   1.0 / 1000 * USD, // ~$1.00 / 1M input
+	"codestral-2603":       1.0 / 1000 * USD, // coding model
+	"codestral-latest":     1.0 / 1000 * USD,
+	"pixtral-large-2603":   6.0 / 1000 * USD, // vision model
+	"pixtral-large-latest": 6.0 / 1000 * USD,
+	"ministral-3b-2603":    0.04 / 1000 * USD,
+	"ministral-8b-2603":    0.1 / 1000 * USD,
+	"ministral-14b-2603":   0.2 / 1000 * USD,
+	"mistral-embed-2603":   0.1 / 1000 * USD,
 	// https://wow.groq.com/#:~:text=inquiries%C2%A0here.-,Model,-Current%20Speed
 	"gemma-7b-it":                           0.07 / 1000000 * USD,
 	"gemma2-9b-it":                          0.20 / 1000000 * USD,
@@ -368,15 +369,15 @@ var ModelRatio = map[string]float64{
 	"llama3-groq-8b-8192-tool-use-preview":  0.19 / 1000000 * USD,
 	"mixtral-8x7b-32768":                    0.24 / 1000000 * USD,
 	// Groq 2026 models
-	"llama-3.3-70b-versatile":                  0.59 / 1000000 * USD,
-	"openai/gpt-oss-120b":                      0.15 / 1000000 * USD,
-	"openai/gpt-oss-20b":                       0.075 / 1000000 * USD,
+	"llama-3.3-70b-versatile":                   0.59 / 1000000 * USD,
+	"openai/gpt-oss-120b":                       0.15 / 1000000 * USD,
+	"openai/gpt-oss-20b":                        0.075 / 1000000 * USD,
 	"meta-llama/llama-4-scout-17b-16e-instruct": 0.11 / 1000000 * USD,
-	"qwen/qwen3-32b":                           0.29 / 1000000 * USD,
-	"qwen/qwen3.6-27b":                         0.60 / 1000000 * USD,
-	"openai/gpt-oss-safeguard-20b":             0.075 / 1000000 * USD,
-	"meta-llama/llama-prompt-guard-2-86m":      0.04 / 1000000 * USD,
-	"deepseek-r1-distill-llama-70b-specdec":    0.59 / 1000000 * USD,
+	"qwen/qwen3-32b":                            0.29 / 1000000 * USD,
+	"qwen/qwen3.6-27b":                          0.60 / 1000000 * USD,
+	"openai/gpt-oss-safeguard-20b":              0.075 / 1000000 * USD,
+	"meta-llama/llama-prompt-guard-2-86m":       0.04 / 1000000 * USD,
+	"deepseek-r1-distill-llama-70b-specdec":     0.59 / 1000000 * USD,
 
 	// https://platform.lingyiwanwu.com/docs#-计费单元
 	"yi-34b-chat-0205": 2.5 / 1000 * RMB,
@@ -402,36 +403,36 @@ var ModelRatio = map[string]float64{
 	"command-r":             0.5 / 1000 * USD,
 	"command-r-plus":        3.0 / 1000 * USD,
 	// https://platform.deepseek.com/api-docs/pricing/ (2026)
-	"deepseek-chat":      0.14 * MILLI_USD,
-	"deepseek-reasoner":  0.55 * MILLI_USD,
-	"deepseek-v4-pro":    0.75 * MILLI_USD,  // ~$0.75 / 1M input
-	"deepseek-v4-flash":  0.14 * MILLI_USD,  // ~$0.14 / 1M input
-	"deepseek-v3":        0.14 * MILLI_USD,  // ~$0.14 / 1M input
-	"deepseek-v3.1":      0.14 * MILLI_USD,  // ~$0.14 / 1M input
-	"deepseek-r1":        0.55 * MILLI_USD,  // ~$0.55 / 1M input
-	"deepseek-vl2":       0.14 * MILLI_USD,  // vision model
-	"deepseek-janus-pro-7b": 0.02 * USD,     // ~$0.02 / image
+	"deepseek-chat":         0.14 * MILLI_USD,
+	"deepseek-reasoner":     0.55 * MILLI_USD,
+	"deepseek-v4-pro":       0.75 * MILLI_USD, // ~$0.75 / 1M input
+	"deepseek-v4-flash":     0.14 * MILLI_USD, // ~$0.14 / 1M input
+	"deepseek-v3":           0.14 * MILLI_USD, // ~$0.14 / 1M input
+	"deepseek-v3.1":         0.14 * MILLI_USD, // ~$0.14 / 1M input
+	"deepseek-r1":           0.55 * MILLI_USD, // ~$0.55 / 1M input
+	"deepseek-vl2":          0.14 * MILLI_USD, // vision model
+	"deepseek-janus-pro-7b": 0.02 * USD,       // ~$0.02 / image
 	// https://www.deepl.com/pro?cta=header-prices
 	"deepl-zh": 25.0 / 1000 * USD,
 	"deepl-en": 25.0 / 1000 * USD,
 	"deepl-ja": 25.0 / 1000 * USD,
 	// https://console.x.ai/ (2026)
-	"grok-beta":            5.0 / 1000 * USD, // $5.00 / 1M input tokens
-	"grok-2":               2.0 / 1000 * USD, // $2.00 / 1M input tokens
-	"grok-2-latest":        2.0 / 1000 * USD,
-	"grok-2-1212":          2.0 / 1000 * USD,
-	"grok-2-vision":        2.0 / 1000 * USD,
-	"grok-2-vision-latest": 2.0 / 1000 * USD,
-	"grok-2-vision-1212":   2.0 / 1000 * USD,
-	"grok-vision-beta":     5.0 / 1000 * USD,
-	"grok-3":               3.0 / 1000 * USD, // $3.00 / 1M input tokens
-	"grok-4-fast-reasoning":     3.0 / 1000 * USD, // $3.00 / 1M input
-	"grok-4-fast-non-reasoning": 2.0 / 1000 * USD, // $2.00 / 1M input
+	"grok-beta":                   5.0 / 1000 * USD, // $5.00 / 1M input tokens
+	"grok-2":                      2.0 / 1000 * USD, // $2.00 / 1M input tokens
+	"grok-2-latest":               2.0 / 1000 * USD,
+	"grok-2-1212":                 2.0 / 1000 * USD,
+	"grok-2-vision":               2.0 / 1000 * USD,
+	"grok-2-vision-latest":        2.0 / 1000 * USD,
+	"grok-2-vision-1212":          2.0 / 1000 * USD,
+	"grok-vision-beta":            5.0 / 1000 * USD,
+	"grok-3":                      3.0 / 1000 * USD, // $3.00 / 1M input tokens
+	"grok-4-fast-reasoning":       3.0 / 1000 * USD, // $3.00 / 1M input
+	"grok-4-fast-non-reasoning":   2.0 / 1000 * USD, // $2.00 / 1M input
 	"grok-4-1-fast-reasoning":     3.0 / 1000 * USD,
 	"grok-4-1-fast-non-reasoning": 2.0 / 1000 * USD,
-	"grok-4.3":             1.25 / 1000 * USD, // $1.25 / 1M input tokens
-	"grok-build-0.1":       1.0 / 1000 * USD,  // $1.00 / 1M input tokens
-	"grok-imagine-image":   0.02 * USD,         // $0.02 / image
+	"grok-4.3":                    1.25 / 1000 * USD, // $1.25 / 1M input tokens
+	"grok-build-0.1":              1.0 / 1000 * USD,  // $1.00 / 1M input tokens
+	"grok-imagine-image":          0.02 * USD,        // $0.02 / image
 	// replicate charges based on the number of generated images
 	// https://replicate.com/pricing
 	"black-forest-labs/flux-1.1-pro":                0.04 * USD,
@@ -718,20 +719,20 @@ var CompletionRatio = map[string]float64{
 	// whisper
 	"whisper-1": 0, // only count input tokens
 	// deepseek
-	"deepseek-chat":       0.28 / 0.14,
-	"deepseek-reasoner":   2.19 / 0.55,
-	"deepseek-v4-pro":     4.0 / 0.75,
-	"deepseek-v4-flash":   0.56 / 0.14,
-	"deepseek-v3":         1.10 / 0.14,
-	"deepseek-v3.1":       1.10 / 0.14,
-	"deepseek-r1":         2.19 / 0.55,
+	"deepseek-chat":     0.28 / 0.14,
+	"deepseek-reasoner": 2.19 / 0.55,
+	"deepseek-v4-pro":   4.0 / 0.75,
+	"deepseek-v4-flash": 0.56 / 0.14,
+	"deepseek-v3":       1.10 / 0.14,
+	"deepseek-v3.1":     1.10 / 0.14,
+	"deepseek-r1":       2.19 / 0.55,
 	// OpenAI o-series models (high output/input ratio)
-	"o3":        4,
-	"o3-pro":    4,
-	"o4-mini":   4,
-	"o1-pro":    4,
-	"o1":        4,
-	"o1-mini":   4,
+	"o3":         4,
+	"o3-pro":     4,
+	"o4-mini":    4,
+	"o1-pro":     4,
+	"o1":         4,
+	"o1-mini":    4,
 	"o1-preview": 4,
 	// GPT-5 series
 	"gpt-5":        8, // $10 / $1.25
@@ -795,6 +796,8 @@ func AddNewMissingRatio(oldRatio string) string {
 }
 
 func ModelRatio2JSONString() string {
+	modelRatioLock.RLock()
+	defer modelRatioLock.RUnlock()
 	jsonBytes, err := json.Marshal(ModelRatio)
 	if err != nil {
 		logger.Log.Errorf("error marshalling model ratio: " + err.Error())
@@ -849,11 +852,13 @@ func GetModelRatio(name string, channelType int) float64 {
 			}
 		}
 	}
-	logger.Log.Errorf("model ratio not found: %s", name)
+	logger.Log.Debugf("model ratio not found: %s", name)
 	return 1
 }
 
 func CompletionRatio2JSONString() string {
+	completionRatioLock.RLock()
+	defer completionRatioLock.RUnlock()
 	jsonBytes, err := json.Marshal(CompletionRatio)
 	if err != nil {
 		logger.Log.Errorf("error marshalling completion ratio: " + err.Error())
@@ -862,11 +867,15 @@ func CompletionRatio2JSONString() string {
 }
 
 func UpdateCompletionRatioByJSONString(jsonStr string) error {
+	completionRatioLock.Lock()
+	defer completionRatioLock.Unlock()
 	CompletionRatio = make(map[string]float64)
 	return json.Unmarshal([]byte(jsonStr), &CompletionRatio)
 }
 
 func GetCompletionRatio(name string, channelType int) float64 {
+	completionRatioLock.RLock()
+	defer completionRatioLock.RUnlock()
 	if strings.HasPrefix(name, "qwen-") && strings.HasSuffix(name, "-internet") {
 		name = strings.TrimSuffix(name, "-internet")
 	}

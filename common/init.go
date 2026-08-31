@@ -44,11 +44,17 @@ func Init() {
 		} else {
 			config.SessionSecret = os.Getenv("SESSION_SECRET")
 		}
+	} else {
+		logger.Log.Warnf("SESSION_SECRET is not set, using a random value per start; sessions will be invalidated on restart or across replicas, set SESSION_SECRET to keep them stable.")
 	}
 	if os.Getenv("JWT_SECRET") != "" {
 		config.JWTSecret = os.Getenv("JWT_SECRET")
 	} else if os.Getenv("SESSION_SECRET") != "" {
 		config.JWTSecret = config.SessionSecret
+	}
+	// 默认密钥是公开已知的，可被用来自签任意角色的 JWT 直接获得 root 权限，必须拒绝启动
+	if config.JWTSecret == "myapi-jwt-secret" {
+		logger.Log.Fatalf("JWT_SECRET is not set: refusing to start with the default secret, which allows anyone to forge admin JWTs. Set the JWT_SECRET environment variable, e.g. export JWT_SECRET=$(openssl rand -hex 32)")
 	}
 	if os.Getenv("SQLITE_PATH") != "" {
 		SQLitePath = os.Getenv("SQLITE_PATH")

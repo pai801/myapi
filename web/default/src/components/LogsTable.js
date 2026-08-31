@@ -136,6 +136,8 @@ const LogsTable = () => {
   const [jumpPage, setJumpPage] = useState('');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
+  // 搜索结果模式下禁用服务端翻页拉取，避免筛选数据混入搜索结果
+  const [searchMode, setSearchMode] = useState(false);
   const [logType, setLogType] = useState(0);
   const isAdminUser = isAdmin();
   const [selectedLogItem, setSelectedLogItem] = useState(null);
@@ -242,10 +244,11 @@ const LogsTable = () => {
 
   const handleEyeClick = async () => {
     if (!showStat) {
+      // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
       if (isAdminUser) {
-        await getLogStat();
+        await getLogStat().catch(() => {});
       } else {
-        await getLogSelfStat();
+        await getLogSelfStat().catch(() => {});
       }
     }
     setShowStat(!showStat);
@@ -256,37 +259,46 @@ const LogsTable = () => {
   };
 
   const loadLogs = async (startIdx) => {
-    let url = '';
-    let localStartTimestamp = Date.parse(start_timestamp) / 1000;
-    let localEndTimestamp = Date.parse(end_timestamp) / 1000;
-    if (isAdminUser) {
-      url = `/api/log/?p=${startIdx}&type=${logType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}`;
-    } else {
-      url = `/api/log/self/?p=${startIdx}&type=${logType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
-    }
-    const res = await API.get(url);
-    const { success, message, data, total } = res.data;
-    if (success) {
-      if (startIdx === 0) {
-        setLogs(data);
+    try {
+      let url = '';
+      let localStartTimestamp = Date.parse(start_timestamp) / 1000;
+      let localEndTimestamp = Date.parse(end_timestamp) / 1000;
+      if (isAdminUser) {
+        url = `/api/log/?p=${startIdx}&type=${logType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}`;
+      } else {
+        url = `/api/log/self/?p=${startIdx}&type=${logType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
       }
-      setPageData(data || []);
-      if (total !== undefined) {
-        setTotalLogs(total);
+      const res = await API.get(url);
+      const { success, message, data, total } = res.data;
+      if (success) {
+        if (startIdx === 0) {
+          setLogs(data);
+        }
+        setPageData(data || []);
+        if (total !== undefined) {
+          setTotalLogs(total);
+        }
+      } else {
+        showError(message);
       }
-    } else {
-      showError(message);
+    } finally {
+      // 复位必须放在 finally：初始加载/翻页/刷新任一环节失败都要解除表格遮罩
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const onPaginationChange = (e, { activePage }) => {
+    // 搜索结果模式下不重新拉取，避免筛选数据混入搜索结果
+    if (searchMode) return;
     setActivePage(activePage);
     setLoading(true);
-    loadLogs(activePage - 1);
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
+    loadLogs(activePage - 1).catch(() => {});
   };
 
   const handleJumpPage = () => {
+    // 搜索结果模式下不重新拉取，避免筛选数据混入搜索结果
+    if (searchMode) return;
     const pageNum = parseInt(jumpPage, 10);
     const total = Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE));
     if (isNaN(pageNum) || pageNum < 1 || pageNum > total) {
@@ -296,7 +308,8 @@ const LogsTable = () => {
     setJumpPage('');
     setActivePage(pageNum);
     setLoading(true);
-    loadLogs(pageNum - 1);
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
+    loadLogs(pageNum - 1).catch(() => {});
   };
 
   const refresh = async () => {
@@ -304,11 +317,17 @@ const LogsTable = () => {
     setActivePage(1);
     setTotalLogs(0);
     setPageData([]);
-    await loadLogs(0);
+    setSearchMode(false);
+    try {
+      await loadLogs(0);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    refresh().then();
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
+    refresh().then().catch(() => {});
   }, [logType]);
 
   // SSE 实时推送活跃请求（仅管理员）
@@ -357,25 +376,37 @@ const LogsTable = () => {
   }, [isAdminUser]);
 
   const searchLogs = async () => {
-    if (searchKeyword === '') {
-      // if keyword is blank, load files instead.
-      setActivePage(1);
-      setLoading(true);
-      loadLogs(0);
-      return;
+    // 防重复提交：上一次搜索未返回前忽略再次提交，避免较慢的旧响应覆盖新结果
+    if (searching) return;
+    try {
+      if (searchKeyword === '') {
+        // if keyword is blank, load files instead.
+        setSearchMode(false);
+        setActivePage(1);
+        setLoading(true);
+        // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
+        loadLogs(0).catch(() => {});
+        return;
+      }
+      setSearching(true);
+      setSearchMode(true);
+      // 管理员搜索全部用户日志（/api/log/self/search 固定按当前 userId 过滤）
+      const searchUrl = isAdminUser ? '/api/log/search' : '/api/log/self/search';
+      const res = await API.get(
+        `${searchUrl}?keyword=${encodeURIComponent(searchKeyword)}`
+      );
+      const { success, message, data } = res.data;
+      if (success) {
+        setLogs(data);
+        setPageData(data);
+        setTotalLogs(data.length);
+        setActivePage(1);
+      } else {
+        showError(message);
+      }
+    } finally {
+      setSearching(false);
     }
-    setSearching(true);
-    const res = await API.get(`/api/log/self/search?keyword=${searchKeyword}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      setLogs(data);
-      setPageData(data);
-      setTotalLogs(data.length);
-      setActivePage(1);
-    } else {
-      showError(message);
-    }
-    setSearching(false);
   };
 
   const handleKeywordChange = async (e, { value }) => {
@@ -512,10 +543,13 @@ const LogsTable = () => {
             </div>
           </>
         )}
+      </Form>
+      <Form onSubmit={searchLogs}>
         <Form.Input
           icon='search'
           placeholder={t('log.search')}
           value={searchKeyword}
+          loading={searching}
           onChange={(e, { value }) => setSearchKeyword(value)}
         />
       </Form>
@@ -790,52 +824,68 @@ const LogsTable = () => {
         <Button size='small' onClick={refresh} loading={loading}>
           {t('log.buttons.refresh')}
         </Button>
-        <span className='hide-on-mobile' style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-          {t('pagination.jump_to')}
-          <input
-            type='text'
-            value={jumpPage}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (val === '' || /^\d+$/.test(val)) {
-                setJumpPage(val);
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleJumpPage();
-            }}
-            placeholder={t('pagination.page_placeholder')}
+        {searchMode ? (
+          // 搜索结果由后端一次性返回、不支持翻页，隐藏分页器与跳页框避免无效交互
+          <span
             style={{
-              width: '48px',
-              padding: '4px 6px',
-              border: '1px solid rgba(34,36,38,.15)',
-              borderRadius: '4px',
-              textAlign: 'center',
+              float: 'right',
               fontSize: '13px',
+              color: 'gray',
+              lineHeight: '28px',
             }}
-          />
-          {t('pagination.page')}
-          <Button
-            size='mini'
-            onClick={handleJumpPage}
-            disabled={loading}
           >
-            GO
-          </Button>
-        </span>
-        <Pagination
-          className='table-footer-pagination'
-          floated='right'
-          activePage={activePage}
-          onPageChange={onPaginationChange}
-          size='small'
-          siblingRange={1}
-          firstItem={{ content: t('pagination.first_page'), 'aria-label': t('pagination.first_page_aria') }}
-          lastItem={{ content: t('pagination.last_page'), 'aria-label': t('pagination.last_page_aria') }}
-          totalPages={
-            Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
-          }
-        />
+            搜索结果不支持翻页
+          </span>
+        ) : (
+          <>
+            <span className='hide-on-mobile' style={{ marginRight: '8px', fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+              {t('pagination.jump_to')}
+              <input
+                type='text'
+                value={jumpPage}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === '' || /^\d+$/.test(val)) {
+                    setJumpPage(val);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleJumpPage();
+                }}
+                placeholder={t('pagination.page_placeholder')}
+                style={{
+                  width: '48px',
+                  padding: '4px 6px',
+                  border: '1px solid rgba(34,36,38,.15)',
+                  borderRadius: '4px',
+                  textAlign: 'center',
+                  fontSize: '13px',
+                }}
+              />
+              {t('pagination.page')}
+              <Button
+                size='mini'
+                onClick={handleJumpPage}
+                disabled={loading}
+              >
+                GO
+              </Button>
+            </span>
+            <Pagination
+              className='table-footer-pagination'
+              floated='right'
+              activePage={activePage}
+              onPageChange={onPaginationChange}
+              size='small'
+              siblingRange={1}
+              firstItem={{ content: t('pagination.first_page'), 'aria-label': t('pagination.first_page_aria') }}
+              lastItem={{ content: t('pagination.last_page'), 'aria-label': t('pagination.last_page_aria') }}
+              totalPages={
+                Math.max(1, Math.ceil(totalLogs / ITEMS_PER_PAGE))
+              }
+            />
+          </>
+        )}
       </div>
     </>
   );

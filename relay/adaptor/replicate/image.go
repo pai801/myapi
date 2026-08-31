@@ -2,6 +2,7 @@ package replicate
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -41,6 +42,23 @@ import (
 
 var errNextLoop = errors.New("next_loop")
 
+// 上游任务可能长期停留在 running 状态，轮询总时限防止请求 goroutine 无限占用；
+// 生图任务常规数十秒到数分钟，5 分钟可覆盖慢任务且限制最坏等待
+const taskPollTimeout = 5 * time.Minute
+
+// singlePollRequestTimeout 单次轮询/下载请求的超时上限，防止个别请求挂死导致 goroutine 无限占用
+const singlePollRequestTimeout = 30 * time.Second
+
+// pollRequestContext 为轮询单次请求派生带超时的 context，
+// 超时取 min(30s, 距轮询总 deadline 剩余)：既防单请求挂死，也保证不越过 taskPollTimeout 总时限
+func pollRequestContext(parent context.Context, pollDeadline time.Time) (context.Context, context.CancelFunc) {
+	timeout := singlePollRequestTimeout
+	if remaining := time.Until(pollDeadline); remaining < timeout {
+		timeout = remaining
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
 func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	if resp.StatusCode != http.StatusCreated {
 		payload, _ := io.ReadAll(resp.Body)
@@ -63,10 +81,16 @@ func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCo
 		return openai.ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 
+	pollDeadline := time.Now().Add(taskPollTimeout)
 	for {
 		err = func() error {
-			// get task
-			taskReq, err := http.NewRequestWithContext(c.Request.Context(),
+			if time.Now().After(pollDeadline) {
+				return errors.Errorf("replicate task polling timeout after %s", taskPollTimeout)
+			}
+			// get task（单次请求绑定超时，防止挂死的 GET 无限占用 goroutine）
+			reqCtx, cancel := pollRequestContext(c.Request.Context(), pollDeadline)
+			defer cancel()
+			taskReq, err := http.NewRequestWithContext(reqCtx,
 				http.MethodGet, respData.URLs.Get, nil)
 			if err != nil {
 				return errors.Wrap(err, "new request")
@@ -122,8 +146,10 @@ func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCo
 			for _, imgOut := range output {
 				imgOut := imgOut
 				pool.Go(func() error {
-					// download image
-					downloadReq, err := http.NewRequestWithContext(c.Request.Context(),
+					// download image（单次下载绑定超时，防止挂死的下载无限占用 goroutine）
+					dlCtx, cancel := pollRequestContext(c.Request.Context(), pollDeadline)
+					defer cancel()
+					downloadReq, err := http.NewRequestWithContext(dlCtx,
 						http.MethodGet, imgOut, nil)
 					if err != nil {
 						return errors.Wrap(err, "new request")

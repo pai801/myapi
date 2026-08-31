@@ -29,6 +29,14 @@ if [ -f myapi.pid ]; then
   fi
 fi
 
+# JWT_SECRET：未设置时生成随机密钥并持久化到 .jwt_secret，重启复用同一密钥避免登录态失效
+if [ -z "$JWT_SECRET" ]; then
+  # umask 077 让密钥文件从创建瞬间即为 600，避免落盘到 chmod 之间的窗口期可被其他用户读取
+  [ -s .jwt_secret ] || (umask 077; openssl rand -hex 32 > .jwt_secret)
+  chmod 600 .jwt_secret
+  export JWT_SECRET="$(cat .jwt_secret)"
+fi
+
 # 启动并记录 PID，供下次部署停旧
 nohup ./myapi --log-dir ./logs &
 echo $! > myapi.pid

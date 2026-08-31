@@ -447,6 +447,73 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		out = append(out, emitResponsesEvent("response.in_progress", inprog))
 	}
 
+	// 处理 usage（完整支持多格式详细字段）
+	// 必须先于 choices 早退判断执行：部分 OpenAI 兼容上游收尾 chunk 只带 usage 不带 choices，
+	// 放在早退之后会漏解析导致网关记 0 token（资损方向）
+	if usage := root.Get("usage"); usage.Exists() {
+		st.UsageSeen = true
+
+		// OpenAI 格式基础字段
+		if v := usage.Get("prompt_tokens"); v.Exists() {
+			st.InputTokens = v.Int()
+			st.InputTokensIncludeCache = true
+		}
+		if v := usage.Get("completion_tokens"); v.Exists() {
+			st.OutputTokens = v.Int()
+		}
+		if v := usage.Get("total_tokens"); v.Exists() {
+			st.TotalTokens = v.Int()
+		}
+
+		// OpenAI 格式详细字段
+		if v := usage.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
+			st.CachedTokens = v.Int()
+			st.HasCacheDetails = true
+		}
+		if v := usage.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
+			st.ReasoningTokens = v.Int()
+		}
+
+		// Claude 格式基础字段（优先级高于 OpenAI）
+		if v := usage.Get("input_tokens"); v.Exists() {
+			st.InputTokens = v.Int()
+			st.InputTokensIncludeCache = false
+		}
+		if v := usage.Get("output_tokens"); v.Exists() {
+			st.OutputTokens = v.Int()
+		}
+
+		// Claude 格式缓存字段
+		if v := usage.Get("cache_read_input_tokens"); v.Exists() {
+			st.CachedTokens = v.Int()
+			st.HasClaudeCacheFields = true
+			st.HasCacheDetails = true
+		}
+		if v := usage.Get("cache_creation_input_tokens"); v.Exists() {
+			st.CacheCreationTokens = v.Int()
+			st.HasClaudeCacheFields = true
+		}
+		if v := usage.Get("cache_creation_5m_input_tokens"); v.Exists() {
+			st.CacheCreation5mTokens = v.Int()
+			st.HasClaudeCacheFields = true
+		}
+		if v := usage.Get("cache_creation_1h_input_tokens"); v.Exists() {
+			st.CacheCreation1hTokens = v.Int()
+			st.HasClaudeCacheFields = true
+		}
+
+		// 设置缓存 TTL 标识
+		has5m := st.CacheCreation5mTokens > 0
+		has1h := st.CacheCreation1hTokens > 0
+		if has5m && has1h {
+			st.CacheTTL = "mixed"
+		} else if has1h {
+			st.CacheTTL = "1h"
+		} else if has5m {
+			st.CacheTTL = "5m"
+		}
+	}
+
 	// 解析 choices
 	choices := root.Get("choices")
 	if !choices.Exists() || !choices.IsArray() {
@@ -568,71 +635,6 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 			if st.InFuncBlock {
 				out = append(out, st.closeFuncBlocks(nextSeq)...)
 			}
-		}
-	}
-
-	// 处理 usage（完整支持多格式详细字段）
-	if usage := root.Get("usage"); usage.Exists() {
-		st.UsageSeen = true
-
-		// OpenAI 格式基础字段
-		if v := usage.Get("prompt_tokens"); v.Exists() {
-			st.InputTokens = v.Int()
-			st.InputTokensIncludeCache = true
-		}
-		if v := usage.Get("completion_tokens"); v.Exists() {
-			st.OutputTokens = v.Int()
-		}
-		if v := usage.Get("total_tokens"); v.Exists() {
-			st.TotalTokens = v.Int()
-		}
-
-		// OpenAI 格式详细字段
-		if v := usage.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
-			st.CachedTokens = v.Int()
-			st.HasCacheDetails = true
-		}
-		if v := usage.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
-			st.ReasoningTokens = v.Int()
-		}
-
-		// Claude 格式基础字段（优先级高于 OpenAI）
-		if v := usage.Get("input_tokens"); v.Exists() {
-			st.InputTokens = v.Int()
-			st.InputTokensIncludeCache = false
-		}
-		if v := usage.Get("output_tokens"); v.Exists() {
-			st.OutputTokens = v.Int()
-		}
-
-		// Claude 格式缓存字段
-		if v := usage.Get("cache_read_input_tokens"); v.Exists() {
-			st.CachedTokens = v.Int()
-			st.HasClaudeCacheFields = true
-			st.HasCacheDetails = true
-		}
-		if v := usage.Get("cache_creation_input_tokens"); v.Exists() {
-			st.CacheCreationTokens = v.Int()
-			st.HasClaudeCacheFields = true
-		}
-		if v := usage.Get("cache_creation_5m_input_tokens"); v.Exists() {
-			st.CacheCreation5mTokens = v.Int()
-			st.HasClaudeCacheFields = true
-		}
-		if v := usage.Get("cache_creation_1h_input_tokens"); v.Exists() {
-			st.CacheCreation1hTokens = v.Int()
-			st.HasClaudeCacheFields = true
-		}
-
-		// 设置缓存 TTL 标识
-		has5m := st.CacheCreation5mTokens > 0
-		has1h := st.CacheCreation1hTokens > 0
-		if has5m && has1h {
-			st.CacheTTL = "mixed"
-		} else if has1h {
-			st.CacheTTL = "1h"
-		} else if has5m {
-			st.CacheTTL = "5m"
 		}
 	}
 

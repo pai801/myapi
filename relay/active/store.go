@@ -85,8 +85,10 @@ func (s *ActiveStore) List() []ActiveRequest {
 	now := time.Now().UnixMilli()
 	result := make([]ActiveRequest, 0, len(s.items))
 	for _, req := range s.items {
-		req.ElapsedMs = now - req.StartedAt
-		result = append(result, *req)
+		// 在值副本上计算 ElapsedMs，禁止修改共享 entry（与 Update 的写入构成竞争）
+		item := *req
+		item.ElapsedMs = now - req.StartedAt
+		result = append(result, item)
 	}
 	return result
 }

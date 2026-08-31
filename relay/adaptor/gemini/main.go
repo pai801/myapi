@@ -193,10 +193,21 @@ func (g *ChatResponse) GetResponseText() string {
 	if g == nil {
 		return ""
 	}
-	if len(g.Candidates) > 0 && len(g.Candidates[0].Content.Parts) > 0 {
-		return g.Candidates[0].Content.Parts[0].Text
+	if len(g.Candidates) == 0 {
+		return ""
 	}
-	return ""
+	// 拼接首个 candidate 内全部 text parts，避免多 part 时内容丢失；非文本 part（inlineData/functionCall）跳过
+	var builder strings.Builder
+	for _, part := range g.Candidates[0].Content.Parts {
+		if part.Text == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(part.Text)
+	}
+	return builder.String()
 }
 
 type ChatCandidate struct {
@@ -259,8 +270,13 @@ func responseGeminiChat2OpenAI(response *ChatResponse) *openai.TextResponse {
 				choice.Message.ToolCalls = getToolCalls(&candidate)
 			} else {
 				var builder strings.Builder
+				// 与 GetResponseText 语义对齐：跳过空 text part（含 inlineData 等非文本 part），
+				// 仅在已有内容时加分隔符，避免空 part 位置产生多余换行
 				for _, part := range candidate.Content.Parts {
-					if i > 0 {
+					if part.Text == "" {
+						continue
+					}
+					if builder.Len() > 0 {
 						builder.WriteString("\n")
 					}
 					builder.WriteString(part.Text)

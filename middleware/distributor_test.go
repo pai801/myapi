@@ -49,14 +49,18 @@ func TestSetDistributeContext(t *testing.T) {
 }
 
 func TestSelectAutoModel(t *testing.T) {
-	Convey("selectAutoModel picks first model from ModelsAlias when available", t, func() {
+	Convey("selectAutoModel 从渠道实际模型集随机选择，alias 不参与 auto 选模型：多轮采样均落在未冷却集合内", t, func() {
 		ch := &model.Channel{Models: "gpt-4,gpt-3.5-turbo", ModelsAlias: "gpt4,gpt35"}
-		So(selectAutoModel(ch), ShouldEqual, "gpt4")
+		for i := 0; i < 20; i++ {
+			So(selectAutoModel(ch), ShouldBeIn, []string{"gpt-4", "gpt-3.5-turbo"})
+		}
 	})
 
-	Convey("selectAutoModel falls back to Models when no alias", t, func() {
+	Convey("selectAutoModel 无 alias 时同样从实际模型集随机选择", t, func() {
 		ch := &model.Channel{Models: "gpt-4,gpt-3.5-turbo"}
-		So(selectAutoModel(ch), ShouldEqual, "gpt-4")
+		for i := 0; i < 20; i++ {
+			So(selectAutoModel(ch), ShouldBeIn, []string{"gpt-4", "gpt-3.5-turbo"})
+		}
 	})
 
 	Convey("selectAutoModel returns empty string when no models", t, func() {
@@ -66,18 +70,19 @@ func TestSelectAutoModel(t *testing.T) {
 }
 
 func TestAutoDistribute(t *testing.T) {
-	Convey("autoDistribute with 2 channels picks one round-robin and selects model", t, func() {
+	Convey("autoDistribute with 2 channels picks one round-robin and selects model from its actual model set", t, func() {
 		channels := []*model.Channel{
 			{Name: "A", Id: 1, Models: "gpt-4,gpt-3.5-turbo", ModelsAlias: "gpt4,gpt35"},
 			{Name: "B", Id: 2, Models: "claude-3-opus", ModelsAlias: "claude3opus"},
 		}
-		ch, model, err := autoDistribute(context.Background(), "autodist_test_1", channels)
+		ch, modelName, err := autoDistribute(context.Background(), "autodist_test_1", channels)
 		So(err, ShouldBeNil)
 		So(ch, ShouldNotBeNil)
 		// first call reads index 0 (before increment), returns channel A
 		So(ch.Name, ShouldEqual, "A")
 		So(ch.Id, ShouldEqual, 1)
-		So(model, ShouldEqual, "gpt4")
+		// auto 模式从被选中渠道的实际模型集随机取实际模型名，而非 alias
+		So(modelName, ShouldBeIn, []string{"gpt-4", "gpt-3.5-turbo"})
 	})
 
 	Convey("autoDistribute with empty channels returns error", t, func() {

@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"gorm.io/gorm"
@@ -196,17 +197,25 @@ func GetUserLogsCount(userId int, logType int, startTimestamp int64, endTimestam
 }
 
 func SearchAllLogs(keyword string) (logs []*LogListItem, err error) {
-	err = LOG_DB.Where("type = ? or content LIKE ?", keyword, keyword+"%").
-		Select(
-			"id, user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, first_token_time, is_stream, system_prompt_reset, channel_name, "+
-				"request_body != '' as has_request_body, response_body != '' as has_response_body, request_header != '' as has_request_header",
-		).
+	tx := LOG_DB
+	// keyword 为数字时才与整数 type 比较：字符串直接比较在 PostgreSQL 下报错、
+	// MySQL 下隐式转型为 0 语义错误；非数字时仅按 content 前缀过滤
+	if typeInt, convErr := strconv.Atoi(keyword); convErr == nil {
+		tx = tx.Where("type = ? or content LIKE ?", typeInt, keyword+"%")
+	} else {
+		tx = tx.Where("content LIKE ?", keyword+"%")
+	}
+	err = tx.Select(
+		"id, user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, first_token_time, is_stream, system_prompt_reset, channel_name, "+
+			"request_body != '' as has_request_body, response_body != '' as has_response_body, request_header != '' as has_request_header",
+	).
 		Order("id desc").Limit(config.MaxRecentItems).Find(&logs).Error
 	return logs, err
 }
 
 func SearchUserLogs(userId int, keyword string) (logs []*LogListItem, err error) {
-	err = LOG_DB.Where("user_id = ? and type = ?", userId, keyword).
+	// 修正原先把 keyword 当整数 type 比较的复制粘贴错误：按 content 前缀搜索本用户日志
+	err = LOG_DB.Where("user_id = ? and content LIKE ?", userId, keyword+"%").
 		Select(
 			"user_id, created_at, type, content, username, token_name, model_name, quota, prompt_tokens, completion_tokens, cached_tokens, channel_id, request_id, elapsed_time, first_token_time, is_stream, system_prompt_reset, channel_name, "+
 				"request_body != '' as has_request_body, response_body != '' as has_response_body, request_header != '' as has_request_header",

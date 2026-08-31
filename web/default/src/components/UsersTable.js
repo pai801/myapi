@@ -16,6 +16,11 @@ import { renderQuota, renderText } from '../helpers/render';
 // Module-level cache to preserve user list across unmount/remount cycles
 let cachedUsers = [];
 
+// 登出换账号时清空缓存，避免展示上一会话的用户列表
+export function clearCachedUsers() {
+  cachedUsers = [];
+}
+
 const UsersTable = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -25,6 +30,8 @@ const UsersTable = () => {
   const [activePage, setActivePage] = useState(1);
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
+  // 搜索结果模式下禁用分页增量加载，避免全量数据混入搜索结果
+  const [searchMode, setSearchMode] = useState(false);
 
   const syncCachedUser = (updatedUser) => {
     if (!updatedUser?.id) {
@@ -37,31 +44,39 @@ const UsersTable = () => {
   };
 
   const loadUsers = async (startIdx) => {
-    const res = await API.get(`/api/user/?p=${startIdx}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      if (startIdx === 0) {
-        setUsers(data);
-        cachedUsers = data;
+    try {
+      const res = await API.get(`/api/user/?p=${startIdx}`);
+      const { success, message, data } = res.data;
+      if (success) {
+        if (startIdx === 0) {
+          setUsers(data);
+          cachedUsers = data;
+        } else {
+          let newUsers = [...users];
+          newUsers.push(...data);
+          setUsers(newUsers);
+          cachedUsers = newUsers;
+        }
       } else {
-        let newUsers = [...users];
-        newUsers.push(...data);
-        setUsers(newUsers);
-        cachedUsers = newUsers;
+        showError(message);
       }
-    } else {
-      showError(message);
+    } finally {
+      // 复位必须放在 finally：初始加载/翻页/刷新任一环节失败都要解除表格遮罩
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const onPaginationChange = (e, { activePage }) => {
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
     (async () => {
-      if (activePage === Math.ceil(users.length / ITEMS_PER_PAGE) + 1) {
+      if (
+        !searchMode &&
+        activePage === Math.ceil(users.length / ITEMS_PER_PAGE) + 1
+      ) {
         await loadUsers(activePage - 1);
       }
       setActivePage(activePage);
-    })();
+    })().catch(() => {});
   };
 
   useEffect(() => {
@@ -74,11 +89,10 @@ const UsersTable = () => {
       window.history.replaceState({}, '');
       return;
     }
+    // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
     loadUsers(0)
       .then()
-      .catch((reason) => {
-        showError(reason);
-      });
+      .catch(() => {});
   }, []);
 
   const manageUser = (username, action, idx) => {
@@ -122,21 +136,30 @@ const UsersTable = () => {
   };
 
   const searchUsers = async () => {
-    if (searchKeyword === '') {
-      await loadUsers(0);
-      setActivePage(1);
-      return;
+    // 防重复提交：上一次搜索未返回前忽略再次提交，避免较慢的旧响应覆盖新结果
+    if (searching) return;
+    try {
+      if (searchKeyword === '') {
+        setSearchMode(false);
+        await loadUsers(0);
+        setActivePage(1);
+        return;
+      }
+      setSearching(true);
+      setSearchMode(true);
+      const res = await API.get(
+        `/api/user/search?keyword=${encodeURIComponent(searchKeyword)}`
+      );
+      const { success, message, data } = res.data;
+      if (success) {
+        setUsers(data);
+        setActivePage(1);
+      } else {
+        showError(message);
+      }
+    } finally {
+      setSearching(false);
     }
-    setSearching(true);
-    const res = await API.get(`/api/user/search?keyword=${searchKeyword}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      setUsers(data);
-      setActivePage(1);
-    } else {
-      showError(message);
-    }
-    setSearching(false);
   };
 
   const handleKeywordChange = async (e, { value }) => {
@@ -145,8 +168,13 @@ const UsersTable = () => {
 
   const refreshUsers = async () => {
     setLoading(true);
-    await loadUsers(0);
-    setActivePage(1);
+    setSearchMode(false);
+    try {
+      await loadUsers(0);
+      setActivePage(1);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

@@ -1,6 +1,7 @@
 package ali
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"time"
 )
+
+// 任务轮询与图片下载共用客户端；60s 上限防止单次请求（含大图下载）无限期挂住请求 goroutine
+var aliHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	apiKey := c.Request.Header.Get("Authorization")
@@ -40,7 +44,7 @@ func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCo
 		return openai.ErrorWrapper(errors.New(aliTaskResponse.Message), "ali_async_task_failed", http.StatusInternalServerError), nil
 	}
 
-	aliResponse, _, err := asyncTaskWait(aliTaskResponse.Output.TaskId, apiKey)
+	aliResponse, _, err := asyncTaskWait(c.Request.Context(), aliTaskResponse.Output.TaskId, apiKey)
 	if err != nil {
 		return openai.ErrorWrapper(err, "ali_async_task_wait_failed", http.StatusInternalServerError), nil
 	}
@@ -68,20 +72,20 @@ func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCo
 	return nil, nil
 }
 
-func asyncTask(taskID string, key string) (*TaskResponse, error, []byte) {
+func asyncTask(ctx context.Context, taskID string, key string) (*TaskResponse, error, []byte) {
 	url := fmt.Sprintf("https://dashscope.aliyuncs.com/api/v1/tasks/%s", taskID)
 
 	var aliResponse TaskResponse
 
-	req, err := http.NewRequest("GET", url, nil)
+	// 绑定请求 ctx：客户端断开后终止轮询，避免继续无效请求
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return &aliResponse, err, nil
 	}
 
 	req.Header.Set("Authorization", "Bearer "+key)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := aliHTTPClient.Do(req)
 	if err != nil {
 		logger.Log.Errorf("aliAsyncTask client.Do err: " + err.Error())
 		return &aliResponse, err, nil
@@ -100,7 +104,7 @@ func asyncTask(taskID string, key string) (*TaskResponse, error, []byte) {
 	return &response, nil, responseBody
 }
 
-func asyncTaskWait(taskID string, key string) (*TaskResponse, []byte, error) {
+func asyncTaskWait(ctx context.Context, taskID string, key string) (*TaskResponse, []byte, error) {
 	waitSeconds := 2
 	step := 0
 	maxStep := 20
@@ -110,7 +114,7 @@ func asyncTaskWait(taskID string, key string) (*TaskResponse, []byte, error) {
 
 	for {
 		step++
-		rsp, err, body := asyncTask(taskID, key)
+		rsp, err, body := asyncTask(ctx, taskID, key)
 		responseBody = body
 		if err != nil {
 			return &taskResponse, responseBody, err
@@ -133,7 +137,12 @@ func asyncTaskWait(taskID string, key string) (*TaskResponse, []byte, error) {
 		if step >= maxStep {
 			break
 		}
-		time.Sleep(time.Duration(waitSeconds) * time.Second)
+		select {
+		case <-ctx.Done():
+			// 客户端断开时终止轮询而非继续睡眠等待
+			return nil, nil, ctx.Err()
+		case <-time.After(time.Duration(waitSeconds) * time.Second):
+		}
 	}
 
 	return nil, nil, fmt.Errorf("aliAsyncTaskWait timeout")
@@ -172,7 +181,8 @@ func responseAli2OpenAIImage(response *TaskResponse, responseFormat string) *ope
 }
 
 func getImageData(url string) ([]byte, error) {
-	response, err := http.Get(url)
+	// 复用带超时的 aliHTTPClient，裸 http.Get 无超时可能无限期挂住请求 goroutine
+	response, err := aliHTTPClient.Get(url)
 	if err != nil {
 		return nil, err
 	}

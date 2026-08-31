@@ -2,7 +2,7 @@ import React, {useEffect, useState} from 'react';
 import {useTranslation} from 'react-i18next';
 import {Button, Card, Form, Input, Message} from 'semantic-ui-react';
 import {useNavigate, useParams} from 'react-router-dom';
-import {API, copy, getChannelModels, showError, showInfo, showSuccess, verifyJSON,} from '../../helpers';
+import {API, copy, getChannelModels, showError, showInfo, showSuccess, showWarning, verifyJSON,} from '../../helpers';
 import {CHANNEL_OPTIONS} from '../../constants';
 import {renderChannelTip} from '../../helpers/render';
 
@@ -70,6 +70,8 @@ const EditChannel = () => {
     vertex_ai_project_id: '',
     vertex_ai_adc: '',
   });
+  // config 解析失败标记：为 true 时禁止提交，防止用默认 config 静默覆盖库中原始值
+  const [configLoadFailed, setConfigLoadFailed] = useState(false);
   const handleInputChange = (e, { name, value }) => {
     setInputs((inputs) => ({ ...inputs, [name]: value }));
     if (name === 'type') {
@@ -86,35 +88,54 @@ const EditChannel = () => {
   };
 
   const loadChannel = async () => {
-    let res = await API.get(`/api/channel/${channelId}`);
-    const { success, message, data } = res.data;
-    if (success) {
-      if (data.models === '') {
-        data.models = [];
+    try {
+      let res = await API.get(`/api/channel/${channelId}`);
+      const { success, message, data } = res.data;
+      if (success) {
+        if (data.models === '') {
+          data.models = [];
+        } else {
+          data.models = data.models.split(',');
+        }
+        if (data.group === '') {
+          data.groups = [];
+        } else {
+          data.groups = data.group.split(',');
+        }
+        if (data.model_mapping !== '') {
+          try {
+            data.model_mapping = JSON.stringify(
+              JSON.parse(data.model_mapping),
+              null,
+              2
+            );
+          } catch (e) {
+            // 解析失败时保留原始字符串展示，避免页面空白
+            console.warn('channel model_mapping is not valid JSON:', e.message);
+          }
+        }
+        setInputs(data);
+        if (data.config !== '') {
+          try {
+            setConfig(JSON.parse(data.config));
+          } catch (e) {
+            // 解析失败时保留默认 config 避免页面崩溃，但必须标记失败态，
+            // 否则提交时会用默认值静默覆盖库中原始 config
+            setConfigLoadFailed(true);
+            console.warn('channel config is not valid JSON:', e.message);
+            showWarning(
+              '渠道 config 解析失败，表单展示的是默认值；为避免覆盖原始配置，本次保存已被阻止'
+            );
+          }
+        }
+        setBasicModels(getChannelModels(data.type));
       } else {
-        data.models = data.models.split(',');
+        showError(message);
       }
-      if (data.group === '') {
-        data.groups = [];
-      } else {
-        data.groups = data.group.split(',');
-      }
-      if (data.model_mapping !== '') {
-        data.model_mapping = JSON.stringify(
-          JSON.parse(data.model_mapping),
-          null,
-          2
-        );
-      }
-      setInputs(data);
-      if (data.config !== '') {
-        setConfig(JSON.parse(data.config));
-      }
-      setBasicModels(getChannelModels(data.type));
-    } else {
-      showError(message);
+    } finally {
+      // 失败时也必须复位 loading，避免表单永久处于加载态
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const fetchModels = async () => {
@@ -167,7 +188,8 @@ const EditChannel = () => {
 
   useEffect(() => {
     if (isEdit) {
-      loadChannel().then();
+      // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
+      loadChannel().then().catch(() => {});
     } else {
       let localModels = getChannelModels(inputs.type);
       setBasicModels(localModels);
@@ -177,6 +199,11 @@ const EditChannel = () => {
   }, []);
 
   const submit = async () => {
+    // config 未能成功解析时禁止提交，防止用默认值覆盖库中原始配置
+    if (configLoadFailed) {
+      showError('渠道 config 解析失败，已阻止保存以避免覆盖原始配置，请刷新页面后重试');
+      return;
+    }
     if (inputs.key === '') {
       if (config.ak !== '' && config.sk !== '' && config.region !== '') {
         inputs.key = `${config.ak}|${config.sk}|${config.region}`;

@@ -300,11 +300,63 @@ func updateChannelUsedQuota(id int, quota int64) {
 }
 
 func DeleteChannelByStatus(status int64) (int64, error) {
-	result := DB.Where("status = ?", status).Delete(&Channel{})
-	return result.RowsAffected, result.Error
+	return batchDeleteChannels(func(tx *gorm.DB) *gorm.DB {
+		return tx.Where("status = ?", status)
+	})
 }
 
 func DeleteDisabledChannel() (int64, error) {
-	result := DB.Where("status = ? or status = ?", ChannelStatusAutoDisabled, ChannelStatusManuallyDisabled).Delete(&Channel{})
-	return result.RowsAffected, result.Error
+	return batchDeleteChannels(func(tx *gorm.DB) *gorm.DB {
+		return tx.Where("status = ? or status = ?", ChannelStatusAutoDisabled, ChannelStatusManuallyDisabled)
+	})
+}
+
+// 批量删渠道必须与单删 Delete() 行为对齐：事务内先清 abilities 再删渠道，
+// 否则遗留孤儿 ability 会在默认路由下被随机命中、查渠道报 ErrRecordNotFound，
+// 该 (group, model) 的请求持续失败。applyWhere 在事务内基于 tx 构建条件
+// （复用外部 DB 构建的 query 会绕开事务连接）。
+// 旧版 SQLite 宿主参数上限为 999，Pluck 出的全量 id 整体进 IN ? 在大量渠道一次性清理
+// （DeleteDisabledChannel 为周期任务，存在累积场景）时会报错，故删除按 500/批分片：
+// 先一次性 Pluck 固定候选 id 集合，再每片独立事务内复用筛选条件二次确认
+// （剔除 Pluck 后被重新启用等状态变化的渠道，与原单语句 DELETE 逐行评估条件的语义对齐），
+// 随后该片先清 abilities 后删渠道。
+// 部分成功语义：分片间事务独立提交，某片失败时前面各片已落库，返回失败前实际删除的行数，
+// 调用方以 err != nil 判定整体失败
+const batchDeleteChannelsChunkSize = 500
+
+func batchDeleteChannels(applyWhere func(*gorm.DB) *gorm.DB) (int64, error) {
+	var channelIds []int
+	// 候选集合先一次性查出（只读 Pluck 无需事务），后续分片基于该集合二次确认
+	if err := applyWhere(DB).Model(&Channel{}).Pluck("id", &channelIds).Error; err != nil {
+		return 0, err
+	}
+	var affected int64
+	for start := 0; start < len(channelIds); start += batchDeleteChannelsChunkSize {
+		end := start + batchDeleteChannelsChunkSize
+		if end > len(channelIds) {
+			end = len(channelIds)
+		}
+		chunk := channelIds[start:end]
+		if err := DB.Transaction(func(tx *gorm.DB) error {
+			// 复用筛选条件二次确认：Pluck 与删除非同事务，渠道状态可能在间隙内变化，
+			// 被重新启用的渠道不应在本次清理中删除（其 abilities 一并保留）
+			var chunkIds []int
+			if err := applyWhere(tx).Model(&Channel{}).Where("id IN ?", chunk).Pluck("id", &chunkIds).Error; err != nil {
+				return err
+			}
+			if len(chunkIds) == 0 {
+				return nil
+			}
+			// DeleteAbilities 的泛化形式：按 channel_id 集合清理
+			if err := tx.Where("channel_id IN ?", chunkIds).Delete(&Ability{}).Error; err != nil {
+				return err
+			}
+			result := tx.Where("id IN ?", chunkIds).Delete(&Channel{})
+			affected += result.RowsAffected
+			return result.Error
+		}); err != nil {
+			return affected, err
+		}
+	}
+	return affected, nil
 }

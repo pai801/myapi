@@ -191,6 +191,41 @@ func TestReadSSEEvent_ReturnsDoneOnEOFWithoutTrailingBlankLine(t *testing.T) {
 	}
 }
 
+func TestReadSSEEvent_LineLargerThanReaderBuffer(t *testing.T) {
+	// 单行超过 reader 内部缓冲，触发 ErrBufferFull 分片拼装路径，语义须与整行读取一致
+	payload := strings.Repeat("x", 5000)
+	r := bufio.NewReaderSize(strings.NewReader("data: "+payload+"\n\n"), 1024)
+
+	event, err := readSSEEvent(r, maxSSEEventBytes)
+	if err != nil {
+		t.Fatalf("readSSEEvent returned error: %v", err)
+	}
+	if event.Data != payload {
+		t.Fatalf("expected payload preserved across fragments, got len=%d", len(event.Data))
+	}
+}
+
+func TestReadSSEEvent_RejectsEventOverQuotaWithinSingleLine(t *testing.T) {
+	// 超限须在分片读取过程中即时触发，而非整行拼装完成后才检查
+	payload := strings.Repeat("x", 5000)
+	r := bufio.NewReaderSize(strings.NewReader("data: "+payload+"\n\n"), 1024)
+
+	_, err := readSSEEvent(r, 1024)
+	if err == nil || !strings.Contains(err.Error(), "sse event too large") {
+		t.Fatalf("expected sse event too large error, got %v", err)
+	}
+}
+
+func TestReadSSEEvent_RejectsEventOverQuotaAcrossLines(t *testing.T) {
+	// RawSize 跨行累计，多行 data 累计超限同样须即时中断
+	r := bufio.NewReaderSize(strings.NewReader("data: aaa\ndata: bbb\ndata: ccc\n\n"), 16)
+
+	_, err := readSSEEvent(r, 20)
+	if err == nil || !strings.Contains(err.Error(), "sse event too large") {
+		t.Fatalf("expected sse event too large error, got %v", err)
+	}
+}
+
 func TestStreamResponsesHandler_FlushesHeadersBeforeFirstEventRead(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

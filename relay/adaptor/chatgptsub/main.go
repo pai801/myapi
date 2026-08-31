@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -84,6 +85,21 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Request, meta *me
 				meta.ChannelId = boundChannel.Id
 				meta.APIKey = boundChannel.Key
 				meta.BaseURL = boundChannel.GetBaseURL()
+				// GetRequestURL 先于本函数执行且拿不到 gin.Context，粘性解析只能在此进行；
+				// 切换渠道后必须基于新 BaseURL 重建请求 URL，否则会以"旧 URL+新 key"请求导致鉴权失败。
+				// URL 重建失败时请求已无法正确到达绑定渠道，显式报错优于发出注定 401 的请求
+				newURL, uErr := a.GetRequestURL(meta)
+				if uErr != nil {
+					return fmt.Errorf("rebuild sticky url for channel %d failed: %w", meta.ChannelId, uErr)
+				}
+				if newURL == "" {
+					return fmt.Errorf("rebuild sticky url for channel %d failed: empty url", meta.ChannelId)
+				}
+				parsed, pErr := url.Parse(newURL)
+				if pErr != nil {
+					return fmt.Errorf("parse sticky url for channel %d failed: %w", meta.ChannelId, pErr)
+				}
+				req.URL = parsed
 				// 同步更新请求头
 				req.Header.Set("Authorization", "Bearer "+meta.APIKey)
 			}
@@ -431,9 +447,21 @@ loop:
 		}
 	}
 
-	// 流提前结束：补写 finish 事件
-	if !sawDone && !sawCompleted && !sawFailed && (sawFirstToken || contentBuffer.Len() > 0) {
+	// 流提前结束：补写 finish 事件（仅正常 EOF；流读取异常时走下方错误 delta 路径，避免把失败伪装成正常完成）
+	if !sawDone && !sawCompleted && !sawFailed && streamErr == nil && (sawFirstToken || contentBuffer.Len() > 0) {
 		writeChatStreamFinish(c, contentBuffer.String(), reasoningBuffer.String(), toolCallStates, sawFirstToken, outUsage, responseID, modelName)
+		render.Done(c)
+		sawDone = true
+	}
+	// response.completed 已写 finish 但上游可能不发 [DONE] 直接断流，统一补发 [DONE]，避免客户端一直等待；
+	// 流读取异常（非 EOF）时不能伪装成正常完成（500 因 headers 已发出无法送达），
+	// 参照上方 error/response.failed 事件处理，先写带错误码的错误 delta 再 Done，让客户端感知失败并可重试；
+	// response.completed 已事实完成时不再补错误 delta（对已完成的响应是误导），仅补发 [DONE]
+	if !sawDone {
+		if streamErr != nil && !sawCompleted {
+			// 错误码与函数返回的 ErrorWrapper 保持一致，便于客户端按同一错误处理
+			writeChatErrorDelta(c, streamErr.Error(), "stream_read_error", responseID, modelName)
+		}
 		render.Done(c)
 	}
 
@@ -753,6 +781,21 @@ func extractToolCallArgs(item model.ResponsesItem) string {
 
 // ==================== Non-Streaming Response ====================
 
+// copyUpstreamResponseHeader 透传上游响应头，跳过 hop-by-hop 与长度/编码相关头。
+// 上游 Content-Length/Content-Encoding 描述的是原始 Responses body，而实际写回的是
+// 转换后的 Chat body（body 已被 Go Transport 解压），原样透传会导致客户端按声明长度截断。
+func copyUpstreamResponseHeader(dst http.Header, src http.Header) {
+	for k, v := range src {
+		switch strings.ToLower(k) {
+		case "content-length", "transfer-encoding", "connection", "content-encoding":
+			continue
+		}
+		for _, vv := range v {
+			dst.Add(k, vv)
+		}
+	}
+}
+
 // handleChatCompletionsResponse 处理 Chat Completions 的非流式响应
 func handleChatCompletionsResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (*model.Usage, *model.ErrorWithStatusCode) {
 	responseBody, err := io.ReadAll(resp.Body)
@@ -770,11 +813,7 @@ func handleChatCompletionsResponse(c *gin.Context, resp *http.Response, meta *me
 			// 尝试把 Responses 错误格式映射为 Chat 格式
 			mappedBody := mapResponsesErrorToChatFormat(responseBody)
 			resp.Body = io.NopCloser(bytes.NewBuffer(mappedBody))
-			for k, v := range resp.Header {
-				for _, vv := range v {
-					c.Writer.Header().Add(k, vv)
-				}
-			}
+			copyUpstreamResponseHeader(c.Writer.Header(), resp.Header)
 			c.Writer.WriteHeader(resp.StatusCode)
 			_, _ = io.Copy(c.Writer, resp.Body)
 			resp.Body.Close()
@@ -789,11 +828,7 @@ func handleChatCompletionsResponse(c *gin.Context, resp *http.Response, meta *me
 	usage := extractUsageFromResponses(responseBody)
 
 	// 写回客户端
-	for k, v := range resp.Header {
-		for _, vv := range v {
-			c.Writer.Header().Add(k, vv)
-		}
-	}
+	copyUpstreamResponseHeader(c.Writer.Header(), resp.Header)
 	if _, err := c.Writer.Write(chatResp); err != nil {
 		return nil, codex.ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError)
 	}

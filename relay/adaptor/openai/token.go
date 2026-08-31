@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"sync"
 
 	"github.com/pkoukk/tiktoken-go"
 
@@ -16,6 +17,7 @@ import (
 
 // tokenEncoderMap won't grow after initialization
 var tokenEncoderMap = map[string]*tiktoken.Tiktoken{}
+var tokenEncoderLock sync.RWMutex
 var defaultTokenEncoder *tiktoken.Tiktoken
 
 func InitTokenEncoders() {
@@ -34,6 +36,7 @@ func InitTokenEncoders() {
 	if err != nil {
 		logger.Log.Fatalf("failed to get gpt-4 token encoder: %s", err.Error())
 	}
+	tokenEncoderLock.Lock()
 	for model := range billingratio.ModelRatio {
 		if strings.HasPrefix(model, "gpt-3.5") {
 			tokenEncoderMap[model] = gpt35TokenEncoder
@@ -45,11 +48,14 @@ func InitTokenEncoders() {
 			tokenEncoderMap[model] = nil
 		}
 	}
+	tokenEncoderLock.Unlock()
 	logger.Log.Infof("token encoders initialized")
 }
 
 func getTokenEncoder(model string) *tiktoken.Tiktoken {
+	tokenEncoderLock.RLock()
 	tokenEncoder, ok := tokenEncoderMap[model]
+	tokenEncoderLock.RUnlock()
 	if ok && tokenEncoder != nil {
 		return tokenEncoder
 	}
@@ -59,7 +65,10 @@ func getTokenEncoder(model string) *tiktoken.Tiktoken {
 			logger.Log.Errorf("failed to get token encoder for model %s: %s, using encoder for gpt-3.5-turbo", model, err.Error())
 			tokenEncoder = defaultTokenEncoder
 		}
+		// 加载失败也回写实际使用的 encoder，避免下次请求重复加载
+		tokenEncoderLock.Lock()
 		tokenEncoderMap[model] = tokenEncoder
+		tokenEncoderLock.Unlock()
 		return tokenEncoder
 	}
 	return defaultTokenEncoder

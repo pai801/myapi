@@ -15,8 +15,10 @@ import {
   getSystemName,
   isAdmin,
   isMobile,
+  showError,
   showSuccess,
 } from '../helpers';
+import { clearCachedUsers } from './UsersTable';
 import '../index.css';
 
 // Header Buttons
@@ -78,11 +80,21 @@ const Header = () => {
 
   async function logout() {
     setShowSidebar(false);
-    await API.get('/api/user/logout');
-    showSuccess('注销成功!');
-    userDispatch({ type: 'logout' });
-    localStorage.removeItem('user');
-    navigate('/login');
+    try {
+      const res = await API.get('/api/user/logout');
+      const { success, message } = res.data;
+      if (success) {
+        showSuccess('注销成功!');
+        clearCachedUsers();
+        userDispatch({ type: 'logout' });
+        localStorage.removeItem('user');
+        navigate('/login');
+      } else {
+        showError(message);
+      }
+    } catch (error) {
+      // 错误提示已由 axios 拦截器统一处理
+    }
   }
 
   const toggleSidebar = () => {

@@ -165,8 +165,12 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 
 			response, meta := anthropic.StreamResponseClaude2OpenAI(claudeResp)
 			if meta != nil {
-				usage.PromptTokens += meta.Usage.InputTokens
-				usage.CompletionTokens += meta.Usage.OutputTokens
+				// message_delta 的 usage.output_tokens 是累计快照而非增量，累加会导致 usage 虚高，必须赋值取最新值
+				usage.CompletionTokens = meta.Usage.OutputTokens
+				// input_tokens 仅 message_start 携带；仅在有值时赋值，防止上游行为变化时重复累加
+				if meta.Usage.InputTokens > 0 {
+					usage.PromptTokens = meta.Usage.InputTokens
+				}
 				// 如果有缓存读取的token，设置到 PromptTokensDetails 中（在 message_start 事件中）
 				if meta.Usage.CacheReadInputTokens > 0 {
 					usage.PromptTokensDetails = &relaymodel.PromptTokensDetails{
