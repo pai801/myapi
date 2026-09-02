@@ -98,15 +98,15 @@ func TestProcessChannelRelayErrorLogDecision(t *testing.T) {
 	// This test verifies the log output of processChannelRelayError
 	// without triggering DB side effects.
 	//
-	// processChannelRelayError calls ShouldDisableChannel (which depends on
-	// config.AutomaticDisableChannelEnabled), then either DisableChannel
-	// (DB write) or Emit (goroutine) + CooldownGlobal.Put (in-memory).
-	//
-	// Since DisableChannel requires DB access, we test the path where
-	// AutomaticDisableChannelEnabled is false, which triggers the cooldown path.
-	Convey("processChannelRelayError with disable disabled goes to cooldown path", t, func() {
-		// DisableChannel is disabled by default, so ShouldDisableChannel returns false
-		// and we hit the cooldown path (Emit + CooldownGlobal.Put)
+// processChannelRelayError calls ShouldDisableChannel (which depends on
+		// config.AutomaticDisableChannelEnabled), then either DisableChannel
+		// (DB write) or Emit (goroutine) + CooldownGlobal.ReportFailure (in-memory).
+		//
+		// Since DisableChannel requires DB access, we test the path where
+		// AutomaticDisableChannelEnabled is false, which triggers the cooldown path.
+		Convey("processChannelRelayError with disable disabled goes to cooldown path", t, func() {
+			// DisableChannel is disabled by default, so ShouldDisableChannel returns false
+			// and we hit the cooldown path (Emit + CooldownGlobal.ReportFailure)
 		err := model.ErrorWithStatusCode{
 			Error: model.Error{
 				Message: "test error",

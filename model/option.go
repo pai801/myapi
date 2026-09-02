@@ -47,6 +47,8 @@ func InitOptionMap() {
 	config.OptionMap["ModelRatio"] = billingratio.ModelRatio2JSONString()
 	config.OptionMap["CompletionRatio"] = billingratio.CompletionRatio2JSONString()
 	config.OptionMap["RetryTimes"] = strconv.Itoa(config.RetryTimes)
+	config.OptionMap["ChannelCooldownErrorThreshold"] = strconv.Itoa(config.ChannelCooldownErrorThreshold)
+	config.OptionMap["ChannelCooldownErrorWindowSeconds"] = strconv.Itoa(config.ChannelCooldownErrorWindowSeconds)
 	config.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
 }
@@ -124,6 +126,20 @@ func updateOptionMap(key string, value string) (err error) {
 		err = billingratio.UpdateCompletionRatioByJSONString(value)
 	case "ChannelDisableThreshold":
 		config.ChannelDisableThreshold, _ = strconv.ParseFloat(value, 64)
+case "ChannelCooldownErrorThreshold":
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				logger.Log.Errorf("invalid ChannelCooldownErrorThreshold value %q: %v", value, err)
+				break
+			}
+			config.ChannelCooldownErrorThreshold = v
+		case "ChannelCooldownErrorWindowSeconds":
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				logger.Log.Errorf("invalid ChannelCooldownErrorWindowSeconds value %q: %v", value, err)
+				break
+			}
+			config.ChannelCooldownErrorWindowSeconds = v
 	case ModelEndpointTypesKey:
 		updateModelEndpointTypesMap(value)
 	}

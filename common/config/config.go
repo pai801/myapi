@@ -118,4 +118,8 @@ var EnforceIncludeUsage = env.Bool("ENFORCE_INCLUDE_USAGE", false)
 var TestPrompt = env.String("TEST_PROMPT", "Output only your specific model name with no additional text.")
 
 var ChannelCooldownSeconds = env.Int("CHANNEL_COOLDOWN_SECONDS", 600)
+// ChannelCooldownErrorThreshold 累计错误权重达到该阈值才进入冷却；权重 1 的错误需累计该次数
+var ChannelCooldownErrorThreshold = env.Int("CHANNEL_COOLDOWN_ERROR_THRESHOLD", 3)
+// ChannelCooldownErrorWindowSeconds 累计窗口，超过该时长未失败则计数清零
+var ChannelCooldownErrorWindowSeconds = env.Int("CHANNEL_COOLDOWN_ERROR_WINDOW_SECONDS", 120)
 var AffinityExpireSeconds = env.Int("AFFINITY_EXPIRE_SECONDS", 300)

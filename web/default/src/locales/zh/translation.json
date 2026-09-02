@@ -566,6 +566,10 @@
         "title": "监控设置",
         "max_response_time": "最长响应时间",
         "max_response_time_placeholder": "单位秒，当运行渠道全部测试时，超过此时间将自动禁用渠道",
+        "cooldown_error_threshold": "冷却失败阈值",
+        "cooldown_error_threshold_placeholder": "累计错误权重达到该阈值才进入冷却，默认 3",
+        "cooldown_error_window_seconds": "冷却计数窗口（秒）",
+        "cooldown_error_window_seconds_placeholder": "超出该时长未失败则计数清零，默认 120 秒",
         "auto_disable": "失败时自动禁用渠道",
         "auto_enable": "成功时自动启用渠道",
         "buttons": {

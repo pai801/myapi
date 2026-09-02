@@ -17,6 +17,8 @@ const OperationSetting = () => {
     AutomaticDisableChannelEnabled: '',
     AutomaticEnableChannelEnabled: '',
     ChannelDisableThreshold: 0,
+    ChannelCooldownErrorThreshold: 0,
+    ChannelCooldownErrorWindowSeconds: 0,
     RetryTimes: 0,
   });
   const [originInputs, setOriginInputs] = useState({});
@@ -92,6 +94,24 @@ const OperationSetting = () => {
           await updateOption(
             'ChannelDisableThreshold',
             inputs.ChannelDisableThreshold
+          );
+        }
+        if (
+          originInputs['ChannelCooldownErrorThreshold'] !==
+          inputs.ChannelCooldownErrorThreshold
+        ) {
+          await updateOption(
+            'ChannelCooldownErrorThreshold',
+            inputs.ChannelCooldownErrorThreshold
+          );
+        }
+        if (
+          originInputs['ChannelCooldownErrorWindowSeconds'] !==
+          inputs.ChannelCooldownErrorWindowSeconds
+        ) {
+          await updateOption(
+            'ChannelCooldownErrorWindowSeconds',
+            inputs.ChannelCooldownErrorWindowSeconds
           );
         }
         break;
@@ -184,6 +204,30 @@ const OperationSetting = () => {
               min='0'
               placeholder={t(
                 'setting.operation.monitor.max_response_time_placeholder'
+              )}
+            />
+            <Form.Input
+              label={t('setting.operation.monitor.cooldown_error_threshold')}
+              name='ChannelCooldownErrorThreshold'
+              onChange={handleInputChange}
+              autoComplete='new-password'
+              value={inputs.ChannelCooldownErrorThreshold}
+              type='number'
+              min='0'
+              placeholder={t(
+                'setting.operation.monitor.cooldown_error_threshold_placeholder'
+              )}
+            />
+            <Form.Input
+              label={t('setting.operation.monitor.cooldown_error_window_seconds')}
+              name='ChannelCooldownErrorWindowSeconds'
+              onChange={handleInputChange}
+              autoComplete='new-password'
+              value={inputs.ChannelCooldownErrorWindowSeconds}
+              type='number'
+              min='0'
+              placeholder={t(
+                'setting.operation.monitor.cooldown_error_window_seconds_placeholder'
               )}
             />
           </Form.Group>

@@ -73,6 +73,7 @@ func Relay(c *gin.Context) {
 	bizErr := relayHelper(c, relayMode)
 	if bizErr == nil {
 		middleware.AffinityGlobal.Set(userId, requestModel, channelId)
+		middleware.CooldownGlobal.ResetSuccess(channelId, c.GetString(ctxkey.SuggestedModel))
 		monitor.Emit(channelId, true)
 		return
 	}
@@ -112,6 +113,7 @@ func Relay(c *gin.Context) {
 		if bizErr == nil {
 			logger.Log.Infof("retry succeeded on channel #%d requestId=%s", channel.Id, requestId)
 			middleware.AffinityGlobal.Set(userId, requestModel, channel.Id)
+			middleware.CooldownGlobal.ResetSuccess(channel.Id, c.GetString(ctxkey.SuggestedModel))
 			return
 		}
 		channelId = c.GetInt(ctxkey.ChannelId)
@@ -285,10 +287,30 @@ func processChannelRelayError(ctx context.Context, userId int, channelId int, ch
 		logger.Log.Infof("processChannelRelayError: disabling channel #%d (%s) reason=%q statusCode=%d", channelId, channelName, err.Message, err.StatusCode)
 		monitor.DisableChannel(channelId, channelName, err.Message)
 	} else {
-		logger.Log.Infof("processChannelRelayError: cooling down channel #%d (%s) model=%s reason=%q statusCode=%d", channelId, channelName, failedModel, err.Message, err.StatusCode)
+		weight := cooldownErrorWeight(&err)
+		logger.Log.Infof("processChannelRelayError: reporting failure channel #%d (%s) model=%s reason=%q statusCode=%d weight=%d",
+			channelId, channelName, failedModel, err.Message, err.StatusCode, weight)
 		monitor.Emit(channelId, false)
-		middleware.CooldownGlobal.Put(channelId, failedModel)
+		// 权重 0（客户端参数类错误）只 Emit 不计数不冷却
+		middleware.CooldownGlobal.ReportFailure(channelId, failedModel, weight)
 	}
+}
+
+// cooldownErrorWeight 根据错误语义为单次失败赋予累计权重：
+// - looksLikeRequestShapeFailure 命中 → 0（客户端参数类，不计数不冷却）
+// - 401/403 → 2（确定型失败，较快触发冷却）
+// - 其余（5xx、超时、连接失败、适配器解析失败等）→ 1
+func cooldownErrorWeight(err *model.ErrorWithStatusCode) int {
+	if err == nil {
+		return 0
+	}
+	if looksLikeRequestShapeFailure(err) {
+		return 0
+	}
+	if err.StatusCode == http.StatusUnauthorized || err.StatusCode == http.StatusForbidden {
+		return 2
+	}
+	return 1
 }
 
 func RelayNotImplemented(c *gin.Context) {

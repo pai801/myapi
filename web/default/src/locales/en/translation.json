@@ -568,6 +568,10 @@
         "title": "Monitor Settings",
         "max_response_time": "Maximum Response Time",
         "max_response_time_placeholder": "In seconds, channels exceeding this time during testing will be automatically disabled",
+        "cooldown_error_threshold": "Cooldown Error Threshold",
+        "cooldown_error_threshold_placeholder": "Cumulative error weight required to enter cooldown; default 3",
+        "cooldown_error_window_seconds": "Cooldown Counting Window (seconds)",
+        "cooldown_error_window_seconds_placeholder": "Counter resets if no failure within this window; default 120 seconds",
         "auto_disable": "Automatically Disable Channel on Failure",
         "auto_enable": "Automatically Enable Channel on Success",
         "buttons": {
