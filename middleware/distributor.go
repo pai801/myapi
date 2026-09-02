@@ -46,15 +46,19 @@ func setDistributeContext(c *gin.Context, channel *model.Channel, requestModel s
 	return nil
 }
 
-func matchChannelsByAlias(requestModel string, channels []*model.Channel) ([]*model.Channel, string) {
-	alias := model.SimplifyModelName(requestModel)
+// matchChannelsByAlias 把候选渠道按匹配精度拆成两组返回：
+//   - exactMatches：渠道别名经 canonical 归一化后与请求 alias 相等（exact + 等价命中）；
+//   - prefixMatches：仅靠前缀命中、且不在 exactMatches 内的渠道；
+// 设计意图：分发时 exact 优先、prefix 仅作亲和兜底——避免 prefix-only 弱匹配渠道在
+// weightedRandomSelect 中稀释 exact 强语义（如把 deepseek-v4-flash-extended 发到上游）。
+func matchChannelsByAlias(requestModel string, channels []*model.Channel) (exactMatches []*model.Channel, prefixMatches []*model.Channel, alias string) {
+	alias = model.SimplifyModelName(requestModel)
 	if alias == "" {
-		return nil, ""
+		return nil, nil, ""
 	}
 
-	// First pass: exact match with canonical equivalence
+	// exact + canonical 等价命中：精确度最高，最先返回
 	requestCanonical := model.CanonicalizeSimplifiedName(alias)
-	var exactMatches []*model.Channel
 	for _, ch := range channels {
 		for _, a := range ch.GetAlias() {
 			if model.CanonicalizeSimplifiedName(a) == requestCanonical {
@@ -63,21 +67,26 @@ func matchChannelsByAlias(requestModel string, channels []*model.Channel) ([]*mo
 			}
 		}
 	}
-	if len(exactMatches) > 0 {
-		return exactMatches, alias
-	}
 
-	// Second pass: prefix match
-	var prefixMatches []*model.Channel
+	// prefix 命中：补充只靠前缀匹配的渠道（如 deepseek-v4-flash-08xx 不在等价配置里但带前缀）
+	// 与 exact 命中按渠道 ID 去重，保证同一渠道只出现在一组内。
+	seen := make(map[int]struct{}, len(exactMatches))
+	for _, ch := range exactMatches {
+		seen[ch.Id] = struct{}{}
+	}
 	for _, ch := range channels {
+		if _, ok := seen[ch.Id]; ok {
+			continue
+		}
 		for _, a := range ch.GetAlias() {
 			if strings.HasPrefix(a, alias) {
 				prefixMatches = append(prefixMatches, ch)
+				seen[ch.Id] = struct{}{}
 				break
 			}
 		}
 	}
-	return prefixMatches, alias
+	return exactMatches, prefixMatches, alias
 }
 
 func selectAutoModel(channel *model.Channel) string {
@@ -190,20 +199,35 @@ func resolveSpecificChannelModel(channel *model.Channel, requestModel string) st
 }
 
 func nonAutoDistribute(ctx context.Context, userId int, requestModel string, channels []*model.Channel) (*model.Channel, string, error) {
-	matched, alias := matchChannelsByAlias(requestModel, channels)
-	if len(matched) == 0 {
+	exactMatches, prefixMatches, alias := matchChannelsByAlias(requestModel, channels)
+	if len(exactMatches) == 0 && len(prefixMatches) == 0 {
 		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
+	}
+
+	// exact 集是 weightedRandomSelect 的主选池；prefix 集仅在 exact 为空时兜底，避免 prefix-only
+	// 弱匹配渠道稀释 exact 强语义（如 deepseek-v4-flash-extended 抢占 deepseek-v4-flash 请求）。
+	primary := exactMatches
+	if len(primary) == 0 {
+		primary = prefixMatches
 	}
 
 	var ch *model.Channel
 
-	// Check affinity first: prefer the last used channel for this (user, model)
+	// 亲和命中优先：先在 exact 集找、再在 prefix 集找；都没有才在 primary 集内 weighted 选择
 	if affChId, ok := AffinityGlobal.Get(userId, requestModel); ok {
 		logger.Log.Debugf("nonAutoDistribute: affinity hit for user %d model %s -> channel #%d", userId, requestModel, affChId)
-		for _, c := range matched {
+		for _, c := range exactMatches {
 			if c.Id == affChId {
 				ch = c
 				break
+			}
+		}
+		if ch == nil {
+			for _, c := range prefixMatches {
+				if c.Id == affChId {
+					ch = c
+					break
+				}
 			}
 		}
 		if ch == nil {
@@ -213,9 +237,8 @@ func nonAutoDistribute(ctx context.Context, userId int, requestModel string, cha
 		logger.Log.Debugf("nonAutoDistribute: no affinity for user %d model %s, using weighted select", userId, requestModel)
 	}
 
-	// If no affinity or affinity channel not in matched set, pick weighted random by Priority
 	if ch == nil {
-		ch = weightedRandomSelect(matched)
+		ch = weightedRandomSelect(primary)
 		logger.Log.Debugf("nonAutoDistribute: weighted select chose channel #%d for user %d model %s", ch.Id, userId, requestModel)
 	}
 	if ch == nil {

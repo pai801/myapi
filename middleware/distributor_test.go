@@ -16,7 +16,7 @@ func TestMatchChannelsByAliasExact(t *testing.T) {
 			{Name: "A", Id: 1, ModelsAlias: "gpt4turbo,gpt35turbo"},
 		}
 
-		matched, _ := matchChannelsByAlias("gpt4turbo", channels)
+		matched, _, _ := matchChannelsByAlias("gpt4turbo", channels)
 		So(len(matched), ShouldEqual, 1)
 		So(matched[0].Name, ShouldEqual, "A")
 	})
@@ -29,8 +29,11 @@ func TestMatchChannelsByAliasPrefix(t *testing.T) {
 			{Name: "B", Id: 2, ModelsAlias: "gpt41106preview"},
 		}
 
-		matched, _ := matchChannelsByAlias("gpt-4", channels)
-		So(len(matched), ShouldEqual, 2)
+		exact, prefix, _ := matchChannelsByAlias("gpt-4", channels)
+		// 请求简化名 "gpt4" 不等于任何 alias 的精确形式 → exact 集为空
+		So(len(exact), ShouldEqual, 0)
+		// 两渠道 alias 均以 "gpt4" 开头 → prefix 集应有 2 个
+		So(len(prefix), ShouldEqual, 2)
 	})
 }
 
@@ -204,10 +207,10 @@ func TestMatchChannelsByAliasCanonical(t *testing.T) {
 			{Name: "B", Id: 2, Models: "deepseek-v4-flash", ModelsAlias: "deepseekv4flash"},
 		}
 
-		matchedByShort, _ := matchChannelsByAlias("deepseek-v4-flash", channels)
+		matchedByShort, _, _ := matchChannelsByAlias("deepseek-v4-flash", channels)
 		So(len(matchedByShort), ShouldEqual, 2)
 
-		matchedByLong, _ := matchChannelsByAlias("deepseek-v4-flash-0731", channels)
+		matchedByLong, _, _ := matchChannelsByAlias("deepseek-v4-flash-0731", channels)
 		So(len(matchedByLong), ShouldEqual, 2)
 	})
 
@@ -229,6 +232,89 @@ func TestMatchChannelsByAliasCanonical(t *testing.T) {
 		_, shortName, err := nonAutoDistribute(context.Background(), 999, "deepseek-v4-flash-0731", chB)
 		So(err, ShouldBeNil)
 		So(shortName, ShouldEqual, "deepseek-v4-flash")
+	})
+}
+
+// TestMatchChannelsByAliasMergesExactAndPrefix 验证新分发语义：matchChannelsByAlias
+// 返回 (exact, prefix) 两组；nonAutoDistribute 仅在 exact 集内 weighted 选，exact 为空
+// 才在 prefix 集选；亲和命中允许命中 prefix-only 渠道（亲和兜底）。
+func TestMatchChannelsByAliasMergesExactAndPrefix(t *testing.T) {
+	defer model.ResetCanonicalAliasForTest()
+
+	Convey("matchChannelsByAlias 把渠道分到 exact / prefix 两组，且去重", t, func() {
+		// 请求简化名 "gpt4turbovision"：id=10 alias 完全相等属 exact；id=20/30 alias 以其开头属 prefix
+		channels := []*model.Channel{
+			{Name: "EXACT", Id: 10, Models: "gpt-4-turbo-vision", ModelsAlias: "gpt4turbovision"},
+			{Name: "PREFIX_vision_pro", Id: 20, Models: "gpt-4-turbo-vision-pro", ModelsAlias: "gpt4turbovisionpro"},
+			{Name: "PREFIX_only", Id: 30, Models: "gpt-4-turbo-vision-mini", ModelsAlias: "gpt4turbovisionmini"},
+			{Name: "UNRELATED", Id: 40, Models: "claude-3-opus", ModelsAlias: "claude3opus"},
+		}
+
+		exact, prefix, _ := matchChannelsByAlias("gpt-4-turbo-vision", channels)
+
+		// exact 集只有 id=10；prefix 集有 id=20/30；UNRELATED 两边都不在
+		So(len(exact), ShouldEqual, 1)
+		So(exact[0].Id, ShouldEqual, 10)
+		So(len(prefix), ShouldEqual, 2)
+		prefixSet := map[int]bool{prefix[0].Id: true, prefix[1].Id: true}
+		So(prefixSet[20], ShouldBeTrue)
+		So(prefixSet[30], ShouldBeTrue)
+	})
+
+	Convey("nonAutoDistribute 在 exact 集内选，不被 prefix-only 高优先级渠道稀释", t, func() {
+		clearAffinity()
+		// id=10 (exact) Priority=10，id=20 (prefix-only) Priority=100；
+		// 若 prefix 进候选池 weighted 选，高优先级的 id=20 会被选中并把变体模型发给上游。
+		pExact := int64(10)
+		pPrefix := int64(100)
+		channels := []*model.Channel{
+			{Name: "EXACT", Id: 10, Models: "gpt-4-turbo-vision", ModelsAlias: "gpt4turbovision", Priority: &pExact},
+			{Name: "PREFIX_HIGHER", Id: 20, Models: "gpt-4-turbo-vision-pro", ModelsAlias: "gpt4turbovisionpro", Priority: &pPrefix},
+		}
+
+		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "gpt-4-turbo-vision", channels)
+		So(err, ShouldBeNil)
+		// exact 集优先：必选 id=10，不被 prefix-only 渠道抢占
+		So(ch.Id, ShouldEqual, 10)
+		So(modelName, ShouldEqual, "gpt-4-turbo-vision")
+	})
+
+	Convey("亲和命中 prefix-only 渠道时仍能选中（亲和兜底）", t, func() {
+		clearAffinity()
+		// 候选里没有 exact，只有 prefix-only 渠道 #72；亲和指向它也能命中
+		channels := []*model.Channel{
+			{Name: "PREFIX_ONLY", Id: 72, Models: "gpt-4-turbo-vision-pro", ModelsAlias: "gpt4turbovisionpro"},
+		}
+		AffinityGlobal.Set(999, "gpt-4-turbo-vision", 72)
+
+		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "gpt-4-turbo-vision", channels)
+		So(err, ShouldBeNil)
+		So(ch.Id, ShouldEqual, 72)
+		So(modelName, ShouldEqual, "gpt-4-turbo-vision-pro")
+	})
+
+	Convey("exact 集为空时 prefix 集可作 weighted 兜底", t, func() {
+		clearAffinity()
+		// 没有 exact 命中；prefix-only 渠道 #20 唯一候选
+		channels := []*model.Channel{
+			{Name: "PREFIX_ONLY", Id: 20, Models: "gpt-4-turbo-vision-pro", ModelsAlias: "gpt4turbovisionpro"},
+		}
+
+		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "gpt-4-turbo-vision", channels)
+		So(err, ShouldBeNil)
+		So(ch.Id, ShouldEqual, 20)
+		So(modelName, ShouldEqual, "gpt-4-turbo-vision-pro")
+	})
+
+	Convey("exact + prefix 同时命中时同渠道只算一次且归入 exact", t, func() {
+		channels := []*model.Channel{
+			// alias "gpt4turbovision" 既精确等于请求、又以请求为前缀，应只入 exact
+			{Name: "DUP", Id: 50, Models: "gpt-4-turbo-vision", ModelsAlias: "gpt4turbovision"},
+		}
+		exact, prefix, _ := matchChannelsByAlias("gpt-4-turbo-vision", channels)
+		So(len(exact), ShouldEqual, 1)
+		So(exact[0].Id, ShouldEqual, 50)
+		So(len(prefix), ShouldEqual, 0)
 	})
 }
 

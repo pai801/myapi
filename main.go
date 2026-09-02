@@ -44,6 +44,9 @@ func main() {
 	// Initialize SQL Database
 	model.InitDB()
 	model.InitLogDB()
+	// 启动期加载模型元数据，构建内存中的等价归一化映射（CanonicalName），
+	// 否则重启后 canonicalAliasMap 为空，deepseek-v4-flash-0731 ↔ deepseek-v4-flash 类等价匹配失效
+	model.InitModelMetadataMap()
 	logcleanup.Start()
 
 	var err error
