@@ -311,6 +311,8 @@
       "quota": "Quota",
       "first_token_time": "TTFT",
       "elapsed_time": "Total",
+      "tokens_prompt_combined": "Cache/Prompt",
+      "completion_combined": "Completion (t/s)",
       "detail": "Detail"
     },
     "messages": {

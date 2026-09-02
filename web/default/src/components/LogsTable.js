@@ -91,12 +91,26 @@ function renderType(type, t) {
 }
 
 function getColorByElapsedTime(elapsedTime) {
-  if (elapsedTime === undefined || 0) return 'black';
+  if (elapsedTime === undefined || elapsedTime === 0) return 'black';
   if (elapsedTime < 1000) return 'green';
   if (elapsedTime < 3000) return 'olive';
   if (elapsedTime < 5000) return 'yellow';
   if (elapsedTime < 10000) return 'orange';
   return 'red';
+}
+
+// calculateTps 与后端原 calculateTps 同口径：非流式 / 分母≤0 / completion_tokens<=0 时记 0。
+// 前端从 log.elapsed_time / log.first_token_time / log.completion_tokens 实时算 TPS，
+// 不依赖后端入库字段。
+function calculateTps(elapsedTime, firstTokenTime, completionTokens) {
+  if (!firstTokenTime || firstTokenTime <= 0 || !completionTokens || completionTokens <= 0) {
+    return 0;
+  }
+  const generationMs = elapsedTime - firstTokenTime;
+  if (!generationMs || generationMs <= 0) {
+    return 0;
+  }
+  return completionTokens * 1000.0 / generationMs;
 }
 
 function renderDetail(log) {
@@ -618,26 +632,6 @@ const LogsTable = () => {
             >
               Stream
             </Table.HeaderCell>
-            <Table.HeaderCell
-              className='hide-on-mobile'
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortLog('first_token_time');
-              }}
-              width={0.8}
-            >
-              {t('log.table.first_token_time')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              className='hide-on-mobile'
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortLog('elapsed_time');
-              }}
-              width={0.8}
-            >
-              {t('log.table.elapsed_time')}
-            </Table.HeaderCell>
             {showUserTokenQuota() && (
               <>
                 {isAdminUser && (
@@ -665,21 +659,31 @@ const LogsTable = () => {
                   className='hide-on-mobile'
                   style={{ cursor: 'pointer' }}
                   onClick={() => {
-                    sortLog('prompt_tokens');
+                    sortLog('first_token_time');
                   }}
-                  width={1}
+                  width={0.8}
                 >
-                  {t('log.table.prompt_tokens')}
+                  {t('log.table.first_token_time')}
                 </Table.HeaderCell>
                 <Table.HeaderCell
                   className='hide-on-mobile'
                   style={{ cursor: 'pointer' }}
                   onClick={() => {
-                    sortLog('cached_tokens');
+                    sortLog('elapsed_time');
+                  }}
+                  width={0.8}
+                >
+                  {t('log.table.elapsed_time')}
+                </Table.HeaderCell>
+                <Table.HeaderCell
+                  className='hide-on-mobile'
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => {
+                    sortLog('prompt_tokens');
                   }}
                   width={1.5}
                 >
-                  {t('log.table.cached_tokens')}
+                  {t('log.table.tokens_prompt_combined')}
                 </Table.HeaderCell>
                 <Table.HeaderCell
                   className='hide-on-mobile'
@@ -687,9 +691,9 @@ const LogsTable = () => {
                   onClick={() => {
                     sortLog('completion_tokens');
                   }}
-                  width={1}
+                  width={1.3}
                 >
-                  {t('log.table.completion_tokens')}
+                  {t('log.table.completion_combined')}
                 </Table.HeaderCell>
                 <Table.HeaderCell
                   style={{ cursor: 'pointer' }}
@@ -748,18 +752,6 @@ const LogsTable = () => {
                       {log.is_stream ? 'true' : 'false'}
                     </Label>
                   </Table.Cell>
-                  <Table.Cell className='hide-on-mobile'>
-                    {log.first_token_time ? `${log.first_token_time} ms` : '-'}
-                  </Table.Cell>
-                  <Table.Cell className='hide-on-mobile'>
-                    {log.elapsed_time ? (
-                      <Label basic size='mini' color={getColorByElapsedTime(log.elapsed_time)}>
-                        {log.elapsed_time} ms
-                      </Label>
-                    ) : (
-                      '-'
-                    )}
-                  </Table.Cell>
                   {showUserTokenQuota() && (
                     <>
                       {isAdminUser && (
@@ -782,13 +774,38 @@ const LogsTable = () => {
                       </Table.Cell>
 
                       <Table.Cell className='hide-on-mobile'>
-                        {allTokensZero ? '-' : (log.prompt_tokens || 0)}
+                        {log.first_token_time ? `${log.first_token_time} ms` : '-'}
                       </Table.Cell>
                       <Table.Cell className='hide-on-mobile'>
-                        {log.cached_tokens ? (log.prompt_tokens && log.prompt_tokens > 0 ? `${log.cached_tokens} (${(log.cached_tokens / log.prompt_tokens * 100).toFixed(2)}%)` : log.cached_tokens) : ''}
+                        {log.elapsed_time ? (
+                          <Label basic size='mini' color={getColorByElapsedTime(log.elapsed_time)}>
+                            {log.elapsed_time} ms
+                          </Label>
+                        ) : (
+                          '-'
+                        )}
                       </Table.Cell>
                       <Table.Cell className='hide-on-mobile'>
-                        {allTokensZero ? '-' : (log.completion_tokens || 0)}
+                        {(() => {
+                          // 合并列 2：命中/请求消耗；命中为 0 时也显示 0/prompt(0%)
+                          if (allTokensZero) return '-';
+                          const cached = log.cached_tokens || 0;
+                          const prompt = log.prompt_tokens || 0;
+                          const pct = prompt > 0 ? (cached / prompt * 100).toFixed(2) : '0.00';
+                          return `${cached}/${prompt}(${pct}%)`;
+                        })()}
+                      </Table.Cell>
+                      <Table.Cell className='hide-on-mobile'>
+                        {(() => {
+                          // 合并列 3：补全消耗(t/s)，tps 为 0 时只渲染 completion
+                          if (allTokensZero) return '-';
+                          const completion = log.completion_tokens || 0;
+                          const tps = calculateTps(log.elapsed_time, log.first_token_time, log.completion_tokens);
+                          if (tps > 0) {
+                            return `${completion} (${tps.toFixed(2)}t/s)`;
+                          }
+                          return completion;
+                        })()}
                       </Table.Cell>
                       <Table.Cell>
                         {allTokensZero ? '-' : (log.quota ? renderQuota(log.quota, t, 6) : '0')}

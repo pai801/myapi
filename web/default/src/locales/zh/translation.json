@@ -311,6 +311,8 @@
       "quota": "额度",
       "first_token_time": "首字",
       "elapsed_time": "总耗时",
+      "tokens_prompt_combined": "命中/请求消耗",
+      "completion_combined": "补全消耗(t/s)",
       "detail": "详情"
     },
     "messages": {
