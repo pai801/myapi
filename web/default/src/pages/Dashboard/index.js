@@ -54,6 +54,21 @@ const chartConfig = {
   ],
 };
 
+// 千分位格式化整数（requests/tokens tooltip 用）
+const formatTooltipNumber = (value) =>
+  value === null || value === undefined
+    ? value
+    : Number(value).toLocaleString('en-US');
+
+// 千分位 + 固定 6 位小数（quota tooltip 用，保持原有 toFixed(6) 精度）
+const formatTooltipQuota = (value) =>
+  value === null || value === undefined
+    ? value
+    : Number(value).toLocaleString('en-US', {
+        minimumFractionDigits: 6,
+        maximumFractionDigits: 6,
+      });
+
 const Dashboard = () => {
   const { t } = useTranslation();
   const [data, setData] = useState([]);
@@ -377,7 +392,7 @@ const Dashboard = () => {
                         boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
                       }}
                       formatter={(value) => [
-                        value,
+                        formatTooltipNumber(value),
                         t('dashboard.charts.requests.tooltip'),
                       ]}
                       labelFormatter={(label) =>
@@ -433,7 +448,7 @@ const Dashboard = () => {
                         boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
                       }}
                       formatter={(value) => [
-                        value.toFixed(6),
+                        formatTooltipQuota(value),
                         t('dashboard.charts.quota.tooltip'),
                       ]}
                       labelFormatter={(label) =>
@@ -487,7 +502,7 @@ const Dashboard = () => {
                         boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
                       }}
                       formatter={(value) => [
-                        value,
+                        formatTooltipNumber(value),
                         t('dashboard.charts.tokens.tooltip'),
                       ]}
                       labelFormatter={(label) =>
