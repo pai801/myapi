@@ -548,9 +548,9 @@ const Dashboard = () => {
                 <Tooltip
                   content={({active, payload, label}) => {
                     if (!active || !payload) return null;
-                    const filtered = payload.filter(
-                      (item) => item.value !== 0
-                    );
+                    const filtered = payload
+                      .filter((item) => item.value !== 0)
+                      .sort((a, b) => b.value - a.value);
                     if (filtered.length === 0) return null;
                     return (
                       <div
