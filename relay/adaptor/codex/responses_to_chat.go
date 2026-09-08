@@ -145,6 +145,8 @@ func convertInputItem(item map[string]interface{}) map[string]interface{} {
 		return convertCustomToolCallItem(item)
 	case "custom_tool_call_output":
 		return convertCustomToolCallOutputItem(item)
+	case "agent_message":
+		return convertAgentMessageItem(item)
 	case "reasoning":
 		return convertReasoningItem(item)
 	case "tool_search_call":
@@ -187,6 +189,30 @@ func convertReasoningItem(item map[string]interface{}) map[string]interface{} {
 	return map[string]interface{}{
 		"role":              "assistant",
 		"reasoning_content": strings.Join(parts, "\n"),
+	}
+}
+
+func convertAgentMessageItem(item map[string]interface{}) map[string]interface{} {
+	content, _ := item["content"].([]interface{})
+	var parts []string
+	for _, raw := range content {
+		block, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if blockType, _ := block["type"].(string); blockType != "text" {
+			continue
+		}
+		if text, ok := block["text"].(string); ok && text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return map[string]interface{}{
+		"role":    "assistant",
+		"content": strings.Join(parts, "\n"),
 	}
 }
 

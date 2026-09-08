@@ -1805,3 +1805,107 @@ func TestConvertResponsesToChatRequest_ReasoningEffortMapping(t *testing.T) {
 		})
 	})
 }
+
+func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
+	Convey("ConvertResponsesToChatRequest: input 中的 agent_message item 转为 assistant message", t, func() {
+
+		Convey("T1: 单个 agent_message 含 2 个 text 块 → assistant 消息按换行拼接且顺序正确", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_1",
+						"content": [
+							{"type": "text", "text": "first part"},
+							{"type": "text", "text": "second part"}
+						]
+					}
+				]
+			}`)
+
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			So(msg["content"], ShouldEqual, "first part\nsecond part")
+		})
+
+		Convey("T2: agent_message content 为空数组 → 丢弃且不报错", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "agent_message", "id": "am_2", "content": []}
+				]
+			}`)
+
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 0)
+		})
+
+		Convey("T3: agent_message 与 message 混排 → 顺序保持、各自内容正确", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "message", "role": "user", "content": "hello"},
+					{
+						"type": "agent_message",
+						"id": "am_3",
+						"content": [
+							{"type": "text", "text": "agent reply"}
+						]
+					},
+					{"type": "message", "role": "user", "content": "again"}
+				]
+			}`)
+
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 3)
+			m0 := messages[0].(map[string]interface{})
+			So(m0["role"], ShouldEqual, "user")
+			So(m0["content"], ShouldEqual, "hello")
+			m1 := messages[1].(map[string]interface{})
+			So(m1["role"], ShouldEqual, "assistant")
+			So(m1["content"], ShouldEqual, "agent reply")
+			m2 := messages[2].(map[string]interface{})
+			So(m2["role"], ShouldEqual, "user")
+			So(m2["content"], ShouldEqual, "again")
+		})
+
+		Convey("T4: content 混排非 text 块/空文本/有效文本 → 只保留有效文本块", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_4",
+						"content": [
+							{"type": "image_url", "image_url": {"url": "http://x"}},
+							{"type": "text", "text": ""},
+							{"type": "text", "text": "valid part"},
+							"not-a-map"
+						]
+					}
+				]
+			}`)
+
+			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			So(msg["content"], ShouldEqual, "valid part")
+		})
+	})
+}
