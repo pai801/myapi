@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/pai801/myapi/common/logger"
 )
@@ -62,7 +61,7 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 
 	if v, ok := req["tool_choice"]; ok {
 		if len(mergedTools) > 0 {
-			chatReq["tool_choice"] = v
+			chatReq["tool_choice"] = convertToolChoice(v)
 		}
 	}
 
@@ -82,7 +81,8 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 				// 映射到 high（各上游普遍支持的默认档位）而非透传 auto 导致 400。
 				chatReq["reasoning_effort"] = "high"
 			case "minimal":
-				chatReq["reasoning_effort"] = "low"
+				// chat 协议 §2.2 reasoning_effort 枚举含 minimal（none/minimal/low/medium/high/xhigh/max），直通
+				chatReq["reasoning_effort"] = "minimal"
 			case "low":
 				chatReq["reasoning_effort"] = "low"
 			case "medium":
@@ -100,12 +100,93 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 		}
 	}
 
+	// text.format → chat response_format（responses §2 text 对象 → chat §2.4 response_format）：
+	// json_schema 按 chat 协议嵌套到 json_schema 子键（name/description/schema/strict 等直通，type 除外）；
+	// text / json_object / 未识别类型原样直通（chat 侧同样按 type 判别）。
+	if text, ok := req["text"].(map[string]interface{}); ok {
+		if format, ok := text["format"].(map[string]interface{}); ok {
+			if formatType, _ := format["type"].(string); formatType == "json_schema" {
+				inner := make(map[string]interface{}, len(format)-1)
+				for k, v := range format {
+					if k != "type" {
+						inner[k] = v
+					}
+				}
+				chatReq["response_format"] = map[string]interface{}{
+					"type":        "json_schema",
+					"json_schema": inner,
+				}
+			} else {
+				chatReq["response_format"] = format
+			}
+		}
+		// text.verbosity（responses §2 text 对象内嵌）→ chat §2.2 顶层 verbosity
+		if verbosity, ok := text["verbosity"].(string); ok && verbosity != "" {
+			chatReq["verbosity"] = verbosity
+		}
+	}
+
+	// 顶层字段直通（responses §2 → chat §2 同名字段，保持请求原值）：
+	// store/metadata/modalities/service_tier/moderation 见 chat §2.2；prompt_cache_key/prompt_cache_options/safety_identifier 见 chat §2.4。
+	// service_tier 枚举差异：responses §2 含 ultrafast 而 chat §2.2 枚举不含，仍原值直通（是否支持由上游裁决，不臆造映射）。
+	// moderation 结构两份文档均未展开，原值直通（结构不兼容时上游会显式报错，优于静默丢弃）。
+	// 无 chat 对应、维持丢弃的字段：previous_response_id/include/background/max_tool_calls/prompt/truncation/conversation/context_management。
+	for _, key := range []string{
+		"store", "metadata", "modalities", "service_tier", "moderation",
+		"prompt_cache_key", "prompt_cache_options", "safety_identifier",
+	} {
+		if v, ok := req[key]; ok && v != nil {
+			chatReq[key] = v
+		}
+	}
+
 	result, _ := json.Marshal(chatReq)
 	return result
 }
 
+// convertToolChoice 把 responses 协议 tool_choice 转成 chat 协议形状（responses §2 → chat §5.2）：
+// "auto"/"none"/"required" 字符串两协议同形，直通；
+// responses 的 {"type":"function","name":"xxx"} 需嵌套为 {"type":"function","function":{"name":"xxx"}}；
+// "指定 tool id" 字符串形态（responses §2）：function:<name> 可映射为 chat function 强制调用形状，
+// 其余字符串（指向 custom/mcp/web_search 等工具）chat §5.2 无对应表达 → 显式降级 auto + Warn（与本文件
+// reasoning_effort 未识别值兜底同一处置模式），禁止静默透传上游必然 400 的非法形状；
+// 其他对象形式（custom/allowed_tools 等）默认已是 chat 形状，原样直通。
+func convertToolChoice(v interface{}) interface{} {
+	if s, ok := v.(string); ok {
+		switch s {
+		case "auto", "none", "required":
+			return v
+		}
+		if name := strings.TrimPrefix(s, "function:"); name != s && name != "" {
+			return map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name": name,
+				},
+			}
+		}
+		logger.Log.Warnf("downgrade responses tool_choice string with no chat tool_choice equivalent to auto: %q", s)
+		return "auto"
+	}
+	if m, ok := v.(map[string]interface{}); ok {
+		if t, _ := m["type"].(string); t == "function" {
+			if name, ok := m["name"].(string); ok && name != "" {
+				return map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name": name,
+					},
+				}
+			}
+		}
+	}
+	return v
+}
+
 func convertInputToMessages(input interface{}) []interface{} {
 	var messages []interface{}
+	// 本次转换（= 单次请求）内的 builtin 工具 fallback call_id 配对状态，见 builtinFallbackCallIDPairer 注释
+	pairer := newBuiltinFallbackCallIDPairer()
 
 	switch v := input.(type) {
 	case string:
@@ -116,7 +197,7 @@ func convertInputToMessages(input interface{}) []interface{} {
 	case []interface{}:
 		for _, item := range v {
 			if itemMap, ok := item.(map[string]interface{}); ok {
-				if msg := convertInputItem(itemMap); msg != nil {
+				if msg := convertInputItem(itemMap, pairer); msg != nil {
 					messages = append(messages, msg)
 				}
 			}
@@ -126,7 +207,7 @@ func convertInputToMessages(input interface{}) []interface{} {
 	return messages
 }
 
-func convertInputItem(item map[string]interface{}) map[string]interface{} {
+func convertInputItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
 	itemType, _ := item["type"].(string)
 	if itemType == "" {
 		if _, hasRole := item["role"]; hasRole {
@@ -150,15 +231,29 @@ func convertInputItem(item map[string]interface{}) map[string]interface{} {
 	case "reasoning":
 		return convertReasoningItem(item)
 	case "tool_search_call":
-		return convertToolSearchCallItem(item)
+		return convertToolSearchCallItem(item, pairer)
 	case "tool_search_call_output", "tool_search_output":
-		return convertToolSearchCallOutputItem(item)
+		return convertToolSearchCallOutputItem(item, pairer)
 	case "web_search_call":
-		return convertWebSearchCallItem(item)
+		return convertWebSearchCallItem(item, pairer)
 	case "web_search_call_output", "web_search_output":
-		return convertWebSearchCallOutputItem(item)
+		return convertWebSearchCallOutputItem(item, pairer)
+	case "file_search_call", "computer_call", "computer_call_output",
+		"local_shell_call", "local_shell_call_output",
+		"shell_call", "shell_call_output",
+		"apply_patch_call", "apply_patch_call_output",
+		"code_interpreter_call", "image_generation_call",
+		"mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "mcp_call",
+		"additional_tools", "configuration_update",
+		"compaction", "compaction_trigger", "item_reference",
+		"program", "program_output":
+		// responses §3.8 已知但不可映射的 item 类型：chat 协议 §3 消息仅
+		// system/developer/user/assistant/tool/function 六种角色，调用型/会话管理型/MCP 链路 item 均无对应表达。
+		// 已知不可映射 → Info 记录后丢弃，不 Errorf 误报（codex 历史上下文带回这些 item 属正常情况）。
+		logger.Log.Infof("drop known unmappable codex input item type (no chat message equivalent): %q", itemType)
+		return nil
 	default:
-		logger.Log.Errorf("unknown codex input item type: " + itemType)
+		logger.Log.Errorf("unknown codex input item type: %q", itemType)
 		return nil
 	}
 }
@@ -216,26 +311,75 @@ func convertAgentMessageItem(item map[string]interface{}) map[string]interface{}
 	}
 }
 
-func convertToolSearchCallItem(item map[string]interface{}) map[string]interface{} {
-	return convertBuiltinToolCallItem(item, "tool_search", "ts_")
+// builtinFallbackCallIDPairer 为缺 call_id 的 builtin 工具 call/output item（tool_search/web_search）
+// 提供确定性 fallback call_id 配对。chat 协议要求 assistant.tool_calls[].id 与 role:tool 的 tool_call_id
+// 精确配对，旧实现两侧各自 UnixNano 随机生成永远配不上（上游必然 400）。此处改为 call 生成确定性 id
+// 并按类型压栈登记，同类型 output 缺 call_id 时取栈顶（= 该类型最近一个未配对 id）复用并出栈；
+// 用栈而非单槽是为兼容并行调用形状（call,call,out,out），避免产生无 call 可配的孤儿 tool 消息。
+// 状态仅存活于单次 convertInputToMessages 调用（单请求转换），禁止跨请求残留。
+type builtinFallbackCallIDPairer struct {
+	counters map[string]int
+	pending  map[string][]string
 }
 
-func convertToolSearchCallOutputItem(item map[string]interface{}) map[string]interface{} {
-	return convertBuiltinToolCallOutputItem(item, "ts_")
+func newBuiltinFallbackCallIDPairer() *builtinFallbackCallIDPairer {
+	return &builtinFallbackCallIDPairer{
+		counters: make(map[string]int),
+		pending:  make(map[string][]string),
+	}
 }
 
-func convertWebSearchCallItem(item map[string]interface{}) map[string]interface{} {
-	return convertBuiltinToolCallItem(item, "web_search", "ws_")
+// nextCallID 生成确定性 fallback id（前缀+"fb"+递增计数）并压入该前缀未配对栈顶。
+func (p *builtinFallbackCallIDPairer) nextCallID(idPrefix string) string {
+	id := p.standaloneCallID(idPrefix)
+	p.pending[idPrefix] = append(p.pending[idPrefix], id)
+	return id
 }
 
-func convertWebSearchCallOutputItem(item map[string]interface{}) map[string]interface{} {
-	return convertBuiltinToolCallOutputItem(item, "ws_")
+// standaloneCallID 只生成确定性 id、不登记配对：孤立 output 用之，避免被后续 output 错配。
+func (p *builtinFallbackCallIDPairer) standaloneCallID(idPrefix string) string {
+	p.counters[idPrefix]++
+	return idPrefix + "fb" + fmt.Sprintf("%d", p.counters[idPrefix])
 }
 
-func convertBuiltinToolCallItem(item map[string]interface{}, name, idPrefix string) map[string]interface{} {
+// takePending 弹出该前缀最近一个未配对的 fallback call id（栈顶）。
+func (p *builtinFallbackCallIDPairer) takePending(idPrefix string) (string, bool) {
+	stack := p.pending[idPrefix]
+	if len(stack) == 0 {
+		return "", false
+	}
+	id := stack[len(stack)-1]
+	stack = stack[:len(stack)-1]
+	if len(stack) == 0 {
+		delete(p.pending, idPrefix)
+	} else {
+		p.pending[idPrefix] = stack
+	}
+	return id, true
+}
+
+func convertToolSearchCallItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
+	return convertBuiltinToolCallItem(item, "tool_search", "ts_", pairer)
+}
+
+func convertToolSearchCallOutputItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
+	return convertBuiltinToolCallOutputItem(item, "ts_", pairer)
+}
+
+func convertWebSearchCallItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
+	return convertBuiltinToolCallItem(item, "web_search", "ws_", pairer)
+}
+
+func convertWebSearchCallOutputItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
+	return convertBuiltinToolCallOutputItem(item, "ws_", pairer)
+}
+
+// convertBuiltinToolCallItem 转换 builtin 工具 call item。
+// 契约：pairer 由 convertInputToMessages 构造并沿调用链透传，必须非 nil——call/output 共享同一实例才能配对。
+func convertBuiltinToolCallItem(item map[string]interface{}, name, idPrefix string, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
 	callID, _ := item["call_id"].(string)
 	if callID == "" {
-		callID = idPrefix + fmt.Sprintf("%d", time.Now().UnixNano())
+		callID = pairer.nextCallID(idPrefix)
 	}
 	args := getStringOrJSONRaw(item["arguments"])
 	if args == "" {
@@ -257,10 +401,18 @@ func convertBuiltinToolCallItem(item map[string]interface{}, name, idPrefix stri
 	}
 }
 
-func convertBuiltinToolCallOutputItem(item map[string]interface{}, idPrefix string) map[string]interface{} {
+// convertBuiltinToolCallOutputItem 转换 builtin 工具 output item。
+// 契约：pairer 非 nil（与 convertBuiltinToolCallItem 同一实例，见其注释）。
+func convertBuiltinToolCallOutputItem(item map[string]interface{}, idPrefix string, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
 	callID, _ := item["call_id"].(string)
 	if callID == "" {
-		callID = idPrefix + fmt.Sprintf("%d", time.Now().UnixNano())
+		if pending, ok := pairer.takePending(idPrefix); ok {
+			callID = pending
+		} else {
+			// 孤立 output：无先行未配对 fallback call 可复用，生成独立确定性 id 并显式告警
+			callID = pairer.standaloneCallID(idPrefix)
+			logger.Log.Warnf("builtin tool output has no preceding fallback call to pair with, emitted unpaired id: %q", callID)
+		}
 	}
 	content := getStringOrJSONRaw(item["output"])
 	if content == "" {
@@ -295,9 +447,9 @@ func convertMessageItem(item map[string]interface{}) map[string]interface{} {
 		role = "user"
 	}
 
-	if role == "developer" {
-		role = "system"
-	}
+	// chat §3.1 消息联合已含 developer 类型（system/developer/user/assistant/tool/function），
+	// responses §3.1 message.role 的 developer 原样直通，不再降级为 system（内容保真）。
+	// 个别旧上游模型不识别 developer role 属上游能力差异，由上游裁决，转换层不预判。
 
 	message := map[string]interface{}{
 		"role":    role,
@@ -309,16 +461,18 @@ func convertMessageItem(item map[string]interface{}) map[string]interface{} {
 		case string:
 			message["content"] = v
 		case []interface{}:
-			message["content"] = convertContentArray(v)
+			// role 传入供 refusal part 按 chat §4 消息×部件矩阵校验（refusal 仅 assistant）
+			message["content"] = convertContentArray(v, role)
 		}
 	}
 
 	return message
 }
 
-func convertContentArray(content []interface{}) interface{} {
+func convertContentArray(content []interface{}, role string) interface{} {
 	var textParts []string
 	var hasMedia bool
+	var hasRefusal bool
 	chatContent := []interface{}{}
 
 	for _, block := range content {
@@ -330,6 +484,11 @@ func convertContentArray(content []interface{}) interface{} {
 
 			switch blockType {
 			case "input_text", "output_text", "text":
+				if hasRefusal {
+					// refusal 已先行（[refusal, text] 乱序），chat §4 互斥：丢弃后到的 text
+					logger.Log.Infof("drop text part after refusal part in assistant message (chat §4 mutual exclusion)")
+					continue
+				}
 				if text, ok := blockMap["text"].(string); ok && text != "" {
 					textParts = append(textParts, text)
 					chatContent = append(chatContent, map[string]interface{}{
@@ -338,15 +497,67 @@ func convertContentArray(content []interface{}) interface{} {
 					})
 				}
 			case "input_image", "image_url":
+				if hasRefusal {
+					// refusal 已先行（[refusal, media] 乱序），chat §4 互斥：丢弃后到的 image
+					logger.Log.Infof("drop image part after refusal part in assistant message (chat §4 mutual exclusion)")
+					continue
+				}
 				if imgBlock := convertImageBlock(blockMap); imgBlock != nil {
 					chatContent = append(chatContent, imgBlock)
 					hasMedia = true
 				}
+			case "input_audio":
+				if hasRefusal {
+					// refusal 已先行（[refusal, media] 乱序），chat §4 互斥：丢弃后到的 audio
+					logger.Log.Infof("drop audio part after refusal part in assistant message (chat §4 mutual exclusion)")
+					continue
+				}
+				if audioBlock := convertInputAudioBlock(blockMap); audioBlock != nil {
+					chatContent = append(chatContent, audioBlock)
+					hasMedia = true
+				}
+			case "input_file":
+				if hasRefusal {
+					// refusal 已先行（[refusal, media] 乱序），chat §4 互斥：丢弃后到的 file
+					logger.Log.Infof("drop file part after refusal part in assistant message (chat §4 mutual exclusion)")
+					continue
+				}
+				if fileBlock := convertInputFileBlock(blockMap); fileBlock != nil {
+					chatContent = append(chatContent, fileBlock)
+					hasMedia = true
+				}
+			case "refusal":
+				// responses §5 refusal part → chat content part。chat §4 矩阵：refusal 仅 assistant 消息可用，
+				// 且与 text 互斥（恰一个）。
+				refusalText, ok := blockMap["refusal"].(string)
+				if !ok || refusalText == "" {
+					continue
+				}
+				if role != "assistant" {
+					logger.Log.Infof("drop refusal part for non-assistant message role: %q", role)
+					continue
+				}
+				// assistant 消息已含 text 等 part 时按互斥规则取舍：保留 refusal 丢弃已收集的
+				// text/media（refusal 是该消息的语义终态），不把两者同时放入（chat §4 矩阵）。
+				if len(chatContent) > 0 {
+					logger.Log.Infof("drop coexisting text/media parts in assistant message with refusal part (chat §4 mutual exclusion)")
+					chatContent = []interface{}{}
+					textParts = nil
+					hasMedia = false
+				}
+				hasRefusal = true
+				chatContent = append(chatContent, map[string]interface{}{
+					"type":    "refusal",
+					"refusal": refusalText,
+				})
+			default:
+				// 未知 content block type 无 chat §4 部件对应：Warn 后跳过，静默丢弃改显式说明
+				logger.Log.Warnf("drop unknown codex content block type (no chat content part equivalent): %q", blockType)
 			}
 		}
 	}
 
-	if hasMedia {
+	if hasMedia || hasRefusal {
 		return chatContent
 	}
 	if len(textParts) > 0 {
@@ -409,6 +620,70 @@ func convertImageBlock(block map[string]interface{}) interface{} {
 	}
 
 	return nil
+}
+
+// convertInputAudioBlock 把 responses input_audio part（responses §3.1）转为 chat input_audio part（chat §4）：
+// input_audio 子对象形状（data/format）直通；顶层 data/format 形状组装为子对象；缺 data 或 format 则丢弃。
+// 流式差异：chat 协议文档（§4 部件矩阵按消息角色约束）未对流式请求限制 input_audio，
+// 转换层不做流式/非流式区分；流式不支持属上游模型执行层限制。
+func convertInputAudioBlock(block map[string]interface{}) interface{} {
+	if inner, ok := block["input_audio"].(map[string]interface{}); ok {
+		data, _ := inner["data"].(string)
+		format, _ := inner["format"].(string)
+		if data == "" || format == "" {
+			return nil
+		}
+		return map[string]interface{}{
+			"type":        "input_audio",
+			"input_audio": inner,
+		}
+	}
+	data, _ := block["data"].(string)
+	format, _ := block["format"].(string)
+	if data == "" || format == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		"type": "input_audio",
+		"input_audio": map[string]interface{}{
+			"data":   data,
+			"format": format,
+		},
+	}
+}
+
+// convertInputFileBlock 把 responses input_file part（responses §3.1）转为 chat file part（chat §4）：
+// file 子对象形状直通；顶层 filename/file_data/file_id 形状组装为 file 子对象（三选一）；无有效载荷则丢弃。
+func convertInputFileBlock(block map[string]interface{}) interface{} {
+	if inner, ok := block["file"].(map[string]interface{}); ok && hasFilePayload(inner) {
+		return map[string]interface{}{
+			"type": "file",
+			"file": inner,
+		}
+	}
+	fileInner := make(map[string]interface{})
+	for _, key := range []string{"filename", "file_data", "file_id"} {
+		if v, ok := block[key]; ok && v != nil && v != "" {
+			fileInner[key] = v
+		}
+	}
+	if len(fileInner) == 0 {
+		return nil
+	}
+	return map[string]interface{}{
+		"type": "file",
+		"file": fileInner,
+	}
+}
+
+// hasFilePayload 判断 file 对象是否含 filename/file_data/file_id 任一有效载荷。
+func hasFilePayload(inner map[string]interface{}) bool {
+	for _, key := range []string{"filename", "file_data", "file_id"} {
+		if v, ok := inner[key]; ok && v != nil && v != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func convertFunctionCallItem(item map[string]interface{}) map[string]interface{} {
@@ -538,8 +813,28 @@ func convertToolsToOpenAI(tools []interface{}) []interface{} {
 			appendUniqueChatTools(&result, seen, flattenCustomTool(toolMap))
 		case "namespace":
 			appendUniqueChatTools(&result, seen, flattenNamespaceTool(toolMap))
-		case "web_search", "local_shell", "computer_use", "tool_search":
+		case "web_search", "web_search_preview", "local_shell", "shell",
+			"computer", "computer_use", "computer_use_preview", "tool_search":
+			// responses §9 内建工具族：web_search_preview/computer_use_preview 为对应工具预览名，
+			// shell 为 codex 函数 shell，均与既有 web_search/computer_use/local_shell 同族，统一扁平化为 function。
 			appendUniqueChatTools(&result, seen, flattenBuiltinTool(toolType, toolMap))
+		case "apply_patch":
+			// responses §9 apply_patch 独立工具类型（codex 文件编辑）与 type:custom name:apply_patch 等价：
+			// 统一按 custom 扁平化（主工具 + 5 个代理子工具），name 缺失时回退 "apply_patch"。
+			name := getStringValue(toolMap, "name")
+			if name == "" {
+				name = "apply_patch"
+			}
+			apTool := map[string]interface{}{
+				"type":        "custom",
+				"name":        name,
+				"description": getStringValue(toolMap, "description"),
+			}
+			appendUniqueChatTools(&result, seen, flattenCustomTool(apTool))
+		default:
+			// responses §9 其余工具（file_search/code_interpreter/image_generation/mcp/programmatic_tool_calling 等）
+			// 在 chat §5.1 仅 function 类型、无对应表达：Info 记录后丢弃（不 Errorf 避免噪音，静默丢弃改显式说明）。
+			logger.Log.Infof("drop unmappable codex tool type (no chat tool equivalent): %q", toolType)
 		}
 	}
 
@@ -907,16 +1202,43 @@ func ConvertChatResponseToResponsesWithContext(chatResponseBody []byte, model st
 		return chatResponseBody
 	}
 
+	// status 按首个 choice 的 finish_reason 推导（chat §6.2 → responses §4）：
+	// length → incomplete + reason=max_output_tokens；content_filter → incomplete + reason=content_filter；
+	// 其余（stop/tool_calls 等）保持 completed。与流式路径（chat_to_responses.go）对称。
+	status := "completed"
+	var incompleteDetails map[string]interface{}
+	if choices, ok := chatResp["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choiceMap, ok := choices[0].(map[string]interface{}); ok {
+			if fr, ok := choiceMap["finish_reason"].(string); ok {
+				switch fr {
+				case "length":
+					status = "incomplete"
+					incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+				case "content_filter":
+					status = "incomplete"
+					incompleteDetails = map[string]interface{}{"reason": "content_filter"}
+				}
+			}
+		}
+	}
+
 	responsesResp := map[string]interface{}{
 		"output": []interface{}{},
-		"status": "completed",
+		"status": status,
+	}
+	if incompleteDetails != nil {
+		responsesResp["incomplete_details"] = incompleteDetails
+		// 与流式路径对齐（chat_to_responses.go）：incomplete 终态同时标记 truncated（responses §4）
+		responsesResp["truncated"] = true
 	}
 
 	if id, ok := chatResp["id"].(string); ok {
 		responsesResp["id"] = id
 	}
 	if created, ok := chatResp["created"].(float64); ok {
-		responsesResp["created"] = int64(created)
+		// responses 协议 §4 主对象字段名为 created_at（与流式路径 response.created_at 保持一致），
+		// chat 的 created（Unix 秒）直接映射，不做单位换算。
+		responsesResp["created_at"] = int64(created)
 	}
 	if model != "" {
 		responsesResp["model"] = model
@@ -992,7 +1314,16 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 		})
 	}
 
-	// 处理 content，同时提取 <think> 标签
+	// 处理 refusal（chat §3.1/§6.1 message.refusal → responses §5 refusal content part）。
+	// 有 content 时合并进同一 message item；无 content 时单独生成 refusal message item。
+	refusalText, _ := message["refusal"].(string)
+
+	// annotations（chat §6.1.3 message.annotations → responses §5 output_text part.annotations）：
+	// 引用标注（url_citation 等）附加到文本 part；无文本 part 可附着时随消息丢弃（与缺失时行为一致）。
+	annotations, _ := message["annotations"].([]interface{})
+	hasAnnotations := len(annotations) > 0
+
+	// 处理 content，同时提取  thinking 标签
 	if content, ok := message["content"]; ok && content != nil {
 		// 先尝试提取 thinking 内容
 		thinking, remainingContent := extractThinkingFromContent(content)
@@ -1007,16 +1338,29 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 		if remainingContent != nil {
 			switch v := remainingContent.(type) {
 			case string:
-				if v != "" {
+				if v != "" || refusalText != "" {
+					parts := []interface{}{}
+					if v != "" {
+						textPart := map[string]interface{}{
+							"type": "output_text",
+							"text": v,
+						}
+						if hasAnnotations {
+							textPart["annotations"] = annotations
+						}
+						parts = append(parts, textPart)
+					}
+					if refusalText != "" {
+						parts = append(parts, map[string]interface{}{
+							"type":    "refusal",
+							"refusal": refusalText,
+						})
+						refusalText = ""
+					}
 					output = append(output, map[string]interface{}{
-						"type": "message",
-						"role": "assistant",
-						"content": []interface{}{
-							map[string]interface{}{
-								"type": "output_text",
-								"text": v,
-							},
-						},
+						"type":    "message",
+						"role":    "assistant",
+						"content": parts,
 					})
 				}
 			case []interface{}:
@@ -1032,15 +1376,64 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 						}
 					}
 				}
-				if hasContent {
+				if hasContent || refusalText != "" {
+					parts := v
+					// annotations 附加到首个文本 part（已有 annotations 字段时不覆盖）
+					if hasAnnotations {
+						for _, block := range parts {
+							if bm, ok := block.(map[string]interface{}); ok {
+								if bt, _ := bm["type"].(string); (bt == "text" || bt == "output_text") && getStringValue(bm, "text") != "" {
+									if _, exists := bm["annotations"]; !exists {
+										bm["annotations"] = annotations
+									}
+									break
+								}
+							}
+						}
+					}
+					if refusalText != "" {
+						parts = append(parts, map[string]interface{}{
+							"type":    "refusal",
+							"refusal": refusalText,
+						})
+						refusalText = ""
+					}
 					output = append(output, map[string]interface{}{
 						"type":    "message",
 						"role":    "assistant",
-						"content": v,
+						"content": parts,
 					})
 				}
 			}
 		}
+	}
+
+	// 无 content 时的纯 refusal message item
+	if refusalText != "" {
+		output = append(output, map[string]interface{}{
+			"type": "message",
+			"role": "assistant",
+			"content": []interface{}{
+				map[string]interface{}{
+					"type":    "refusal",
+					"refusal": refusalText,
+				},
+			},
+		})
+	}
+
+	// audio（chat §6.1.2 message.audio → responses output_audio item）：
+	// chat §10 差异速查标注 responses 侧对应 output_audio item；audio 对象（id/expires_at/data/transcript）原样直通，
+	// item id 复用 audio.id（缺失时不写 id 字段）。
+	if audio, ok := message["audio"].(map[string]interface{}); ok {
+		audioItem := map[string]interface{}{
+			"type":         "output_audio",
+			"output_audio": audio,
+		}
+		if audioID, ok := audio["id"].(string); ok && audioID != "" {
+			audioItem["id"] = audioID
+		}
+		output = append(output, audioItem)
 	}
 
 	// 处理 tool_calls
@@ -1050,6 +1443,30 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 				fnVal := getObjectValue(tcMap, "function")
 				fnMap, ok := fnVal.(map[string]interface{})
 				if !ok {
+					// chat §6.1.1 除 function 外还定义 type:"custom" 变体（custom:{name*,input*}，
+					// 字段形状以 openai-go ChatCompletionMessageCustomToolCall 为准），与 responses §5
+					// custom_tool_call（id*,call_id*,name*,input*,status）字段一一对应，可无损映射；
+					// 必填子键缺失视为上游畸形，Warn 后跳过，不产出畸形 item。
+					if tcType, _ := tcMap["type"].(string); tcType == "custom" {
+						customMap, _ := getObjectValue(tcMap, "custom").(map[string]interface{})
+						customCallID := getStringValue(tcMap, "id")
+						customName := getStringValue(customMap, "name")
+						customInput, hasCustomInput := customMap["input"].(string)
+						if customCallID == "" || customName == "" || !hasCustomInput {
+							logger.Log.Warnf("drop malformed chat custom tool call in responses output (missing id/name/input)")
+						} else {
+							output = append(output, map[string]interface{}{
+								"type":    "custom_tool_call",
+								"id":      "ctc_" + customCallID,
+								"call_id": customCallID,
+								"name":    customName,
+								"input":   customInput,
+								"status":  "completed",
+							})
+						}
+						continue
+					}
+					logger.Log.Warnf("drop chat tool call with no function/custom payload in responses output (chat §6.1.1): %q", getStringValue(tcMap, "type"))
 					continue
 				}
 				rawName := getStringValue(fnMap, "name")
@@ -1078,12 +1495,14 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 				}
 				if codexCtx != nil {
 					if codexCtx.IsBuiltinTool(rawName, "tool_search") || rawName == "tool_search" {
+						// execution:"client"：本中转为客户端侧代理执行，与流式路径输出对齐（docs §3.7）
 						output = append(output, map[string]interface{}{
 							"type":      "tool_search_call",
 							"id":        "ts_" + callID,
 							"call_id":   callID,
 							"name":      rawName,
 							"arguments": rawArgs,
+							"execution": "client",
 							"status":    "completed",
 						})
 						continue
@@ -1123,7 +1542,7 @@ func parseUsage(usage map[string]interface{}) map[string]interface{} {
 
 	var inputTokens, outputTokens, totalTokens int
 	var cachedTokens int
-	var hasCacheDetails bool
+	var cacheWriteTokens int
 
 	// 检查 Claude 格式（优先级最高）
 	if _, has := usage["input_tokens"]; has {
@@ -1155,12 +1574,15 @@ func parseUsage(usage map[string]interface{}) map[string]interface{} {
 	result["output_tokens"] = outputTokens
 	result["total_tokens"] = totalTokens
 
-	// 处理缓存相关字段
+	// 处理缓存相关字段。cache_write_tokens 语义对照 chat §8.1（写入缓存的 prompt token 数）
+	// → responses §6 input_tokens_details.cache_write_tokens，prompt/input 两种源命名同读（与 cached_tokens 口径一致）。
 	if v, has := usage["prompt_tokens_details"]; has {
 		if details, ok := v.(map[string]interface{}); ok {
 			if _, has := details["cached_tokens"]; has {
 				cachedTokens = getIntValue(details, "cached_tokens")
-				hasCacheDetails = true
+			}
+			if _, has := details["cache_write_tokens"]; has {
+				cacheWriteTokens = getIntValue(details, "cache_write_tokens")
 			}
 		}
 	}
@@ -1169,14 +1591,15 @@ func parseUsage(usage map[string]interface{}) map[string]interface{} {
 		if details, ok := v.(map[string]interface{}); ok {
 			if _, has := details["cached_tokens"]; has {
 				cachedTokens = getIntValue(details, "cached_tokens")
-				hasCacheDetails = true
+			}
+			if _, has := details["cache_write_tokens"]; has {
+				cacheWriteTokens = getIntValue(details, "cache_write_tokens")
 			}
 		}
 	}
 
 	if _, has := usage["cache_read_input_tokens"]; has {
 		cachedTokens = getIntValue(usage, "cache_read_input_tokens")
-		hasCacheDetails = true
 		result["cache_read_input_tokens"] = cachedTokens
 	}
 
@@ -1197,7 +1620,6 @@ func parseUsage(usage map[string]interface{}) map[string]interface{} {
 	// Gemini 缓存字段
 	if _, has := usage["cachedContentTokenCount"]; has {
 		cachedTokens = getIntValue(usage, "cachedContentTokenCount")
-		hasCacheDetails = true
 		// Gemini 的 promptTokenCount 已经包含了 cachedContentTokenCount，需要扣除
 		if _, has := usage["promptTokenCount"]; has {
 			actualInput := inputTokens - cachedTokens
@@ -1210,19 +1632,33 @@ func parseUsage(usage map[string]interface{}) map[string]interface{} {
 		}
 	}
 
-	// 添加 input_tokens_details（兼容 OpenAI 格式）
-	if hasCacheDetails && cachedTokens > 0 {
-		result["input_tokens_details"] = map[string]interface{}{
-			"cached_tokens": cachedTokens,
-		}
+	// input_tokens_details 恒存在（responses §6 usage「全部必填」口径，与流式路径对称）：
+	// 值为 0 也输出 cached_tokens/cache_write_tokens 子字段，不再条件性省略 details 对象。
+	result["input_tokens_details"] = map[string]interface{}{
+		"cached_tokens":      cachedTokens,
+		"cache_write_tokens": cacheWriteTokens,
 	}
 
-	// 处理 output_tokens_details
+	// output_tokens_details 恒存在：源 details（chat §8.2）透传，缺 reasoning_tokens 时补 0
 	if v, has := usage["completion_tokens_details"]; has {
-		result["output_tokens_details"] = v
+		result["output_tokens_details"] = normalizeOutputDetails(v)
 	} else if v, has := usage["output_tokens_details"]; has {
-		result["output_tokens_details"] = v
+		result["output_tokens_details"] = normalizeOutputDetails(v)
+	} else {
+		result["output_tokens_details"] = map[string]interface{}{"reasoning_tokens": 0}
 	}
 
 	return result
+}
+
+// normalizeOutputDetails 透传上游输出细分对象，兜底保证 reasoning_tokens 子字段恒存在。
+func normalizeOutputDetails(v interface{}) interface{} {
+	details, ok := v.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"reasoning_tokens": 0}
+	}
+	if _, has := details["reasoning_tokens"]; !has {
+		details["reasoning_tokens"] = 0
+	}
+	return details
 }

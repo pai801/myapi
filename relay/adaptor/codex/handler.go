@@ -928,7 +928,10 @@ func processSSEEvent(
 		return
 	}
 
-	if eventType == "response.completed" {
+	// response.incomplete 是合法成功的终止状态（length/content_filter 截断，非失败）：
+	// 复用 completed 的终态哨兵以停止等待、抑制迟到事件与合成 completed；
+	// 与 completed 的区分保留在事件 payload 及 capture 快照的 response.status 上
+	if eventType == "response.completed" || eventType == "response.incomplete" {
 		*state.sawCompletedTerminal = true
 	}
 
@@ -1002,7 +1005,7 @@ func processSSEEvent(
 		}
 	}
 
-	if eventType == "response.completed" && streamResponse.Response != nil {
+	if (eventType == "response.completed" || eventType == "response.incomplete") && streamResponse.Response != nil {
 		finalizeCompletedCapture(state.capture, state.usage, streamResponse.Response, *state.outputItems)
 	}
 }

@@ -416,9 +416,9 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 // responsesUsage 解析 responses 协议的 usage 字段（DeepSeek 原生透传用）。
 // responses 协议 token 字段为 input_tokens/output_tokens，与 chat 协议（prompt_tokens/completion_tokens）不同。
 type responsesUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
 	InputTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"input_tokens_details"`
@@ -713,15 +713,19 @@ type chatResponsesStreamResult struct {
 	StreamErrored   bool
 	FailedTerminal  bool
 	SuccessTerminal bool
-	TerminalSeen    bool
-	FailureError    *model.Error
+	// IncompleteTerminal 标记终态为 response.incomplete（截断成功）：终态识别上并入 SuccessTerminal，
+	// 该位仅用于与 response.completed 区分，消费方无需改动即按成功路径计费/提取
+	IncompleteTerminal bool
+	TerminalSeen       bool
+	FailureError       *model.Error
 }
 
 type convertedEventMeta struct {
-	EventName string
-	Failed    bool
-	Completed bool
-	StreamErr *model.Error
+	EventName  string
+	Failed     bool
+	Completed  bool
+	Incomplete bool
+	StreamErr  *model.Error
 }
 
 func parseConvertedEventMeta(converted string) convertedEventMeta {
@@ -740,6 +744,12 @@ func parseConvertedEventMeta(converted string) convertedEventMeta {
 	payload := strings.Join(payloadLines, "\n")
 	if meta.EventName == "response.completed" {
 		meta.Completed = true
+		return meta
+	}
+	// response.incomplete 是合法成功的终止状态（上游 finish_reason=length/content_filter
+	// 被转换器映射为截断终态），非失败：按 completed 的终态语义接入，区分由事件 status 保留
+	if meta.EventName == "response.incomplete" {
+		meta.Incomplete = true
 		return meta
 	}
 	if meta.EventName == "response.failed" {
@@ -784,6 +794,11 @@ func inspectConvertedResponsesEvents(c *gin.Context, convertedEvents []string) c
 			result.SuccessTerminal = true
 			result.TerminalSeen = true
 		}
+		if meta.Incomplete {
+			result.SuccessTerminal = true
+			result.IncompleteTerminal = true
+			result.TerminalSeen = true
+		}
 		if meta.Failed {
 			result.StreamErrored = true
 			result.FailedTerminal = true
@@ -811,6 +826,12 @@ func forwardChatResponsesStream(c *gin.Context, body io.Reader, requestBody []by
 					if eventResult.SuccessTerminal {
 						result.SuccessTerminal = true
 					}
+					if eventResult.IncompleteTerminal {
+						result.IncompleteTerminal = true
+					}
+					if eventResult.TerminalSeen {
+						result.TerminalSeen = true
+					}
 					c.Writer.Flush()
 				}
 				return result, nil
@@ -833,6 +854,12 @@ func forwardChatResponsesStream(c *gin.Context, body io.Reader, requestBody []by
 		eventResult := inspectConvertedResponsesEvents(c, convertedEvents)
 		if eventResult.SuccessTerminal {
 			result.SuccessTerminal = true
+		}
+		if eventResult.IncompleteTerminal {
+			result.IncompleteTerminal = true
+		}
+		if eventResult.TerminalSeen {
+			result.TerminalSeen = true
 		}
 		if eventResult.FailedTerminal {
 			result.StreamErrored = true

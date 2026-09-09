@@ -32,16 +32,16 @@ type ResponsesRequest struct {
 
 // ResponsesItem is a message item in Responses API
 type ResponsesItem struct {
-	ID        string      `json:"id,omitempty"`
-	Type      string      `json:"type"`           // message, text, function_call, function_call_output
-	Role      string      `json:"role,omitempty"` // user, assistant (for type=message)
-	Status    string      `json:"status,omitempty"`
-	Content   interface{} `json:"content,omitempty"` // string or []ContentBlock
-	Summary   interface{} `json:"summary,omitempty"`
-	ToolUse   *ToolUse    `json:"tool_use,omitempty"`
-	CallID    string      `json:"call_id,omitempty"`
-	Name      string      `json:"name,omitempty"`
-	Namespace string      `json:"namespace,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Type      string          `json:"type"`           // message, text, function_call, function_call_output
+	Role      string          `json:"role,omitempty"` // user, assistant (for type=message)
+	Status    string          `json:"status,omitempty"`
+	Content   interface{}     `json:"content,omitempty"` // string or []ContentBlock
+	Summary   interface{}     `json:"summary,omitempty"`
+	ToolUse   *ToolUse        `json:"tool_use,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Namespace string          `json:"namespace,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 	Output    json.RawMessage `json:"output,omitempty"`
@@ -74,14 +74,15 @@ type ToolUse struct {
 
 // ResponsesResponse is the response structure for Responses API
 type ResponsesResponse struct {
-	ID         string          `json:"id"`
-	Model      string          `json:"model"`
-	Output     []ResponsesItem `json:"output"`
-	Status     string          `json:"status"` // completed, failed
-	PreviousID string          `json:"previous_id,omitempty"`
-	Usage      ResponsesUsage  `json:"usage"`
-	Created    int64           `json:"created,omitempty"`
-	Error      *ResponseError  `json:"error,omitempty"`
+	ID                string                     `json:"id"`
+	Model             string                     `json:"model"`
+	Output            []ResponsesItem            `json:"output"`
+	Status            string                     `json:"status"` // completed, failed
+	PreviousID        string                     `json:"previous_id,omitempty"`
+	Usage             ResponsesUsage             `json:"usage"`
+	Created           int64                      `json:"created,omitempty"`
+	Error             *ResponseError             `json:"error,omitempty"`
+	IncompleteDetails *ResponseIncompleteDetails `json:"incomplete_details,omitempty"` // codex 直通日志 capture 快照经本结构体序列化，缺字段会导致 response.incomplete 终态的截断原因丢失
 }
 
 // ResponseError represents an error in a failed Responses API response
@@ -89,6 +90,12 @@ type ResponseError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Type    string `json:"type,omitempty"`
+}
+
+// ResponseIncompleteDetails represents the incomplete reason in an incomplete Responses API response
+// Reason 枚举见 docs/responses-protocol.md §4：max_output_tokens、content_filter、steered 等
+type ResponseIncompleteDetails struct {
+	Reason string `json:"reason"`
 }
 
 // ResponsesStreamFrame preserves one SSE frame as emitted by the upstream stream.

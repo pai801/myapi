@@ -518,7 +518,7 @@ func TestConvertOpenAIChatToResponses_ReasoningWhitespaceAndBuiltinToolSearch(t 
 		}
 		So(addedTool, ShouldNotBeNil)
 		So(addedTool["type"], ShouldEqual, "tool_search_call")
-		So(addedTool["id"], ShouldEqual, "tsc_call_ts_1")
+		So(addedTool["id"], ShouldEqual, "ts_call_ts_1")
 		So(addedTool["call_id"], ShouldEqual, "call_ts_1")
 
 		done := parseOutputItemDone(allEvents)
@@ -530,11 +530,9 @@ func TestConvertOpenAIChatToResponses_ReasoningWhitespaceAndBuiltinToolSearch(t 
 		}
 		So(doneTool, ShouldNotBeNil)
 		So(doneTool["type"], ShouldEqual, "tool_search_call")
-		So(doneTool["id"], ShouldEqual, "tsc_call_ts_1")
+		So(doneTool["id"], ShouldEqual, "ts_call_ts_1")
 		So(doneTool["call_id"], ShouldEqual, "call_ts_1")
-		doneArgs, ok := doneTool["arguments"].(map[string]interface{})
-		So(ok, ShouldBeTrue)
-		So(doneArgs["query"], ShouldEqual, "multi-agent subagent spawn utility")
+		So(doneTool["arguments"], ShouldEqual, `{"query":"multi-agent subagent spawn utility"}`)
 		fcDeltas := parseFunctionCallArgumentEvents(allEvents, "response.function_call_arguments.delta")
 		fcDones := parseFunctionCallArgumentEvents(allEvents, "response.function_call_arguments.done")
 		for _, evt := range fcDeltas {
@@ -555,12 +553,10 @@ func TestConvertOpenAIChatToResponses_ReasoningWhitespaceAndBuiltinToolSearch(t 
 
 		tool := output[2].(map[string]interface{})
 		So(tool["type"], ShouldEqual, "tool_search_call")
-		So(tool["id"], ShouldEqual, "tsc_call_ts_1")
+		So(tool["id"], ShouldEqual, "ts_call_ts_1")
 		So(tool["call_id"], ShouldEqual, "call_ts_1")
 		So(tool["name"], ShouldEqual, "tool_search")
-		toolArgs, ok := tool["arguments"].(map[string]interface{})
-		So(ok, ShouldBeTrue)
-		So(toolArgs["query"], ShouldEqual, "multi-agent subagent spawn utility")
+		So(tool["arguments"], ShouldEqual, `{"query":"multi-agent subagent spawn utility"}`)
 		So(tool["status"], ShouldEqual, "completed")
 
 		completedIDs := map[string]string{}
@@ -608,15 +604,13 @@ func TestConvertOpenAIChatToResponses_CompletedOutput_WebSearchBuiltin(t *testin
 		So(len(added), ShouldEqual, 1)
 		addedTool := added[0]["item"].(map[string]interface{})
 		So(addedTool["type"], ShouldEqual, "web_search_call")
-		So(addedTool["id"], ShouldEqual, "wsc_call_ws_1")
+		So(addedTool["id"], ShouldEqual, "ws_call_ws_1")
 
 		done := parseOutputItemDone(allEvents)
 		So(len(done), ShouldEqual, 1)
 		So(done[0]["type"], ShouldEqual, "web_search_call")
-		So(done[0]["id"], ShouldEqual, "wsc_call_ws_1")
-		doneArgs, ok := done[0]["arguments"].(map[string]interface{})
-		So(ok, ShouldBeTrue)
-		So(doneArgs["query"], ShouldEqual, "golang")
+		So(done[0]["id"], ShouldEqual, "ws_call_ws_1")
+		So(done[0]["arguments"], ShouldEqual, `{"query":"golang"}`)
 
 		fcDeltas := parseFunctionCallArgumentEvents(allEvents, "response.function_call_arguments.delta")
 		fcDones := parseFunctionCallArgumentEvents(allEvents, "response.function_call_arguments.done")
@@ -632,12 +626,10 @@ func TestConvertOpenAIChatToResponses_CompletedOutput_WebSearchBuiltin(t *testin
 		So(len(output), ShouldEqual, 1)
 		tool := output[0].(map[string]interface{})
 		So(tool["type"], ShouldEqual, "web_search_call")
-		So(tool["id"], ShouldEqual, "wsc_call_ws_1")
+		So(tool["id"], ShouldEqual, "ws_call_ws_1")
 		So(tool["call_id"], ShouldEqual, "call_ws_1")
 		So(tool["name"], ShouldEqual, "web_search")
-		toolArgs, ok := tool["arguments"].(map[string]interface{})
-		So(ok, ShouldBeTrue)
-		So(toolArgs["query"], ShouldEqual, "golang")
+		So(tool["arguments"], ShouldEqual, `{"query":"golang"}`)
 		So(tool["status"], ShouldEqual, "completed")
 	})
 }
@@ -699,21 +691,21 @@ func TestConvertOpenAIChatToResponses_ToolSearchEmitsLifecycleAndSearchQueryEven
 
 		searchDeltas := parseBuiltinToolLifecycleEvents(allEvents, "response.tool_search_call.search_query.delta")
 		So(len(searchDeltas), ShouldEqual, 2)
-		So(searchDeltas[0]["item_id"], ShouldEqual, "tsc_call_ts_lifecycle")
+		So(searchDeltas[0]["item_id"], ShouldEqual, "ts_call_ts_lifecycle")
 		So(searchDeltas[0]["delta"], ShouldEqual, `{"query":`)
 		So(searchDeltas[1]["delta"], ShouldEqual, `"utility subagent"}`)
 
 		searchDone := parseBuiltinToolLifecycleEvents(allEvents, "response.tool_search_call.search_query.done")
 		So(len(searchDone), ShouldEqual, 1)
-		So(searchDone[0]["item_id"], ShouldEqual, "tsc_call_ts_lifecycle")
+		So(searchDone[0]["item_id"], ShouldEqual, "ts_call_ts_lifecycle")
 		So(searchDone[0]["query"], ShouldEqual, "utility subagent")
 
 		addedPos := indexOfToolEvent(allEvents, "response.output_item.added", `"tool_search_call"`)
-		inProgressPos := indexOfToolEvent(allEvents, "response.tool_search_call.in_progress", `"tsc_call_ts_lifecycle"`)
-		searchingPos := indexOfToolEvent(allEvents, "response.tool_search_call.searching", `"tsc_call_ts_lifecycle"`)
-		deltaPos := indexOfToolEvent(allEvents, "response.tool_search_call.search_query.delta", `"tsc_call_ts_lifecycle"`)
-		searchDonePos := indexOfToolEvent(allEvents, "response.tool_search_call.search_query.done", `"tsc_call_ts_lifecycle"`)
-		completedPos := indexOfToolEvent(allEvents, "response.tool_search_call.completed", `"tsc_call_ts_lifecycle"`)
+		inProgressPos := indexOfToolEvent(allEvents, "response.tool_search_call.in_progress", `"ts_call_ts_lifecycle"`)
+		searchingPos := indexOfToolEvent(allEvents, "response.tool_search_call.searching", `"ts_call_ts_lifecycle"`)
+		deltaPos := indexOfToolEvent(allEvents, "response.tool_search_call.search_query.delta", `"ts_call_ts_lifecycle"`)
+		searchDonePos := indexOfToolEvent(allEvents, "response.tool_search_call.search_query.done", `"ts_call_ts_lifecycle"`)
+		completedPos := indexOfToolEvent(allEvents, "response.tool_search_call.completed", `"ts_call_ts_lifecycle"`)
 		donePos := indexOfToolEvent(allEvents, "response.output_item.done", `"tool_search_call"`)
 		So(addedPos, ShouldBeGreaterThanOrEqualTo, 0)
 		So(inProgressPos, ShouldBeGreaterThan, addedPos)
@@ -751,14 +743,14 @@ func TestConvertOpenAIChatToResponses_WebSearchEmitsLifecycleEvents(t *testing.T
 
 		searchDone := parseBuiltinToolLifecycleEvents(allEvents, "response.web_search_call.search_query.done")
 		So(len(searchDone), ShouldEqual, 1)
-		So(searchDone[0]["item_id"], ShouldEqual, "wsc_call_ws_lifecycle")
+		So(searchDone[0]["item_id"], ShouldEqual, "ws_call_ws_lifecycle")
 		So(searchDone[0]["query"], ShouldEqual, "golang")
 	})
 }
 
 func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *testing.T) {
-	Convey("builtin tool output item 使用 client execution 与结构化 arguments", t, func() {
-		Convey("tool_search added done completed output 均使用 object arguments 且 item id 为 tsc 前缀", func() {
+	Convey("builtin tool output item 使用 client execution（仅 tool_search）与字符串 arguments、ts_/ws_ 前缀", t, func() {
+		Convey("tool_search added done completed output 均使用字符串 arguments 且 item id 为 ts 前缀", func() {
 			chunks := []string{
 				`data: {"id":"resp_tsc_shape","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_tsc_shape","type":"function","function":{"name":"tool_search","arguments":"{\"query\":"}}]},"finish_reason":null}]}`,
 				`data: {"id":"resp_tsc_shape","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"spawn agent\",\"limit\":5}"}}]},"finish_reason":null}]}`,
@@ -783,11 +775,9 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 				}
 			}
 			So(addedTool, ShouldNotBeNil)
-			So(addedTool["id"], ShouldEqual, "tsc_call_tsc_shape")
+			So(addedTool["id"], ShouldEqual, "ts_call_tsc_shape")
 			So(addedTool["execution"], ShouldEqual, "client")
-			args, ok := addedTool["arguments"].(map[string]interface{})
-			So(ok, ShouldBeTrue)
-			So(args, ShouldResemble, map[string]interface{}{})
+			So(addedTool["arguments"], ShouldEqual, "")
 
 			done := parseOutputItemDone(allEvents)
 			var doneTool map[string]interface{}
@@ -797,12 +787,9 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 				}
 			}
 			So(doneTool, ShouldNotBeNil)
-			So(doneTool["id"], ShouldEqual, "tsc_call_tsc_shape")
+			So(doneTool["id"], ShouldEqual, "ts_call_tsc_shape")
 			So(doneTool["execution"], ShouldEqual, "client")
-			doneArgs, ok := doneTool["arguments"].(map[string]interface{})
-			So(ok, ShouldBeTrue)
-			So(doneArgs["query"], ShouldEqual, "spawn agent")
-			So(doneArgs["limit"], ShouldEqual, float64(5))
+			So(doneTool["arguments"], ShouldEqual, `{"query":"spawn agent","limit":5}`)
 
 			output := parseCompletedOutput(allEvents)
 			So(output, ShouldNotBeNil)
@@ -814,19 +801,16 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 				}
 			}
 			So(outputTool, ShouldNotBeNil)
-			So(outputTool["id"], ShouldEqual, "tsc_call_tsc_shape")
+			So(outputTool["id"], ShouldEqual, "ts_call_tsc_shape")
 			So(outputTool["execution"], ShouldEqual, "client")
-			outputArgs, ok := outputTool["arguments"].(map[string]interface{})
-			So(ok, ShouldBeTrue)
-			So(outputArgs["query"], ShouldEqual, "spawn agent")
-			So(outputArgs["limit"], ShouldEqual, float64(5))
+			So(outputTool["arguments"], ShouldEqual, `{"query":"spawn agent","limit":5}`)
 
 			searchDone := parseBuiltinToolLifecycleEvents(allEvents, "response.tool_search_call.search_query.done")
 			So(len(searchDone), ShouldEqual, 1)
-			So(searchDone[0]["item_id"], ShouldEqual, "tsc_call_tsc_shape")
+			So(searchDone[0]["item_id"], ShouldEqual, "ts_call_tsc_shape")
 		})
 
-		Convey("web_search 合法 JSON 不双重字符串化并带 client execution", func() {
+		Convey("web_search 合法 JSON 原样透传字符串、无 execution 字段且 id 为 ws 前缀", func() {
 			chunks := []string{
 				`data: {"id":"resp_wsc_shape","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_wsc_shape","type":"function","function":{"name":"web_search","arguments":"{\"query\":"}}]},"finish_reason":null}]}`,
 				`data: {"id":"resp_wsc_shape","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"golang\",\"limit\":3}"}}]},"finish_reason":null}]}`,
@@ -851,10 +835,9 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 				}
 			}
 			So(addedTool, ShouldNotBeNil)
-			So(addedTool["execution"], ShouldEqual, "client")
-			addedArgs, ok := addedTool["arguments"].(map[string]interface{})
-			So(ok, ShouldBeTrue)
-			So(addedArgs, ShouldResemble, map[string]interface{}{})
+			So(addedTool["id"], ShouldEqual, "ws_call_wsc_shape")
+			So(addedTool, ShouldNotContainKey, "execution")
+			So(addedTool["arguments"], ShouldEqual, "")
 
 			done := parseOutputItemDone(allEvents)
 			var doneTool map[string]interface{}
@@ -864,11 +847,9 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 				}
 			}
 			So(doneTool, ShouldNotBeNil)
-			So(doneTool["execution"], ShouldEqual, "client")
-			doneArgs, ok := doneTool["arguments"].(map[string]interface{})
-			So(ok, ShouldBeTrue)
-			So(doneArgs["query"], ShouldEqual, "golang")
-			So(doneArgs["limit"], ShouldEqual, float64(3))
+			So(doneTool["id"], ShouldEqual, "ws_call_wsc_shape")
+			So(doneTool, ShouldNotContainKey, "execution")
+			So(doneTool["arguments"], ShouldEqual, `{"query":"golang","limit":3}`)
 
 			output := parseCompletedOutput(allEvents)
 			So(output, ShouldNotBeNil)
@@ -880,11 +861,8 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 				}
 			}
 			So(outputTool, ShouldNotBeNil)
-			So(outputTool["execution"], ShouldEqual, "client")
-			outputArgs, ok := outputTool["arguments"].(map[string]interface{})
-			So(ok, ShouldBeTrue)
-			So(outputArgs["query"], ShouldEqual, "golang")
-			So(outputArgs["limit"], ShouldEqual, float64(3))
+			So(outputTool, ShouldNotContainKey, "execution")
+			So(outputTool["arguments"], ShouldEqual, `{"query":"golang","limit":3}`)
 		})
 
 		Convey("builtin tool 非合法 JSON 仍保持字符串兼容", func() {
@@ -911,6 +889,7 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 			}
 			So(doneTool, ShouldNotBeNil)
 			So(doneTool["execution"], ShouldEqual, "client")
+			So(doneTool["id"], ShouldEqual, "ts_call_tsc_raw_args")
 			So(doneTool["arguments"], ShouldEqual, "raw query text")
 		})
 	})
@@ -1025,7 +1004,7 @@ func TestConvertOpenAIChatToResponses_LeadingWhitespaceBeforeToolKeepsMessageAnd
 			}
 		}
 		So(addedTool, ShouldNotBeNil)
-		So(addedTool["id"], ShouldEqual, "wsc_call_ws_space")
+		So(addedTool["id"], ShouldEqual, "ws_call_ws_space")
 		addedSummaries := parseOutputItemEventSummaries(allEvents, "response.output_item.added")
 		doneSummaries := parseOutputItemEventSummaries(allEvents, "response.output_item.done")
 		assertUniqueOutputIndexes(addedSummaries)
@@ -1040,7 +1019,7 @@ func TestConvertOpenAIChatToResponses_LeadingWhitespaceBeforeToolKeepsMessageAnd
 		So(content[0].(map[string]interface{})["text"], ShouldEqual, "\n")
 		tool := output[1].(map[string]interface{})
 		So(tool["type"], ShouldEqual, "web_search_call")
-		So(tool["id"], ShouldEqual, "wsc_call_ws_space")
+		So(tool["id"], ShouldEqual, "ws_call_ws_space")
 	})
 }
 
@@ -1357,6 +1336,852 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_ChatFlowContinuity(t *test
 	})
 }
 
+// parseTerminalResponse 提取最后一个终态事件（response.completed / response.incomplete / response.failed）的
+// response 对象与事件 type。
+func parseTerminalResponse(events []string) (map[string]interface{}, string) {
+	var lastType string
+	var lastResp map[string]interface{}
+	for _, evt := range events {
+		isTerminal := strings.Contains(evt, "event: response.completed") ||
+			strings.Contains(evt, "event: response.incomplete") ||
+			strings.Contains(evt, "event: response.failed")
+		if !isTerminal {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		lastType = parsed.Get("type").String()
+		raw := parsed.Get("response")
+		if raw.Exists() && raw.IsObject() {
+			var m map[string]interface{}
+			if err := json.Unmarshal([]byte(raw.Raw), &m); err == nil {
+				lastResp = m
+			}
+		}
+	}
+	return lastResp, lastType
+}
+
+// parseRefusalDeltaEvents 解析所有 response.refusal.delta 事件的 delta 字段。
+func parseRefusalDeltaEvents(events []string) []string {
+	var out []string
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: response.refusal.delta") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != "response.refusal.delta" {
+			continue
+		}
+		out = append(out, parsed.Get("delta").String())
+	}
+	return out
+}
+
+// parseTerminalOutput 从最后一个终态事件（response.completed / response.incomplete）中提取 response.output 数组。
+// 与 parseCompletedOutput 的区别：incomplete 终态的 output 也能提取（length 截断场景）。
+func parseTerminalOutput(events []string) []interface{} {
+	for i := len(events) - 1; i >= 0; i-- {
+		evt := events[i]
+		if !strings.Contains(evt, "event: response.completed") && !strings.Contains(evt, "event: response.incomplete") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != "response.completed" && parsed.Get("type").String() != "response.incomplete" {
+			continue
+		}
+		output := parsed.Get("response.output")
+		if output.Exists() && output.IsArray() {
+			var result []interface{}
+			json.Unmarshal([]byte(output.Raw), &result)
+			return result
+		}
+		return nil
+	}
+	return nil
+}
+
+// parseRefusalDoneEvents 解析所有 response.refusal.done 事件的 refusal 全文。
+func parseRefusalDoneEvents(events []string) []string {
+	var out []string
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: response.refusal.done") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != "response.refusal.done" {
+			continue
+		}
+		out = append(out, parsed.Get("refusal").String())
+	}
+	return out
+}
+
+// parseEventMeta 解析指定事件类型（可选 needle 过滤 data 内容）的 [item_id, output_index] 对，
+// 用于断言同一 item 的事件 output_index 恒定、跨 item 唯一并与终态数组一致。
+// output_item.added/done 事件的 id 位于 item.id 而非顶层 item_id，需回退提取。
+func parseEventMeta(events []string, eventType, needle string) [][2]string {
+	var out [][2]string
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: "+eventType) {
+			continue
+		}
+		if needle != "" && !strings.Contains(evt, needle) {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != eventType {
+			continue
+		}
+		itemID := parsed.Get("item_id").String()
+		if itemID == "" {
+			itemID = parsed.Get("item.id").String()
+		}
+		out = append(out, [2]string{itemID, parsed.Get("output_index").String()})
+	}
+	return out
+}
+
+func TestConvertOpenAIChatToResponses_RefusalStreaming(t *testing.T) {
+	Convey("流式 delta.refusal → response.refusal.delta/done + refusal message item", t, func() {
+
+		Convey("T1: 多块 refusal → 事件序列完整、completed output 含 refusal part", func() {
+			chunks := []string{
+				`data: {"id":"resp_ref","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I cannot help"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref","choices":[{"index":0,"delta":{"refusal":" with that request."},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, true)
+
+			eventTypes := collectEventTypes(events)
+			expected := []string{
+				"response.created",
+				"response.in_progress",
+				"response.output_item.added",
+				"response.content_part.added",
+				"response.refusal.delta",
+				"response.refusal.delta",
+				"response.refusal.done",
+				"response.content_part.done",
+				"response.output_item.done",
+				"response.completed",
+			}
+			So(eventTypes, ShouldResemble, expected)
+
+			deltas := parseRefusalDeltaEvents(events)
+			So(deltas, ShouldResemble, []string{"I cannot help", " with that request."})
+
+			dones := parseRefusalDoneEvents(events)
+			So(dones, ShouldResemble, []string{"I cannot help with that request."})
+
+			// content_part.added 的 part 应为 refusal 类型
+			var refusalPartSeen bool
+			for _, evt := range events {
+				if !strings.Contains(evt, "event: response.content_part.added") {
+					continue
+				}
+				idx := indexOf(evt, "data: ")
+				if idx < 0 {
+					continue
+				}
+				dataStr := trimSpace(evt[idx+len("data: "):])
+				parsed := gjson.Parse(dataStr)
+				if parsed.Get("part.type").String() == "refusal" {
+					refusalPartSeen = true
+				}
+			}
+			So(refusalPartSeen, ShouldBeTrue)
+
+			output := parseCompletedOutput(events)
+			So(output, ShouldNotBeNil)
+			So(len(output), ShouldEqual, 1)
+			msg := output[0].(map[string]interface{})
+			So(msg["type"], ShouldEqual, "message")
+			So(msg["role"], ShouldEqual, "assistant")
+			content := msg["content"].([]interface{})
+			So(len(content), ShouldEqual, 1)
+			part := content[0].(map[string]interface{})
+			So(part["type"], ShouldEqual, "refusal")
+			So(part["refusal"], ShouldEqual, "I cannot help with that request.")
+		})
+
+		Convey("T2: 无 refusal 增量 → 不产生任何 refusal 事件", func() {
+			chunks := []string{
+				`data: {"id":"resp_noref","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}`,
+				`data: {"id":"resp_noref","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, true)
+
+			So(len(parseRefusalDeltaEvents(events)), ShouldEqual, 0)
+			So(len(parseRefusalDoneEvents(events)), ShouldEqual, 0)
+			So(collectEventTypes(events), ShouldNotContain, "response.refusal.delta")
+			So(collectEventTypes(events), ShouldNotContain, "response.refusal.done")
+
+			output := parseCompletedOutput(events)
+			content := output[0].(map[string]interface{})["content"].([]interface{})
+			So(content[0].(map[string]interface{})["type"], ShouldEqual, "output_text")
+		})
+
+		Convey("T3: refusal 增量之后接 tool_calls → 先关闭 refusal block 再发 tool 事件，output_index 跨 item 唯一且与终态数组一致", func() {
+			chunks := []string{
+				`data: {"id":"resp_ref_tool","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I'll decline"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_tool","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ref_tool","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_tool","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			refusalDonePos := indexOfToolEvent(events, "response.refusal.done", "")
+			funcAddedPos := indexOfToolEvent(events, "response.output_item.added", `"function_call"`)
+			So(refusalDonePos, ShouldBeGreaterThanOrEqualTo, 0)
+			So(funcAddedPos, ShouldBeGreaterThan, refusalDonePos)
+
+			// 同一 refusal item 的所有事件 output_index 恒定（打开时记录的 0），item_id 一致
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.content_part.added", "response.content_part.done", "response.output_item.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					// content_part 事件需过滤出 refusal part（text 块关闭也会发 content_part.done）
+					needle = `"refusal"`
+				} else if evtType == "response.output_item.done" {
+					// output_item.done 覆盖 message 与 function_call 两类 item，仅断言 refusal message 的
+					needle = `"message"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_tool_0")
+					So(pair[1], ShouldEqual, "0")
+				}
+			}
+
+			// function_call 事件 output_index=1（refusal item 已占据 0，customToolOutputIndex 偏移）
+			fcDeltaMeta := parseEventMeta(events, "response.function_call_arguments.delta", "")
+			So(fcDeltaMeta, ShouldNotBeEmpty)
+			for _, pair := range fcDeltaMeta {
+				So(pair[0], ShouldEqual, "fc_call_ref_tool")
+				So(pair[1], ShouldEqual, "1")
+			}
+			fcAddedMeta := parseEventMeta(events, "response.output_item.added", `"function_call"`)
+			So(fcAddedMeta, ShouldNotBeEmpty)
+			So(fcAddedMeta[0][0], ShouldEqual, "fc_call_ref_tool")
+			So(fcAddedMeta[0][1], ShouldEqual, "1")
+
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_tool_0")
+			refusalPart := output[0].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+			So(refusalPart["type"], ShouldEqual, "refusal")
+			So(refusalPart["refusal"], ShouldEqual, "I'll decline")
+			So(output[1].(map[string]interface{})["type"], ShouldEqual, "function_call")
+			So(output[1].(map[string]interface{})["id"], ShouldEqual, "fc_call_ref_tool")
+		})
+
+		Convey("T4: refusal → reasoning 乱序 → refusal 保持打开时 index 0，reasoning 顺延 1，终态数组一致", func() {
+			chunks := []string{
+				`data: {"id":"resp_ref_rs","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I cannot"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_rs","choices":[{"index":0,"delta":{"reasoning_content":"think step"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_rs","choices":[{"index":0,"delta":{"refusal":" comply"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_rs","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 所有 refusal 事件：item_id=msg_resp_ref_rs_0、output_index=0（含 reasoning 到达后的 delta）
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.output_item.added", "response.content_part.added", "response.content_part.done", "response.output_item.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"refusal"`
+				} else if evtType == "response.output_item.added" || evtType == "response.output_item.done" {
+					// output_item.added/done 也覆盖 reasoning item 的事件，仅断言 refusal message 的
+					needle = `"message"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_rs_0")
+					So(pair[1], ShouldEqual, "0")
+				}
+			}
+
+			// reasoning 事件：item_id=rs_resp_ref_rs_1、output_index=1（refusal 占据 0 后顺延，不冲突）
+			for _, evtType := range []string{"response.output_item.added", "response.reasoning_summary_part.added", "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done", "response.reasoning_summary_part.done", "response.output_item.done"} {
+				needle := `"reasoning"`
+				if evtType != "response.output_item.added" && evtType != "response.output_item.done" {
+					// 该事件类型仅 reasoning 块产生，无需 needle 过滤；且其 data 不含 "reasoning" 字面量
+					// （part.type 为 summary_text），带 needle 反而过滤空
+					needle = ""
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "rs_resp_ref_rs_1")
+					So(pair[1], ShouldEqual, "1")
+				}
+			}
+
+			// 终态数组：refusal 在 0、reasoning 在 1（按流式已定 index 还原顺序）
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_rs_0")
+			So(output[0].(map[string]interface{})["type"], ShouldEqual, "message")
+			So(output[1].(map[string]interface{})["id"], ShouldEqual, "rs_resp_ref_rs_1")
+			So(output[1].(map[string]interface{})["type"], ShouldEqual, "reasoning")
+		})
+
+		Convey("T5: text → refusal 防御路径 → 复用同一 message item 追加 refusal part，不重复 item id", func() {
+			chunks := []string{
+				`data: {"id":"resp_txt_ref","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+				`data: {"id":"resp_txt_ref","choices":[{"index":0,"delta":{"refusal":"cannot comply"},"finish_reason":null}]}`,
+				`data: {"id":"resp_txt_ref","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// message item added/done 各恰好一次（协议 docs/responses-protocol.md §7：marked done
+			// 为一次性状态转换，每 item 恰好一条 added/done）。text 段关闭不发 item done，
+			// 唯一 done 在终态补发点发出，携带 text+refusal 合并的最终完整 content，
+			// 与终态 response.output 逐项一致
+			addedMsg := parseEventMeta(events, "response.output_item.added", `"message"`)
+			So(len(addedMsg), ShouldEqual, 1)
+			So(addedMsg[0][0], ShouldEqual, "msg_resp_txt_ref_0")
+			doneMsg := parseEventMeta(events, "response.output_item.done", `"message"`)
+			So(len(doneMsg), ShouldEqual, 1)
+			So(doneMsg[0], ShouldResemble, [2]string{"msg_resp_txt_ref_0", "0"})
+			// 唯一 done 的 content 与终态逐项一致（追加定稿 = item 定稿，非过期快照）
+			t5Done := parseMessageItemLastDoneContents(events)["msg_resp_txt_ref_0"]
+			t5Terminal := terminalMessageContents(events)["msg_resp_txt_ref_0"]
+			t5DoneJSON, _ := json.Marshal(t5Done)
+			t5TerminalJSON, _ := json.Marshal(t5Terminal)
+			So("msg_resp_txt_ref_0|"+string(t5DoneJSON), ShouldEqual, "msg_resp_txt_ref_0|"+string(t5TerminalJSON))
+			So(len(t5Done), ShouldEqual, 2)
+			So(t5Done[1].(map[string]interface{})["type"], ShouldEqual, "refusal")
+
+			// refusal part 追加到同一 item：output_index=0，content_index=1（第二个 part）
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done"} {
+				meta := parseEventMeta(events, evtType, "")
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_txt_ref_0")
+					So(pair[1], ShouldEqual, "0")
+				}
+			}
+
+			// 终态数组只有 1 个 message item，content = [output_text, refusal] 合并
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 1)
+			msg := output[0].(map[string]interface{})
+			So(msg["id"], ShouldEqual, "msg_resp_txt_ref_0")
+			content := msg["content"].([]interface{})
+			So(len(content), ShouldEqual, 2)
+			So(content[0].(map[string]interface{})["type"], ShouldEqual, "output_text")
+			So(content[0].(map[string]interface{})["text"], ShouldEqual, "partial")
+			So(content[1].(map[string]interface{})["type"], ShouldEqual, "refusal")
+			So(content[1].(map[string]interface{})["refusal"], ShouldEqual, "cannot comply")
+		})
+
+		Convey("T6: 流中途出错（failed 路径）→ refusal block 正常关闭后进入 response.failed", func() {
+			chunks := []string{
+				`data: {"id":"resp_fail_ref","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I refuse"},"finish_reason":null}]}`,
+				`data: {"error": {"message": "upstream boom", "type": "server_error"}}`,
+			}
+			events := sendChunks(chunks, false)
+
+			eventTypes := collectEventTypes(events)
+			So(eventTypes, ShouldContain, "response.refusal.done")
+			So(eventTypes, ShouldContain, "response.content_part.done")
+			So(eventTypes, ShouldContain, "response.output_item.done")
+			// failed 终态统一补发点：已 added 的 refusal item 恒且仅一条 done 且先于 response.failed
+			So(parseMessageItemDoneIDs(events), ShouldResemble, []string{"msg_resp_fail_ref_0"})
+			failPosNow := indexOfToolEvent(events, "response.failed", "")
+			donePosNow := -1
+			for i, evt := range events {
+				d := dataOfEvent(evt)
+				if d.Get("type").String() == "response.output_item.done" && d.Get("item.type").String() == "message" {
+					donePosNow = i
+				}
+			}
+			So(failPosNow, ShouldBeGreaterThan, donePosNow)
+			failPos := indexOfToolEvent(events, "response.failed", "")
+			refusalDonePos := indexOfToolEvent(events, "response.refusal.done", "")
+			So(failPos, ShouldBeGreaterThanOrEqualTo, 0)
+			So(refusalDonePos, ShouldBeGreaterThanOrEqualTo, 0)
+			So(failPos, ShouldBeGreaterThan, refusalDonePos)
+
+			_, termType := parseTerminalResponse(events)
+			So(termType, ShouldEqual, "response.failed")
+		})
+
+		Convey("T7: refusal → text 乱序 → 先关 refusal 块，text 顺延 index 1，终态 [refusal, text]", func() {
+			chunks := []string{
+				`data: {"id":"resp_ref_txt","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt","choices":[{"index":0,"delta":{"content":"fallback text"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// refusal 关闭事件齐全（refusal.done / content_part.done 在 text 打开前；
+			// item 级 output_item.done 统一由终态补发点在终态事件前发出）
+			refusalDonePos := indexOfToolEvent(events, "response.refusal.done", "")
+			So(refusalDonePos, ShouldBeGreaterThanOrEqualTo, 0)
+			So(indexOfToolEvent(events, "response.content_part.done", `"refusal"`), ShouldBeGreaterThanOrEqualTo, 0)
+			textAddedPos := -1
+			for i, evt := range events {
+				if strings.Contains(evt, "event: response.output_item.added") && strings.Contains(evt, "msg_resp_ref_txt_1") {
+					textAddedPos = i
+					break
+				}
+			}
+			So(textAddedPos, ShouldBeGreaterThanOrEqualTo, 0)
+			So(textAddedPos, ShouldBeGreaterThan, refusalDonePos)
+
+			// 两个 message item 的 output_item.added：id 唯一（text 不复用 msg_0）、index 跨 item 唯一
+			addedMsg := parseEventMeta(events, "response.output_item.added", `"message"`)
+			So(len(addedMsg), ShouldEqual, 2)
+			So(addedMsg[0], ShouldResemble, [2]string{"msg_resp_ref_txt_0", "0"})
+			So(addedMsg[1], ShouldResemble, [2]string{"msg_resp_ref_txt_1", "1"})
+
+			// refusal item 全部事件：id=msg_0、output_index=0（打开时记录，不随 text 后到重算）
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"refusal"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_txt_0")
+					So(pair[1], ShouldEqual, "0")
+				}
+			}
+
+			// text item 全部事件：id=msg_1、output_index=1（refusal 已占 0 后顺延，不撞 index）
+			for _, evtType := range []string{"response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"output_text"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_txt_1")
+					So(pair[1], ShouldEqual, "1")
+				}
+			}
+
+			// 终态数组：refusal 在前、text 在后（与流式 output_index 一致）
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			refusalMsg := output[0].(map[string]interface{})
+			So(refusalMsg["id"], ShouldEqual, "msg_resp_ref_txt_0")
+			refusalPart := refusalMsg["content"].([]interface{})[0].(map[string]interface{})
+			So(refusalPart["type"], ShouldEqual, "refusal")
+			So(refusalPart["refusal"], ShouldEqual, "cannot do")
+			textMsg := output[1].(map[string]interface{})
+			So(textMsg["id"], ShouldEqual, "msg_resp_ref_txt_1")
+			textPart := textMsg["content"].([]interface{})[0].(map[string]interface{})
+			So(textPart["type"], ShouldEqual, "output_text")
+			So(textPart["text"], ShouldEqual, "fallback text")
+		})
+
+		Convey("T8: refusal → reasoning → text 乱序 → refusal 0、reasoning 1、text 顺延 2，终态数组一致", func() {
+			chunks := []string{
+				`data: {"id":"resp_ref_rs_txt","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I can't"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_rs_txt","choices":[{"index":0,"delta":{"reasoning_content":"think step"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_rs_txt","choices":[{"index":0,"delta":{"content":"but text"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_rs_txt","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// refusal item 全部事件：id=msg_0、output_index=0（含 reasoning 到达后，不重算）
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"refusal"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_rs_txt_0")
+					So(pair[1], ShouldEqual, "0")
+				}
+			}
+
+			// reasoning item 全部事件：id=rs_1、output_index=1（refusal 占 0 后顺延）
+			for _, evtType := range []string{"response.output_item.added", "response.reasoning_summary_part.added", "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done", "response.reasoning_summary_part.done", "response.output_item.done"} {
+				needle := ""
+				if evtType == "response.output_item.added" || evtType == "response.output_item.done" {
+					needle = `"reasoning"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "rs_resp_ref_rs_txt_1")
+					So(pair[1], ShouldEqual, "1")
+				}
+			}
+
+			// text item 全部事件：id=msg_2、output_index=2（reasoning 已占 1 后再顺延，不撞任何 item）
+			for _, evtType := range []string{"response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"output_text"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_rs_txt_2")
+					So(pair[1], ShouldEqual, "2")
+				}
+			}
+
+			// 三个 item 的 output_item.added：id 全局唯一、index 跨 item 唯一
+			addedAll := parseEventMeta(events, "response.output_item.added", "")
+			So(len(addedAll), ShouldEqual, 3)
+			So(addedAll[0], ShouldResemble, [2]string{"msg_resp_ref_rs_txt_0", "0"})
+			So(addedAll[1], ShouldResemble, [2]string{"rs_resp_ref_rs_txt_1", "1"})
+			So(addedAll[2], ShouldResemble, [2]string{"msg_resp_ref_rs_txt_2", "2"})
+
+			// refusal 关闭事件先于 text 打开（互斥切换边界清晰）
+			refusalDonePos := indexOfToolEvent(events, "response.refusal.done", "")
+			textAddedPos := -1
+			for i, evt := range events {
+				if strings.Contains(evt, "event: response.output_item.added") && strings.Contains(evt, "msg_resp_ref_rs_txt_2") {
+					textAddedPos = i
+					break
+				}
+			}
+			So(refusalDonePos, ShouldBeGreaterThanOrEqualTo, 0)
+			So(textAddedPos, ShouldBeGreaterThanOrEqualTo, 0)
+			So(textAddedPos, ShouldBeGreaterThan, refusalDonePos)
+
+			// 终态数组：[refusal(0), reasoning(1), text(2)] 与流式输出还原一致
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 3)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_rs_txt_0")
+			So(output[0].(map[string]interface{})["type"], ShouldEqual, "message")
+			So(output[1].(map[string]interface{})["id"], ShouldEqual, "rs_resp_ref_rs_txt_1")
+			So(output[1].(map[string]interface{})["type"], ShouldEqual, "reasoning")
+			So(output[2].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_rs_txt_2")
+			So(output[2].(map[string]interface{})["type"], ShouldEqual, "message")
+			textPart := output[2].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+			So(textPart["type"], ShouldEqual, "output_text")
+			So(textPart["text"], ShouldEqual, "but text")
+		})
+
+		Convey("T9: refusal → text → tool_calls 乱序 → tool 偏移 2（refusal 0、text 1 均占位），流式事件与终态数组一致", func() {
+			chunks := []string{
+				`data: {"id":"resp_ref_txt_tool","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I decline"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt_tool","choices":[{"index":0,"delta":{"content":"but here is a note"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt_tool","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_rtt","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt_tool","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 三个 item 的 output_item.added：id 全局唯一、index 跨 item 唯一（tool 不再撞 text 的 1）
+			addedAll := parseEventMeta(events, "response.output_item.added", "")
+			So(addedAll, ShouldResemble, [][2]string{
+				{"msg_resp_ref_txt_tool_0", "0"},
+				{"msg_resp_ref_txt_tool_1", "1"},
+				{"fc_call_rtt", "2"},
+			})
+
+			// refusal item 全部事件：id=msg_0、output_index=0
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"refusal"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_txt_tool_0")
+					So(pair[1], ShouldEqual, "0")
+				}
+			}
+
+			// text item 全部事件：id=msg_1、output_index=1
+			for _, evtType := range []string{"response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"output_text"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_txt_tool_1")
+					So(pair[1], ShouldEqual, "1")
+				}
+			}
+
+			// function_call 事件全部 output_index=2（refusal 0 + text 1 均占位后 tool 顺延）
+			for _, evtType := range []string{"response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done"} {
+				needle := ""
+				if evtType == "response.output_item.added" || evtType == "response.output_item.done" {
+					needle = `"function_call"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "fc_call_rtt")
+					So(pair[1], ShouldEqual, "2")
+				}
+			}
+
+			// 终态数组：[refusal(0), text(1), tool(2)] 与流式事件一致
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 3)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_txt_tool_0")
+			refusalPart := output[0].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+			So(refusalPart["type"], ShouldEqual, "refusal")
+			So(refusalPart["refusal"], ShouldEqual, "I decline")
+			So(output[1].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_txt_tool_1")
+			textPart := output[1].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+			So(textPart["type"], ShouldEqual, "output_text")
+			So(textPart["text"], ShouldEqual, "but here is a note")
+			So(output[2].(map[string]interface{})["type"], ShouldEqual, "function_call")
+			So(output[2].(map[string]interface{})["id"], ShouldEqual, "fc_call_rtt")
+		})
+
+		Convey("T10: refusal → text → reasoning 乱序（三重违规）→ reasoning 顺延 2，text 快照 index 1 恒定，终态数组一致", func() {
+			chunks := []string{
+				`data: {"id":"resp_ref_txt_rs","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I can't"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt_rs","choices":[{"index":0,"delta":{"content":"partial reply"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt_rs","choices":[{"index":0,"delta":{"reasoning_content":"think late"},"finish_reason":null}]}`,
+				`data: {"id":"resp_ref_txt_rs","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 三个 item 的 output_item.added：id 全局唯一、index 跨 item 唯一（reasoning 2 不撞 text 1）
+			addedAll := parseEventMeta(events, "response.output_item.added", "")
+			So(addedAll, ShouldResemble, [][2]string{
+				{"msg_resp_ref_txt_rs_0", "0"},
+				{"msg_resp_ref_txt_rs_1", "1"},
+				{"rs_resp_ref_txt_rs_2", "2"},
+			})
+
+			// refusal item 全部事件：id=msg_0、output_index=0
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"refusal"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_txt_rs_0")
+					So(pair[1], ShouldEqual, "0")
+				}
+			}
+
+			// text item 全部事件（含 reasoning 到达后的 done 系列）：id=msg_1、output_index=1 恒定
+			for _, evtType := range []string{"response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"output_text"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "msg_resp_ref_txt_rs_1")
+					So(pair[1], ShouldEqual, "1")
+				}
+			}
+
+			// text item 的唯一 output_item.done 在终态补发点发出（晚于 refusal 的 done），
+			// 取最后一个 message done；每个 message item 恒且仅一条 done
+			msgDone := parseEventMeta(events, "response.output_item.done", `"message"`)
+			So(msgDone, ShouldNotBeEmpty)
+			So(msgDone[len(msgDone)-1], ShouldResemble, [2]string{"msg_resp_ref_txt_rs_1", "1"})
+			So(parseMessageItemDoneIDs(events), ShouldResemble,
+				[]string{"msg_resp_ref_txt_rs_0", "msg_resp_ref_txt_rs_1"})
+
+			// reasoning item 全部事件：id=rs_2、output_index=2
+			for _, evtType := range []string{"response.output_item.added", "response.reasoning_summary_part.added", "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done", "response.reasoning_summary_part.done", "response.output_item.done"} {
+				needle := ""
+				if evtType == "response.output_item.added" || evtType == "response.output_item.done" {
+					needle = `"reasoning"`
+				}
+				meta := parseEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, pair := range meta {
+					So(pair[0], ShouldEqual, "rs_resp_ref_txt_rs_2")
+					So(pair[1], ShouldEqual, "2")
+				}
+			}
+
+			// 终态数组：[refusal(0), text(1), reasoning(2)]，text 位置与 id 后缀（_1）一致
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 3)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_txt_rs_0")
+			So(output[0].(map[string]interface{})["type"], ShouldEqual, "message")
+			So(output[1].(map[string]interface{})["id"], ShouldEqual, "msg_resp_ref_txt_rs_1")
+			So(output[1].(map[string]interface{})["type"], ShouldEqual, "message")
+			textPart := output[1].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+			So(textPart["type"], ShouldEqual, "output_text")
+			So(textPart["text"], ShouldEqual, "partial reply")
+			So(output[2].(map[string]interface{})["id"], ShouldEqual, "rs_resp_ref_txt_rs_2")
+			So(output[2].(map[string]interface{})["type"], ShouldEqual, "reasoning")
+		})
+	})
+}
+
+func TestConvertOpenAIChatToResponses_FinishReasonLength(t *testing.T) {
+	Convey("流式 finish_reason=length → response.incomplete 语义", t, func() {
+
+		Convey("T1: content 被截断 → 终态为 incomplete，含 incomplete_details 与 truncated，output 保留部分文本", func() {
+			chunks := []string{
+				`data: {"id":"resp_len","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello par"},"finish_reason":null}]}`,
+				`data: {"id":"resp_len","choices":[{"index":0,"delta":{"content":"tial"},"finish_reason":null}]}`,
+				`data: {"id":"resp_len","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			resp, termType := parseTerminalResponse(events)
+			So(termType, ShouldEqual, "response.incomplete")
+			So(resp["status"], ShouldEqual, "incomplete")
+			details := resp["incomplete_details"].(map[string]interface{})
+			So(details["reason"], ShouldEqual, "max_output_tokens")
+			So(resp["truncated"], ShouldEqual, true)
+
+			// 被截断的部分文本仍保留在 message item
+			var msgContent string
+			for _, evt := range events {
+				if !strings.Contains(evt, "event: response.output_text.done") {
+					continue
+				}
+				idx := indexOf(evt, "data: ")
+				if idx < 0 {
+					continue
+				}
+				dataStr := trimSpace(evt[idx+len("data: "):])
+				msgContent = gjson.Parse(dataStr).Get("text").String()
+			}
+			So(msgContent, ShouldEqual, "Hello partial")
+		})
+
+		Convey("T2: tool_calls 结尾且 finish_reason=length → function_call 正常定稿且终态 incomplete", func() {
+			chunks := []string{
+				`data: {"id":"resp_len_tool","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_len_tool","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_len_tool","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"SF\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_len_tool","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`,
+				`data: [DONE]`,
+			}
+			var param any
+			var allEvents []string
+			reqBody := codexRequestWithFunction()
+			for _, chunk := range chunks {
+				ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+				allEvents = append(allEvents, ev...)
+			}
+
+			resp, termType := parseTerminalResponse(allEvents)
+			So(termType, ShouldEqual, "response.incomplete")
+			So(resp["status"], ShouldEqual, "incomplete")
+
+			output := parseTerminalOutput(allEvents)
+			So(len(output), ShouldEqual, 1)
+			So(output[0].(map[string]interface{})["type"], ShouldEqual, "function_call")
+			So(output[0].(map[string]interface{})["arguments"], ShouldEqual, `{"city":"SF"}`)
+		})
+
+		Convey("T3: finish chunk 无 delta 仅带 finish_reason → 仍识别为 incomplete", func() {
+			chunks := []string{
+				`data: {"id":"resp_len_nodelta","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+				`data: {"id":"resp_len_nodelta","choices":[{"index":0,"finish_reason":"length"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			_, termType := parseTerminalResponse(events)
+			So(termType, ShouldEqual, "response.incomplete")
+
+			// 无 delta 的 finish chunk 不产生业务事件，但块在 [DONE] 时正常关闭
+			output := parseTerminalOutput(events)
+			So(len(output), ShouldEqual, 1)
+			So(output[0].(map[string]interface{})["type"], ShouldEqual, "message")
+		})
+
+		Convey("T4: finish_reason=stop → 终态为 completed，无 incomplete 字段", func() {
+			chunks := []string{
+				`data: {"id":"resp_stop","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}`,
+				`data: {"id":"resp_stop","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			resp, termType := parseTerminalResponse(events)
+			So(termType, ShouldEqual, "response.completed")
+			So(resp["status"], ShouldEqual, "completed")
+			_, hasDetails := resp["incomplete_details"]
+			So(hasDetails, ShouldBeFalse)
+			_, hasTruncated := resp["truncated"]
+			So(hasTruncated, ShouldBeFalse)
+		})
+
+		Convey("T5: finish_reason=content_filter → 终态 incomplete + reason=content_filter + truncated", func() {
+			chunks := []string{
+				`data: {"id":"resp_cf","choices":[{"index":0,"delta":{"role":"assistant","content":"flagged"},"finish_reason":null}]}`,
+				`data: {"id":"resp_cf","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			resp, termType := parseTerminalResponse(events)
+			So(termType, ShouldEqual, "response.incomplete")
+			So(resp["status"], ShouldEqual, "incomplete")
+			details := resp["incomplete_details"].(map[string]interface{})
+			So(details["reason"], ShouldEqual, "content_filter")
+			So(resp["truncated"], ShouldEqual, true)
+		})
+	})
+}
+
 func TestConvertOpenAIChatToResponses_OutputItemAdded_MultipleTools(t *testing.T) {
 	Convey("ConvertOpenAIChatToResponsesWithContext: 同一流里含 2 个 tool_calls（先 apply_patch 后 exec）", t, func() {
 		// 请求里同时注册 apply_patch（custom）和 myapp__exec（namespace）
@@ -1405,5 +2230,1066 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_MultipleTools(t *testing.T
 		So(item1["namespace"], ShouldEqual, "myapp__")
 		So(item1["call_id"], ShouldEqual, "call_mt_b")
 		So(item1["id"], ShouldEqual, "fc_call_mt_b")
+	})
+}
+
+// parseCompletedUsage 从事件列表中提取 response.completed 事件的 usage 对象。
+func parseCompletedUsage(events []string) map[string]interface{} {
+	for _, evt := range events {
+		dataPrefix := "data: "
+		idx := indexOf(evt, dataPrefix)
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len(dataPrefix):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		resp := gjson.Parse(dataStr)
+		if resp.Get("type").String() != "response.completed" {
+			continue
+		}
+		usage := resp.Get("response.usage")
+		if !usage.Exists() {
+			continue
+		}
+		var result map[string]interface{}
+		json.Unmarshal([]byte(usage.Raw), &result)
+		return result
+	}
+	return nil
+}
+
+func TestConvertOpenAIChatToResponses_UsageInputTokensKeepsCached(t *testing.T) {
+	Convey("流式 usage：input_tokens 保持总输入口径（含 cached），cached 仅经 details 表达（docs §6 与非流式 parseUsage 对齐）", t, func() {
+		Convey("OpenAI 上游含 cached：不扣除，total 透传不重复累计", func() {
+			chunks := []string{
+				`data: {"id":"resp_uc1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+				`data: {"id":"resp_uc1","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":60}}}`,
+				`data: [DONE]`,
+			}
+			usage := parseCompletedUsage(sendChunks(chunks, false))
+			So(usage, ShouldNotBeNil)
+			So(usage["input_tokens"], ShouldEqual, float64(100))
+			So(usage["output_tokens"], ShouldEqual, float64(50))
+			So(usage["total_tokens"], ShouldEqual, float64(150))
+			details, ok := usage["input_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(details["cached_tokens"], ShouldEqual, float64(60))
+		})
+
+		Convey("OpenAI 上游无 cached：details 仍恒存在（responses §6 必填），子字段 0 也输出", func() {
+			chunks := []string{
+				`data: {"id":"resp_un1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+				`data: {"id":"resp_un1","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}`,
+				`data: [DONE]`,
+			}
+			usage := parseCompletedUsage(sendChunks(chunks, false))
+			So(usage, ShouldNotBeNil)
+			So(usage["input_tokens"], ShouldEqual, float64(100))
+			So(usage["output_tokens"], ShouldEqual, float64(50))
+			So(usage["total_tokens"], ShouldEqual, float64(150))
+			details, ok := usage["input_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(details["cached_tokens"], ShouldEqual, float64(0))
+			So(details["cache_write_tokens"], ShouldEqual, float64(0))
+			outDetails, ok := usage["output_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(outDetails["reasoning_tokens"], ShouldEqual, float64(0))
+		})
+
+		Convey("OpenAI 上游无 total：total = input + output，不把 cached 再加一遍", func() {
+			chunks := []string{
+				`data: {"id":"resp_unt","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+				`data: {"id":"resp_unt","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":60}}}`,
+				`data: [DONE]`,
+			}
+			usage := parseCompletedUsage(sendChunks(chunks, false))
+			So(usage, ShouldNotBeNil)
+			So(usage["input_tokens"], ShouldEqual, float64(100))
+			So(usage["total_tokens"], ShouldEqual, float64(150))
+			details, ok := usage["input_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(details["cached_tokens"], ShouldEqual, float64(60))
+		})
+
+		Convey("Claude 上游：input_tokens 保持上游原值，total 汇集 cache 三件套", func() {
+			chunks := []string{
+				`data: {"id":"resp_cc1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+				`data: {"id":"resp_cc1","choices":[],"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":60}}`,
+				`data: [DONE]`,
+			}
+			usage := parseCompletedUsage(sendChunks(chunks, false))
+			So(usage, ShouldNotBeNil)
+			So(usage["input_tokens"], ShouldEqual, float64(100))
+			So(usage["output_tokens"], ShouldEqual, float64(50))
+			So(usage["total_tokens"], ShouldEqual, float64(210))
+			So(usage["cache_read_input_tokens"], ShouldEqual, float64(60))
+			// Claude 路径的 cached 同时落入标准字段 input_tokens_details.cached_tokens（responses §6）
+			details, ok := usage["input_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(details["cached_tokens"], ShouldEqual, float64(60))
+		})
+	})
+}
+
+// parseInterleaveEventMeta 解析指定事件的 [item_id, output_index, content_index]。
+// 与 parseEventMeta 的差别：额外带出 content_index（断言 refusal part 与 text part 不撞号），
+// 字段缺失（如 output_item.added 无 content_index）时返回空串。
+func parseInterleaveEventMeta(events []string, eventType, needle string) [][3]string {
+	var out [][3]string
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: "+eventType) {
+			continue
+		}
+		if needle != "" && !strings.Contains(evt, needle) {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != eventType {
+			continue
+		}
+		itemID := parsed.Get("item_id").String()
+		if itemID == "" {
+			itemID = parsed.Get("item.id").String()
+		}
+		contentIndex := ""
+		if v := parsed.Get("content_index"); v.Exists() {
+			contentIndex = v.String()
+		}
+		out = append(out, [3]string{itemID, parsed.Get("output_index").String(), contentIndex})
+	}
+	return out
+}
+
+func TestConvertOpenAIChatToResponses_RefusalInterleaveIndexConsistency(t *testing.T) {
+	Convey("refusal 与 text 违规交错：同一 item 事件 output_index 恒定、不重复发 output_item.added、终态数组可还原", t, func() {
+
+		Convey("R1: refusal → text → refusal → 第三段 refusal 复用独立 item 的 id/index 快照", func() {
+			chunks := []string{
+				`data: {"id":"resp_iv1","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do A"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv1","choices":[{"index":0,"delta":{"content":"but text B"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv1","choices":[{"index":0,"delta":{"refusal":"then refuse C"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// message item 只 added 两次：refusal 独立 item（0）与 text item（1），
+			// 复用路径不得用同 ID 再发 output_item.added
+			So(parseEventMeta(events, "response.output_item.added", `"message"`), ShouldResemble, [][2]string{
+				{"msg_resp_iv1_0", "0"},
+				{"msg_resp_iv1_1", "1"},
+			})
+
+			// refusal 全部事件锁定同一 item：id=msg_0、output_index=0、content_index=0
+			// （修复前：追加/复用分支按 ReasoningPartAdded 重算 index，与已发的 added/delta 矛盾）
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"refusal"`
+				}
+				meta := parseInterleaveEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, triple := range meta {
+					So(triple[0], ShouldEqual, "msg_resp_iv1_0")
+					So(triple[1], ShouldEqual, "0")
+					So(triple[2], ShouldEqual, "0")
+				}
+			}
+			// 视为同一 refusal part 的续写：不重发 content_part.added
+			So(len(parseInterleaveEventMeta(events, "response.content_part.added", `"refusal"`)), ShouldEqual, 1)
+
+			// text 事件独立占 index 1，不与 refusal item 撞号
+			for _, evtType := range []string{"response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"output_text"`
+				}
+				meta := parseInterleaveEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, triple := range meta {
+					So(triple[0], ShouldEqual, "msg_resp_iv1_1")
+					So(triple[1], ShouldEqual, "1")
+				}
+			}
+
+			// 终态数组：[refusal(合并全文), text]，与流式各 item 的 index 一致
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			refusalMsg := output[0].(map[string]interface{})
+			So(refusalMsg["id"], ShouldEqual, "msg_resp_iv1_0")
+			refusalPart := refusalMsg["content"].([]interface{})[0].(map[string]interface{})
+			So(refusalPart["type"], ShouldEqual, "refusal")
+			So(refusalPart["refusal"], ShouldEqual, "cannot do Athen refuse C")
+			textMsg := output[1].(map[string]interface{})
+			So(textMsg["id"], ShouldEqual, "msg_resp_iv1_1")
+			textPart := textMsg["content"].([]interface{})[0].(map[string]interface{})
+			So(textPart["type"], ShouldEqual, "output_text")
+			So(textPart["text"], ShouldEqual, "but text B")
+
+			// 最后一个 refusal.done 携带合并全文，与终态 item 一致
+			dones := parseRefusalDoneEvents(events)
+			So(len(dones), ShouldEqual, 2)
+			So(dones[len(dones)-1], ShouldEqual, "cannot do Athen refuse C")
+
+			// FAIL-1 锁定（reviewer 探测）：独立 refusal item 复用续写会二次关闭
+			// closeRefusalBlock，旧实现每次 close 都发 output_item.done → 同 id 两条 done
+			// 且第一条为过期快照。新策略 done 只在终态统一补发点发出：
+			// 每个 message item 恒且仅一条 done、先于 response.completed、content 与终态逐项一致
+			assertDoneTerminalConsistency(events)
+			So(parseMessageItemDoneIDs(events), ShouldResemble,
+				[]string{"msg_resp_iv1_0", "msg_resp_iv1_1"})
+		})
+
+		Convey("R2: refusal → text → refusal → text → 违规重开的 text 块显式丢弃且不污染 item/终态", func() {
+			chunks := []string{
+				`data: {"id":"resp_iv2","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do A"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv2","choices":[{"index":0,"delta":{"content":"but text B"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv2","choices":[{"index":0,"delta":{"refusal":"then refuse C"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv2","choices":[{"index":0,"delta":{"content":"late text D should be dropped"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 丢弃决策（二选一取「丢弃 + Warn」而非「另分配新 item id/index」）：
+			// 重开 text 会给同一 msg id 再发 added 且 content_index 从 0 重计，与既有 refusal part 冲突；
+			// 新建 item 则要与 reasoning/tool 的 index 推导（customToolOutputIndex）联动偏移，改动面过大。
+			So(strings.Contains(strings.Join(events, ""), "late text D should be dropped"), ShouldBeFalse)
+			So(len(parseInterleaveEventMeta(events, "response.output_text.delta", "")), ShouldEqual, 1)
+			So(parseInterleaveEventMeta(events, "response.output_text.done", ""), ShouldResemble,
+				[][3]string{{"msg_resp_iv2_1", "1", "0"}})
+			So(parseEventMeta(events, "response.output_item.added", `"message"`), ShouldResemble, [][2]string{
+				{"msg_resp_iv2_0", "0"},
+				{"msg_resp_iv2_1", "1"},
+			})
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done"} {
+				meta := parseInterleaveEventMeta(events, evtType, "")
+				So(meta, ShouldNotBeEmpty)
+				for _, triple := range meta {
+					So(triple[0], ShouldEqual, "msg_resp_iv2_0")
+					So(triple[1], ShouldEqual, "0")
+				}
+			}
+
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_iv2_0")
+			So(output[0].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})["refusal"],
+				ShouldEqual, "cannot do Athen refuse C")
+			textMsg := output[1].(map[string]interface{})
+			So(textMsg["id"], ShouldEqual, "msg_resp_iv2_1")
+			So(textMsg["content"].([]interface{})[0].(map[string]interface{})["text"], ShouldEqual, "but text B")
+		})
+
+		Convey("R3: text → reasoning → refusal（追加模式）→ refusal part 继承 text item 的 index 快照", func() {
+			chunks := []string{
+				`data: {"id":"resp_iv3","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv3","choices":[{"index":0,"delta":{"reasoning_content":"think late"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv3","choices":[{"index":0,"delta":{"refusal":"cannot comply"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 追加模式：refusal part 挂在已关闭的 text message item 上，
+			// 所有 refusal 事件必须复用该 item 的 index 快照（0），而非按 ReasoningPartAdded 重算成 1
+			So(parseEventMeta(events, "response.output_item.added", `"message"`), ShouldResemble,
+				[][2]string{{"msg_resp_iv3_0", "0"}})
+			for _, evtType := range []string{"response.refusal.delta", "response.refusal.done", "response.content_part.added", "response.content_part.done"} {
+				needle := ""
+				if evtType == "response.content_part.added" || evtType == "response.content_part.done" {
+					needle = `"refusal"`
+				}
+				meta := parseInterleaveEventMeta(events, evtType, needle)
+				So(meta, ShouldNotBeEmpty)
+				for _, triple := range meta {
+					So(triple[0], ShouldEqual, "msg_resp_iv3_0")
+					So(triple[1], ShouldEqual, "0")
+					// refusal 是消息的第二个 part（0 是 output_text），不得与 text part 撞 content_index
+					So(triple[2], ShouldEqual, "1")
+				}
+			}
+			for _, evtType := range []string{"response.output_text.delta", "response.output_text.done"} {
+				for _, triple := range parseInterleaveEventMeta(events, evtType, "") {
+					So(triple[0], ShouldEqual, "msg_resp_iv3_0")
+					So(triple[1], ShouldEqual, "0")
+				}
+			}
+			// reasoning 独立 item 占 1（text 已占 0 后顺延）
+			for _, evtType := range []string{"response.output_item.added", "response.reasoning_summary_text.delta", "response.output_item.done"} {
+				needle := ""
+				if evtType == "response.output_item.added" || evtType == "response.output_item.done" {
+					needle = `"reasoning"`
+				}
+				for _, triple := range parseInterleaveEventMeta(events, evtType, needle) {
+					So(triple[0], ShouldEqual, "rs_resp_iv3_1")
+					So(triple[1], ShouldEqual, "1")
+				}
+			}
+
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			msg := output[0].(map[string]interface{})
+			So(msg["id"], ShouldEqual, "msg_resp_iv3_0")
+			content := msg["content"].([]interface{})
+			So(len(content), ShouldEqual, 2)
+			So(content[0].(map[string]interface{})["type"], ShouldEqual, "output_text")
+			So(content[0].(map[string]interface{})["text"], ShouldEqual, "partial")
+			So(content[1].(map[string]interface{})["type"], ShouldEqual, "refusal")
+			So(content[1].(map[string]interface{})["refusal"], ShouldEqual, "cannot comply")
+			So(output[1].(map[string]interface{})["id"], ShouldEqual, "rs_resp_iv3_1")
+			So(output[1].(map[string]interface{})["type"], ShouldEqual, "reasoning")
+		})
+
+		Convey("R4: refusal → text → tool → text → 第二段属正常多段输出，按新 output_text part 追加不丢内容", func() {
+			chunks := []string{
+				`data: {"id":"resp_iv4","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do A"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv4","choices":[{"index":0,"delta":{"content":"first segment"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_iv4","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv4","choices":[{"index":0,"delta":{"content":"second segment"},"finish_reason":null}]}`,
+				`data: {"id":"resp_iv4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 守卫不得因粘滞的 RefusalItemInOutput 永久丢弃后续 text 段：第二段必须保留
+			So(strings.Contains(strings.Join(events, ""), "second segment"), ShouldBeTrue)
+
+			// message item 仍只 added 一次；重开段复用同一 item 与 output_index，不重发 added
+			So(parseEventMeta(events, "response.output_item.added", `"message"`), ShouldResemble, [][2]string{
+				{"msg_resp_iv4_0", "0"},
+				{"msg_resp_iv4_1", "1"},
+			})
+			// tool 偏移：refusal 0 + text 1 → function_call 2
+			So(parseEventMeta(events, "response.output_item.added", `"function_call"`), ShouldResemble,
+				[][2]string{{"fc_call_iv4", "2"}})
+
+			// 两段 text 各自一个 content part：content_index 递增，item id / output_index 恒定
+			So(parseInterleaveEventMeta(events, "response.content_part.added", `"output_text"`), ShouldResemble, [][3]string{
+				{"msg_resp_iv4_1", "1", "0"},
+				{"msg_resp_iv4_1", "1", "1"},
+			})
+			So(parseInterleaveEventMeta(events, "response.output_text.delta", ""), ShouldResemble, [][3]string{
+				{"msg_resp_iv4_1", "1", "0"},
+				{"msg_resp_iv4_1", "1", "1"},
+			})
+			// done 系列按「段」而非全文，避免两段 part 内容重复
+			So(parseOutputTextDoneByPart(events), ShouldResemble, [][2]string{
+				{"0", "first segment"},
+				{"1", "second segment"},
+			})
+			// refusal item 不受影响：仍占 index 0 / content_index 0
+			for _, triple := range parseInterleaveEventMeta(events, "response.refusal.delta", "") {
+				So(triple[0], ShouldEqual, "msg_resp_iv4_0")
+				So(triple[1], ShouldEqual, "0")
+				So(triple[2], ShouldEqual, "0")
+			}
+
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 3)
+			msg := output[1].(map[string]interface{})
+			So(msg["id"], ShouldEqual, "msg_resp_iv4_1")
+			content := msg["content"].([]interface{})
+			So(len(content), ShouldEqual, 2)
+			So(content[0].(map[string]interface{})["text"], ShouldEqual, "first segment")
+			So(content[1].(map[string]interface{})["text"], ShouldEqual, "second segment")
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_iv4_0")
+			So(output[2].(map[string]interface{})["id"], ShouldEqual, "fc_call_iv4")
+		})
+	})
+}
+
+// parseOutputTextDoneByPart 解析 response.output_text.done 事件的 [content_index, text]，
+// 用于断言多段 text 的 done 按各自 part 而非累积全文发出。
+func parseOutputTextDoneByPart(events []string) [][2]string {
+	var out [][2]string
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: response.output_text.done") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != "response.output_text.done" {
+			continue
+		}
+		out = append(out, [2]string{parsed.Get("content_index").String(), parsed.Get("text").String()})
+	}
+	return out
+}
+
+func TestConvertOpenAIChatToResponses_ToolCallsWithoutIndex(t *testing.T) {
+	Convey("上游畸形：delta.tool_calls 缺 index → 按到达顺序分配稳定 key，禁止静默覆盖导致 arguments 串包", t, func() {
+
+		Convey("W1: 两个 call 均无 index，各自 arguments 落到各自 key", func() {
+			chunks := []string{
+				`data: {"id":"resp_noidx","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_noidx","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_noidx","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b1","type":"function","function":{"name":"get_time","arguments":"{\"tz\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_noidx","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"UTC\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_noidx","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			fcDeltas := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.delta")
+			So(len(fcDeltas), ShouldEqual, 4)
+			So(fcDeltas[0]["item_id"], ShouldEqual, "fc_call_a1")
+			So(fcDeltas[0]["delta"], ShouldEqual, `{"city":`)
+			So(fcDeltas[1]["item_id"], ShouldEqual, "fc_call_a1")
+			So(fcDeltas[1]["delta"], ShouldEqual, `"Paris"}`)
+			So(fcDeltas[2]["item_id"], ShouldEqual, "fc_call_b1")
+			So(fcDeltas[2]["delta"], ShouldEqual, `{"tz":`)
+			So(fcDeltas[3]["item_id"], ShouldEqual, "fc_call_b1")
+			So(fcDeltas[3]["delta"], ShouldEqual, `"UTC"}`)
+
+			fcDones := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.done")
+			So(len(fcDones), ShouldEqual, 2)
+			So(fcDones[0]["item_id"], ShouldEqual, "fc_call_a1")
+			So(fcDones[0]["arguments"], ShouldEqual, `{"city":"Paris"}`)
+			So(fcDones[1]["item_id"], ShouldEqual, "fc_call_b1")
+			So(fcDones[1]["arguments"], ShouldEqual, `{"tz":"UTC"}`)
+
+			So(parseEventMeta(events, "response.output_item.added", `"function_call"`), ShouldResemble, [][2]string{
+				{"fc_call_a1", "0"},
+				{"fc_call_b1", "1"},
+			})
+
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			item0 := output[0].(map[string]interface{})
+			So(item0["type"], ShouldEqual, "function_call")
+			So(item0["id"], ShouldEqual, "fc_call_a1")
+			So(item0["call_id"], ShouldEqual, "call_a1")
+			So(item0["name"], ShouldEqual, "get_weather")
+			So(item0["arguments"], ShouldEqual, `{"city":"Paris"}`)
+			item1 := output[1].(map[string]interface{})
+			So(item1["id"], ShouldEqual, "fc_call_b1")
+			So(item1["call_id"], ShouldEqual, "call_b1")
+			So(item1["name"], ShouldEqual, "get_time")
+			So(item1["arguments"], ShouldEqual, `{"tz":"UTC"}`)
+		})
+
+		Convey("W2: 每个 chunk 重发同一 id 且无 index → 按 id 复用既有 key，不拆成两个 item", func() {
+			chunks := []string{
+				`data: {"id":"resp_rep","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_rep","type":"function","function":{"name":"get_weather","arguments":"{\"a\":1"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_rep","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_rep","type":"function","function":{"arguments":",\"b\":2}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_rep","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			So(parseEventMeta(events, "response.output_item.added", `"function_call"`), ShouldResemble,
+				[][2]string{{"fc_call_rep", "0"}})
+			fcDones := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.done")
+			So(len(fcDones), ShouldEqual, 1)
+			So(fcDones[0]["arguments"], ShouldEqual, `{"a":1,"b":2}`)
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 1)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "fc_call_rep")
+			So(output[0].(map[string]interface{})["arguments"], ShouldEqual, `{"a":1,"b":2}`)
+		})
+
+		Convey("W3: 首个 delta 既无 index 也无 id（无法关联）→ 跳过并 Warn，不落到 0 号 key 污染后续 call", func() {
+			chunks := []string{
+				`data: {"id":"resp_orphan","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"orphan\":1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_orphan","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_ok","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_orphan","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			So(strings.Contains(strings.Join(events, ""), "\"orphan\""), ShouldBeFalse)
+			fcDeltas := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.delta")
+			So(len(fcDeltas), ShouldEqual, 1)
+			So(fcDeltas[0]["item_id"], ShouldEqual, "fc_call_ok")
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 1)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "fc_call_ok")
+			So(output[0].(map[string]interface{})["arguments"], ShouldEqual, "{}")
+		})
+
+		Convey("W4: 匿名A → 显式 index 0（异 call id）→ 匿名A 续写 → 双向都不串包", func() {
+			// 匿名 call 先占 key 0；显式 index:0 的 call_x 争同一 key → 丢弃该 delta（不接管），
+			// 之后匿名 A 的无 index delta 仍落到 A 自己的 item
+			chunks := []string{
+				`data: {"id":"resp_mix","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"f_a","arguments":"{\"a\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mix","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"f_x","arguments":"{\"xpolluted\":1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mix","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"A\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mix","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			joined := strings.Join(events, "")
+			// 争用 key 的显式 delta 整体丢弃：call id / name / arguments 都不出现在任何事件里
+			So(strings.Contains(joined, "call_x"), ShouldBeFalse)
+			So(strings.Contains(joined, "f_x"), ShouldBeFalse)
+			So(strings.Contains(joined, "xpolluted"), ShouldBeFalse)
+
+			So(parseEventMeta(events, "response.output_item.added", `"function_call"`), ShouldResemble,
+				[][2]string{{"fc_call_a", "0"}})
+			fcDeltas := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.delta")
+			So(len(fcDeltas), ShouldEqual, 2)
+			So(fcDeltas[0]["item_id"], ShouldEqual, "fc_call_a")
+			So(fcDeltas[0]["delta"], ShouldEqual, `{"a":`)
+			So(fcDeltas[1]["item_id"], ShouldEqual, "fc_call_a")
+			So(fcDeltas[1]["delta"], ShouldEqual, `"A"}`)
+
+			fcDones := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.done")
+			So(len(fcDones), ShouldEqual, 1)
+			So(fcDones[0]["arguments"], ShouldEqual, `{"a":"A"}`)
+
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 1)
+			item := output[0].(map[string]interface{})
+			So(item["id"], ShouldEqual, "fc_call_a")
+			So(item["name"], ShouldEqual, "f_a")
+			So(item["arguments"], ShouldEqual, `{"a":"A"}`)
+		})
+
+		Convey("W5: 匿名A → 显式 index 0（无 id 的 arguments delta）→ 同样按 key 争用丢弃，不静默并入", func() {
+			chunks := []string{
+				`data: {"id":"resp_mix2","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_w5","type":"function","function":{"name":"get_weather","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mix2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"secret_x\":1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mix2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 规则锁定：落在匿名 key 上的显式 index delta 一律要求 call id 一致，
+			// 缺 id 时无法证明归属，按争用处理丢弃（歧义 delta 不猜），A 的参数保持纯净
+			So(strings.Contains(strings.Join(events, ""), "secret_x"), ShouldBeFalse)
+			fcDeltas := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.delta")
+			So(len(fcDeltas), ShouldEqual, 1)
+			So(fcDeltas[0]["item_id"], ShouldEqual, "fc_call_w5")
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 1)
+			So(output[0].(map[string]interface{})["arguments"], ShouldEqual, `{"a":1}`)
+		})
+	})
+}
+
+func TestConvertOpenAIChatToResponses_UsageDetailsRequiredFields(t *testing.T) {
+	Convey("responses §6 usage 必填：details 对象恒存在 + chat §8.1 cache_write_tokens 映射", t, func() {
+
+		Convey("U1: usage 全 0 → details 对象与子字段仍恒存在", func() {
+			chunks := []string{
+				`data: {"id":"resp_u0","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+				`data: {"id":"resp_u0","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+				`data: [DONE]`,
+			}
+			usage := parseCompletedUsage(sendChunks(chunks, false))
+			So(usage, ShouldNotBeNil)
+			inDetails, ok := usage["input_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(inDetails["cached_tokens"], ShouldEqual, float64(0))
+			So(inDetails["cache_write_tokens"], ShouldEqual, float64(0))
+			outDetails, ok := usage["output_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(outDetails["reasoning_tokens"], ShouldEqual, float64(0))
+		})
+
+		Convey("U2: 仅 cache_write_tokens>0 → 映射进 input_tokens_details，缺失的 cached_tokens 补 0", func() {
+			chunks := []string{
+				`data: {"id":"resp_uw","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+				`data: {"id":"resp_uw","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150,"prompt_tokens_details":{"cache_write_tokens":40}}}`,
+				`data: [DONE]`,
+			}
+			usage := parseCompletedUsage(sendChunks(chunks, false))
+			So(usage, ShouldNotBeNil)
+			So(usage["input_tokens"], ShouldEqual, float64(120))
+			So(usage["total_tokens"], ShouldEqual, float64(150))
+			inDetails, ok := usage["input_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(inDetails["cache_write_tokens"], ShouldEqual, float64(40))
+			So(inDetails["cached_tokens"], ShouldEqual, float64(0))
+			outDetails, ok := usage["output_tokens_details"].(map[string]interface{})
+			So(ok, ShouldBeTrue)
+			So(outDetails["reasoning_tokens"], ShouldEqual, float64(0))
+		})
+	})
+}
+
+// =============================================================================
+// 问题1：匿名（缺 index）tool_call key 分配与显式 index 双向争用（串包防线）
+// =============================================================================
+
+func TestConvertOpenAIChatToResponses_ToolCallsMixedIndexCollision(t *testing.T) {
+	Convey("匿名 key 与显式 index 混用：显式 delta 撞匿名 key 按 call id 判归属整条丢弃，禁止接管 FuncArgsBuf/FuncCallIDs", t, func() {
+
+		Convey("T1: 匿名A→匿名B（不同 id）分占两个 key，arguments 各归各 item", func() {
+			chunks := []string{
+				`data: {"id":"resp_mixc1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"a\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc1","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc1","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"get_time","arguments":"{\"b\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc1","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"2}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// A、B 各占一个 key（0/1），不互相覆盖
+			So(parseEventMeta(events, "response.output_item.added", `"function_call"`), ShouldResemble, [][2]string{
+				{"fc_call_a", "0"},
+				{"fc_call_b", "1"},
+			})
+			deltas := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.delta")
+			So(len(deltas), ShouldEqual, 4)
+			So(deltas[0]["item_id"], ShouldEqual, "fc_call_a")
+			So(deltas[1]["item_id"], ShouldEqual, "fc_call_a")
+			So(deltas[2]["item_id"], ShouldEqual, "fc_call_b")
+			So(deltas[3]["item_id"], ShouldEqual, "fc_call_b")
+			dones := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.done")
+			So(len(dones), ShouldEqual, 2)
+			So(dones[0]["arguments"], ShouldEqual, `{"a":1}`)
+			So(dones[1]["arguments"], ShouldEqual, `{"b":2}`)
+		})
+
+		Convey("T2: 匿名A→显式0（call_x）冲突 → 显式 delta 整条丢弃不接管不合并", func() {
+			chunks := []string{
+				`data: {"id":"resp_mixc2","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"get_time","arguments":"{\"x\":2}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":",\"evil\":3}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 撞匿名 key 的显式 delta（含缺 id 的续写）全部丢弃：id/name/args 不留任何痕迹
+			joined := strings.Join(events, "")
+			So(strings.Contains(joined, "call_x"), ShouldBeFalse)
+			So(strings.Contains(joined, "get_time"), ShouldBeFalse)
+			So(strings.Contains(joined, "evil"), ShouldBeFalse)
+			So(parseEventMeta(events, "response.output_item.added", `"function_call"`), ShouldResemble,
+				[][2]string{{"fc_call_a", "0"}})
+			dones := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.done")
+			So(len(dones), ShouldEqual, 1)
+			So(dones[0]["item_id"], ShouldEqual, "fc_call_a")
+			// FuncCallIDs[0] 未被覆盖：A 的 item 仍是 call_a
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 1)
+			item := output[0].(map[string]interface{})
+			So(item["id"], ShouldEqual, "fc_call_a")
+			So(item["call_id"], ShouldEqual, "call_a")
+			So(item["name"], ShouldEqual, "get_weather")
+			So(item["arguments"], ShouldEqual, `{"a":1}`)
+		})
+
+		Convey("T3: 匿名A→显式0(call_x)→匿名A 纯 arguments 续写 → A 与 call_x 的 arguments 全文互不污染", func() {
+			chunks := []string{
+				`data: {"id":"resp_mixc3","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"part\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc3","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"get_time","arguments":"{\"evil\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc3","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"A\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc3","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"arguments":"\"X\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc3","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			joined := strings.Join(events, "")
+			// 路径②封闭性：显式接管被丢弃拦死，key0 归属始终是 call_a，
+			// A 的无 index 续写落回自己的 item，call_x 的两条 args delta 均不得混入
+			So(strings.Contains(joined, "evil"), ShouldBeFalse)
+			So(strings.Contains(joined, "\"X\""), ShouldBeFalse)
+			So(strings.Contains(joined, "call_x"), ShouldBeFalse)
+			dones := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.done")
+			So(len(dones), ShouldEqual, 1)
+			So(dones[0]["item_id"], ShouldEqual, "fc_call_a")
+			So(dones[0]["arguments"], ShouldEqual, `{"part":"A"}`)
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 1)
+			So(output[0].(map[string]interface{})["arguments"], ShouldEqual, `{"part":"A"}`)
+		})
+
+		Convey("T4: 匿名A→显式 index:2 正常流→新匿名B → 显式正常流与新匿名分配均不误伤", func() {
+			chunks := []string{
+				`data: {"id":"resp_mixc4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"a\":1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc4","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"call_t","type":"function","function":{"name":"get_time","arguments":"{\"t\":"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc4","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"\"T\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc4","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"get_date","arguments":"{\"b\":1}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mixc4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 未撞匿名 key 的显式 delta 正常放行；匿名 B 分配跳过被显式 index 占用的 key（0 被 A、2 被 T 占 → B 得 1）
+			deltas := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.delta")
+			So(len(deltas), ShouldEqual, 4)
+			dones := parseFunctionCallArgumentEvents(events, "response.function_call_arguments.done")
+			So(len(dones), ShouldEqual, 3)
+			So(dones[0]["item_id"], ShouldEqual, "fc_call_a")
+			So(dones[0]["arguments"], ShouldEqual, `{"a":1}`)
+			So(dones[1]["item_id"], ShouldEqual, "fc_call_b")
+			So(dones[1]["arguments"], ShouldEqual, `{"b":1}`)
+			So(dones[2]["item_id"], ShouldEqual, "fc_call_t")
+			So(dones[2]["arguments"], ShouldEqual, `{"t":"T"}`)
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 3)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "fc_call_a")
+			So(output[1].(map[string]interface{})["id"], ShouldEqual, "fc_call_b")
+			So(output[2].(map[string]interface{})["id"], ShouldEqual, "fc_call_t")
+		})
+	})
+}
+
+// =============================================================================
+// 问题2：RefusalViolationSeen 一次性违规窗口 —— 多段 text 不误伤，紧随 refusal 的直接 text 丢弃
+// =============================================================================
+
+func TestConvertOpenAIChatToResponses_MultiSegmentTextAfterRefusal(t *testing.T) {
+	Convey("refusal→text→tool→text 第二段 text 保留；紧随 refusal 关闭/重开的直接 text 违规丢弃（R2 不回归）", t, func() {
+
+		Convey("M1: refusal→text→tool→text → 第二段为同 item 第二个 output_text part，不重发 output_item.added，终态含两段 text", func() {
+			chunks := []string{
+				`data: {"id":"resp_mst","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do"},"finish_reason":null}]}`,
+				`data: {"id":"resp_mst","choices":[{"index":0,"delta":{"content":"first seg"},"finish_reason":null}]}`,
+				`data: {"id":"resp_mst","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_mst","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_mst","choices":[{"index":0,"delta":{"content":"second seg"},"finish_reason":null}]}`,
+				`data: {"id":"resp_mst","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 守卫不得因 refusal 曾占据 output 而永久丢弃后续 text 段
+			So(strings.Contains(strings.Join(events, ""), "second seg"), ShouldBeTrue)
+
+			// message item 只 added 两次（refusal 独立 item + text item）；第二段重开复用同一 item 不重发 added
+			So(parseEventMeta(events, "response.output_item.added", `"message"`), ShouldResemble, [][2]string{
+				{"msg_resp_mst_0", "0"},
+				{"msg_resp_mst_1", "1"},
+			})
+			// 实现决策锁定：tool 分段后的第二段 text 归并进同一 message item 的新 output_text part
+			// （content_index 递增、item id / output_index 沿用首段快照），终态数组为
+			// [refusal item, message item(两个 output_text part), function_call]
+			So(parseInterleaveEventMeta(events, "response.content_part.added", `"output_text"`), ShouldResemble, [][3]string{
+				{"msg_resp_mst_1", "1", "0"},
+				{"msg_resp_mst_1", "1", "1"},
+			})
+			So(parseInterleaveEventMeta(events, "response.output_text.delta", ""), ShouldResemble, [][3]string{
+				{"msg_resp_mst_1", "1", "0"},
+				{"msg_resp_mst_1", "1", "1"},
+			})
+			// done 按段而非累积全文，content_index 与 added/delta 对齐
+			So(parseOutputTextDoneByPart(events), ShouldResemble, [][2]string{
+				{"0", "first seg"},
+				{"1", "second seg"},
+			})
+			// tool 偏移：refusal 0 + text 1 → function_call 2
+			So(parseEventMeta(events, "response.output_item.added", `"function_call"`), ShouldResemble,
+				[][2]string{{"fc_call_mst", "2"}})
+
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 3)
+			So(output[0].(map[string]interface{})["id"], ShouldEqual, "msg_resp_mst_0")
+			So(output[0].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})["refusal"],
+				ShouldEqual, "cannot do")
+			msg := output[1].(map[string]interface{})
+			So(msg["id"], ShouldEqual, "msg_resp_mst_1")
+			content := msg["content"].([]interface{})
+			So(len(content), ShouldEqual, 2)
+			So(content[0].(map[string]interface{})["type"], ShouldEqual, "output_text")
+			So(content[0].(map[string]interface{})["text"], ShouldEqual, "first seg")
+			So(content[1].(map[string]interface{})["type"], ShouldEqual, "output_text")
+			So(content[1].(map[string]interface{})["text"], ShouldEqual, "second seg")
+			So(output[2].(map[string]interface{})["id"], ShouldEqual, "fc_call_mst")
+		})
+
+		Convey("M2: R2 不回归 → refusal→text→refusal→text 紧随重开 refusal 的直接 text 违规丢弃", func() {
+			chunks := []string{
+				`data: {"id":"resp_mstv","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do A"},"finish_reason":null}]}`,
+				`data: {"id":"resp_mstv","choices":[{"index":0,"delta":{"content":"but text B"},"finish_reason":null}]}`,
+				`data: {"id":"resp_mstv","choices":[{"index":0,"delta":{"refusal":"then refuse C"},"finish_reason":null}]}`,
+				`data: {"id":"resp_mstv","choices":[{"index":0,"delta":{"content":"late text D must drop"},"finish_reason":null}]}`,
+				`data: {"id":"resp_mstv","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 「紧随 refusal 关闭/进行中的直接 text」判违规：D 整段丢弃，不污染 item 与终态
+			joined := strings.Join(events, "")
+			So(strings.Contains(joined, "late text D must drop"), ShouldBeFalse)
+			So(len(parseInterleaveEventMeta(events, "response.output_text.delta", "")), ShouldEqual, 1)
+			So(parseOutputTextDoneByPart(events), ShouldResemble, [][2]string{{"0", "but text B"}})
+			So(parseEventMeta(events, "response.output_item.added", `"message"`), ShouldResemble, [][2]string{
+				{"msg_resp_mstv_0", "0"},
+				{"msg_resp_mstv_1", "1"},
+			})
+			output := parseCompletedOutput(events)
+			So(len(output), ShouldEqual, 2)
+			So(output[0].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})["refusal"],
+				ShouldEqual, "cannot do Athen refuse C")
+			textMsg := output[1].(map[string]interface{})
+			So(textMsg["id"], ShouldEqual, "msg_resp_mstv_1")
+			So(textMsg["content"].([]interface{})[0].(map[string]interface{})["text"], ShouldEqual, "but text B")
+		})
+	})
+}
+
+// parseMessageItemLastDoneContents 解析每个 message item 末条 response.output_item.done 的
+// content 数组。协议 docs/responses-protocol.md §7 语义为每 item 恰好一条 added/done，
+// 正常情况下每个 id 只出现一次；map 取末值形态同时保留对重复 done 的容错解析，
+// 重复性由 parseMessageItemDoneIDs 单独断言。
+func parseMessageItemLastDoneContents(events []string) map[string][]interface{} {
+	out := make(map[string][]interface{})
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: response.output_item.done") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != "response.output_item.done" ||
+			parsed.Get("item.type").String() != "message" {
+			continue
+		}
+		var content []interface{}
+		if err := json.Unmarshal([]byte(parsed.Get("item.content").Raw), &content); err != nil {
+			continue
+		}
+		out[parsed.Get("item.id").String()] = content
+	}
+	return out
+}
+
+// parseMessageItemDoneIDs 按事件顺序返回 message item 的 response.output_item.done 的
+// item id 列表，用于断言「同 item 恒且仅一条 done」（协议 §7：marked done 一次性）。
+func parseMessageItemDoneIDs(events []string) []string {
+	var ids []string
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: response.output_item.done") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != "response.output_item.done" ||
+			parsed.Get("item.type").String() != "message" {
+			continue
+		}
+		ids = append(ids, parsed.Get("item.id").String())
+	}
+	return ids
+}
+
+// terminalMessageContents 解析终态 response.output 中各 message item 的 content 数组，
+// 用于与流式唯一 output_item.done 逐项比对（协议 docs/responses-protocol.md §7：
+// done 携带该 item 的最终完整 content）。
+func terminalMessageContents(events []string) map[string][]interface{} {
+	out := make(map[string][]interface{})
+	for _, o := range parseCompletedOutput(events) {
+		m, ok := o.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t != "message" {
+			continue
+		}
+		id, _ := m["id"].(string)
+		if c, ok := m["content"].([]interface{}); ok {
+			out[id] = c
+		}
+	}
+	return out
+}
+
+// assertDoneTerminalConsistency 统一校验：每个终态 message item 的 output_item.done
+// 恒且仅 1 条、位于终态事件（completed/incomplete/failed 由调用侧流保证）之前、
+// 且 content 与终态 response.output 逐项一致（协议 §7：done 携带最终完整 content）。
+func assertDoneTerminalConsistency(events []string) {
+	lastDone := parseMessageItemLastDoneContents(events)
+	terminal := terminalMessageContents(events)
+	doneIDs := parseMessageItemDoneIDs(events)
+	So(len(terminal), ShouldBeGreaterThan, 0)
+	// 位置锁定：全部 message done 均紧邻终态事件之前（终态统一补发点策略）
+	terminalPos := -1
+	donePos := -1
+	msgDoneSeen := false
+	for i, evt := range events {
+		if !strings.Contains(evt, "event: response.output_item.done") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() == "response.output_item.done" &&
+			parsed.Get("item.type").String() == "message" {
+			donePos = i
+			msgDoneSeen = true
+		}
+	}
+	for i, evt := range events {
+		d := dataOfEvent(evt)
+		if s := d.Get("type").String(); s == "response.completed" || s == "response.incomplete" || s == "response.failed" {
+			terminalPos = i
+		}
+	}
+	So(msgDoneSeen, ShouldBeTrue)
+	So(terminalPos, ShouldBeGreaterThan, donePos)
+	for id, want := range terminal {
+		// 恒且仅一条 done（协议 §7 marked done 一次性状态转换）
+		count := 0
+		for _, got := range doneIDs {
+			if got == id {
+				count++
+			}
+		}
+		So(count, ShouldEqual, 1)
+		got, ok := lastDone[id]
+		So(ok, ShouldBeTrue)
+		// 两侧均已过 json.Unmarshal（map 键 marshal 时排序归一），
+		// JSON 串相等 ⇔ 逐项内容相等；id 前缀入串，多 item 场景可直接定位
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		// 失败输出中 actual=唯一 done、expected=终态 content，id 前缀便于定位
+		So(id+"|"+string(gotJSON), ShouldEqual, id+"|"+string(wantJSON))
+	}
+}
+
+// dataOfEvent 提取 SSE 事件 data 行的 gjson 解析结果（非法/缺失返回零值）。
+func dataOfEvent(evt string) gjson.Result {
+	idx := indexOf(evt, "data: ")
+	if idx < 0 {
+		return gjson.Result{}
+	}
+	dataStr := trimSpace(evt[idx+len("data: "):])
+	if !gjson.Valid(dataStr) {
+		return gjson.Result{}
+	}
+	return gjson.Parse(dataStr)
+}
+
+func TestConvertOpenAIChatToResponses_MessageItemDoneMatchesTerminalContent(t *testing.T) {
+	Convey("message item 唯一 output_item.done（恒且仅一条）的 content 与终态 response.output 逐项一致", t, func() {
+
+		Convey("D1: refusal 独立分支 → text → finish → 各 message item 末条 done 与终态一致", func() {
+			chunks := []string{
+				`data: {"id":"resp_dmc1","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do A"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc1","choices":[{"index":0,"delta":{"content":"but text B"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+			So(len(terminalMessageContents(events)), ShouldEqual, 2)
+			assertDoneTerminalConsistency(events)
+		})
+
+		Convey("D2: refusal 独立分支 → 文本追加段（tool 分段后第二段）→ finish → 末条 done 携带完整两段 text", func() {
+			chunks := []string{
+				`data: {"id":"resp_dmc2","choices":[{"index":0,"delta":{"role":"assistant","refusal":"cannot do A"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc2","choices":[{"index":0,"delta":{"content":"first seg"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_dmc2","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc2","choices":[{"index":0,"delta":{"content":"second seg"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+			assertDoneTerminalConsistency(events)
+			// 具体锁定（reviewer 指令）：text item 的 output_item.done 条数恒等于 1，
+			// 且该唯一 done 同时含两段 text——段关闭不提前发 item done，唯一 done 在终态
+			// 补发点现取完整快照，杜绝「第一段关闭即定稿」的过期快照与重复 done
+			var textDoneCount int
+			for _, got := range parseMessageItemDoneIDs(events) {
+				if got == "msg_resp_dmc2_1" {
+					textDoneCount++
+				}
+			}
+			So(textDoneCount, ShouldEqual, 1)
+			textDone := parseMessageItemLastDoneContents(events)["msg_resp_dmc2_1"]
+			So(len(textDone), ShouldEqual, 2)
+			So(textDone[0].(map[string]interface{})["text"], ShouldEqual, "first seg")
+			So(textDone[1].(map[string]interface{})["text"], ShouldEqual, "second seg")
+		})
+
+		Convey("D3: text → refusal 追加同 item → finish → 末条 done 携带 text+refusal 合并 content（修复回归锁定）", func() {
+			chunks := []string{
+				`data: {"id":"resp_dmc3","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc3","choices":[{"index":0,"delta":{"refusal":"I cannot comply"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+			assertDoneTerminalConsistency(events)
+			// 修复回归锁定：该流唯一 message item 恰好一条 done（refusal 追加定稿即 item
+			// 定稿），done 携带 text+refusal 合并完整 content 且先于 response.completed；
+			// 旧缺陷（done 停留在仅 text parts 的过期快照 / done 缺位）均不回归
+			var d3DoneCount int
+			for _, got := range parseMessageItemDoneIDs(events) {
+				if got == "msg_resp_dmc3_0" {
+					d3DoneCount++
+				}
+			}
+			So(d3DoneCount, ShouldEqual, 1)
+			d3DonePos := indexOfToolEvent(events, "response.output_item.done", "msg_resp_dmc3_0")
+			d3CompletedPos := indexOfToolEvent(events, "response.completed", "")
+			So(d3DonePos, ShouldBeGreaterThan, -1)
+			So(d3CompletedPos, ShouldBeGreaterThan, d3DonePos)
+			done := parseMessageItemLastDoneContents(events)["msg_resp_dmc3_0"]
+			So(len(done), ShouldEqual, 2)
+			So(done[0].(map[string]interface{})["type"], ShouldEqual, "output_text")
+			So(done[0].(map[string]interface{})["text"], ShouldEqual, "Hello")
+			So(done[1].(map[string]interface{})["type"], ShouldEqual, "refusal")
+			So(done[1].(map[string]interface{})["refusal"], ShouldEqual, "I cannot comply")
+		})
+
+		Convey("D4: text → refusal 追加 → tool → refusal 重开续写 → finish → 唯一 done 含两段 refusal 合并全文（FAIL-2 回归锁定）", func() {
+			chunks := []string{
+				`data: {"id":"resp_dmc4","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc4","choices":[{"index":0,"delta":{"refusal":"cannot A"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_dmc4","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc4","choices":[{"index":0,"delta":{"refusal":"then refuse B"},"finish_reason":null}]}`,
+				`data: {"id":"resp_dmc4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			}
+			events := sendChunks(chunks, false)
+
+			// 旧缺陷：追加 refusal 定稿点发 done（置幂等位）后 refusal 重开续写继续增长
+			// RefusalBuf → 唯一 done 缺第二段 refusal，与终态不一致。
+			// 新策略：done 只在终态补发点从 outputs 数组同源生成，续写不漏。
+			assertDoneTerminalConsistency(events)
+			So(parseMessageItemDoneIDs(events), ShouldResemble, []string{"msg_resp_dmc4_0"})
+			// refusal 续写复用同 item：不重发 output_item.added
+			So(len(parseEventMeta(events, "response.output_item.added", `"message"`)), ShouldEqual, 1)
+			// 具体锁定 done content：text 段 + 两段 refusal 合并全文（RefusalBuf 合并语义）
+			done := parseMessageItemLastDoneContents(events)["msg_resp_dmc4_0"]
+			So(len(done), ShouldEqual, 2)
+			So(done[0].(map[string]interface{})["text"], ShouldEqual, "partial")
+			So(done[1].(map[string]interface{})["type"], ShouldEqual, "refusal")
+			So(done[1].(map[string]interface{})["refusal"], ShouldEqual, "cannot Athen refuse B")
+		})
 	})
 }

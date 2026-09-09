@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -82,5 +83,38 @@ func TestResponsesStreamCaptureMarshal(t *testing.T) {
 	}
 	if _, ok := got["text"]; ok {
 		t.Fatalf("did not expect redundant text field in serialized capture")
+	}
+}
+
+func TestResponsesResponseIncompleteDetailsRoundTrip(t *testing.T) {
+	// 终态事件 payload 经 ResponsesStreamEvent 反序列化进 ResponsesResponse，缺字段会在 capture 快照中丢失截断原因
+	payload := `{"type":"response.incomplete","response":{"id":"resp_inc","model":"gpt-4o","status":"incomplete","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},"incomplete_details":{"reason":"max_output_tokens"}}}`
+
+	var event ResponsesStreamEvent
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		t.Fatalf("unmarshal stream event: %v", err)
+	}
+	if event.Response == nil || event.Response.IncompleteDetails == nil {
+		t.Fatalf("expected incomplete_details parsed into ResponsesResponse, got %#v", event.Response)
+	}
+	if event.Response.IncompleteDetails.Reason != "max_output_tokens" {
+		t.Fatalf("expected truncation reason preserved, got %q", event.Response.IncompleteDetails.Reason)
+	}
+
+	data, err := json.Marshal(event.Response)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	if !strings.Contains(string(data), `"incomplete_details":{"reason":"max_output_tokens"}`) {
+		t.Fatalf("expected incomplete_details re-serialized, got %s", data)
+	}
+
+	// completed 响应无 incomplete_details 时应随 omitempty 省略
+	completed, err := json.Marshal(&ResponsesResponse{ID: "resp_ok", Status: "completed"})
+	if err != nil {
+		t.Fatalf("marshal completed response: %v", err)
+	}
+	if strings.Contains(string(completed), "incomplete_details") {
+		t.Fatalf("did not expect incomplete_details on completed response, got %s", completed)
 	}
 }

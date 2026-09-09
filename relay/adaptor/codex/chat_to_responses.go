@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/relay/model"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -28,6 +29,37 @@ type chatToResponsesState struct {
 	FuncItemAdded  map[int]bool             // index -> whether output_item.added has been emitted
 	TextBuf        strings.Builder
 	PendingTextBuf strings.Builder // 延迟首段纯空白 content，避免 reasoning fallback 场景 streaming/completed 不一致
+	// tool_calls 上游畸形回退：delta.tool_calls 缺 index 时按到达顺序分配的匿名 key
+	// （多个 call 都回落到 0 会让 FuncArgsBuf/FuncNames/FuncCallIDs 互相覆盖，arguments 串包）
+	NextAnonToolIdx    int          // 下一个候选匿名 key（跳过已被显式 index 或先前匿名 call 占用的 key）
+	AnonToolCallIdx    int          // 最近一个匿名 call 的 key，供后续仅带 arguments 的 delta 续用
+	AnonToolCallActive bool         // 是否已有可续用的匿名 call
+	WarnedAnonToolDrop bool         // 无法关联 / key 争用的匿名 delta 丢弃日志一次性标记
+	AnonToolKeys       map[int]bool // 匿名分配出去的 key 集合，显式 index 落在其上时按 call id 判归属，禁止接管
+	// refusal state（拒绝内容增量，与 text 互斥，chat §4/§7.2）
+	RefusalBuf                strings.Builder
+	InRefusalBlock            bool
+	CurrentRefusalMsgID       string // refusal message item 的 id（msg_<respID>_<outputIndex>）
+	CurrentRefusalOutputIndex int    // refusal 块打开时记录的 output_index，close 复用不按 ReasoningPartAdded 重算
+	RefusalItemInOutput       bool   // refusal 已作为独立 message item 占据 output（tool/reasoning 偏移用）
+	RefusalAppendedToMsg      bool   // 防御路径：refusal part 追加到已关闭的 text message item
+	CurrentTextOutputIndex    int    // text 块打开时记录的 output_index，close/delta/终态排序复用（与 refusal 快照同构，不随 reasoning 后到重算）
+	// text 分段：一个 message item 可含多个 output_text part（refusal→text→tool→text 等
+	// 正常重开场景按 part 追加，不重发 output_item.added，不丢内容）
+	TextParts               []string        // 各已完成 text 段全文（按 content_index 顺序，供 done/终态数组还原）
+	TextPartBuf             strings.Builder // 当前 text 段增量缓冲（done 事件按段而非全文）
+	TextPartCount           int             // 已开启的 text 段数 = 下一段的 content_index = 追加模式下 refusal part 的下标
+	CurrentTextContentIndex int             // 当前打开 text 段的 content_index
+	// 违规交错防御：仅当「refusal 增量正在进行中」或「该 message item 已挂上 refusal part」时来了
+	// 新 text 段才丢弃（chat §4 互斥违反，与非流式侧 drop text after refusal part 对齐）。
+	// 不可用粘滞的 RefusalItemInOutput 判定，否则 refusal→text→tool→text 的后续正常 text 段会被永久丢弃
+	WarnedTextDropAfterRefusal bool // 丢弃日志一次性标记，避免畸形上游逐 chunk 刷日志
+	// RefusalViolationSeen：「refusal 刚关闭」一次性违规窗口。closeRefusalBlock 关闭时置位；
+	// tool/reasoning/refusal 重开等非 text 内容块到达即复位；置位期间来的新 text 段按违规丢弃。
+	// 必须是一次性标志而非粘滞位，否则 refusal→text→tool→text 的后续正常 text 段会被永久丢弃
+	RefusalViolationSeen bool
+	// 最后一个非空 finish_reason（length → response.incomplete 语义，chat §6.2）
+	FinishReason string
 	// reasoning state
 	ReasoningActive    bool
 	ReasoningItemID    string
@@ -37,20 +69,19 @@ type chatToResponsesState struct {
 	// <think> 标签状态机（用于将正文里的 <think>...</think> 提取为 reasoning_content）
 	Think thinkTagStateMachine
 	// usage（完整支持详细字段）
-	InputTokens             int64
-	InputTokensIncludeCache bool // OpenAI prompt_tokens 口径，已包含 cached tokens
-	OutputTokens            int64
-	TotalTokens             int64
-	CachedTokens            int64 // input_tokens_details.cached_tokens / cache_read_input_tokens
-	ReasoningTokens         int64 // output_tokens_details.reasoning_tokens
-	UsageSeen               bool
+	InputTokens      int64
+	OutputTokens     int64
+	TotalTokens      int64
+	CachedTokens     int64 // input_tokens_details.cached_tokens / cache_read_input_tokens
+	CacheWriteTokens int64 // prompt_tokens_details.cache_write_tokens → input_tokens_details.cache_write_tokens
+	ReasoningTokens  int64 // output_tokens_details.reasoning_tokens
+	UsageSeen        bool
 	// Claude 缓存 TTL 细分
 	CacheCreationTokens   int64  // cache_creation_input_tokens
 	CacheCreation5mTokens int64  // cache_creation_5m_input_tokens
 	CacheCreation1hTokens int64  // cache_creation_1h_input_tokens
 	CacheTTL              string // "5m" | "1h" | "mixed"
 	HasClaudeCacheFields  bool
-	HasCacheDetails       bool
 	// 首次消息标记
 	FirstChunk                 bool
 	CodexToolCompatEnabled     bool
@@ -64,8 +95,9 @@ type chatToResponsesState struct {
 type responsesTerminalEvent string
 
 const (
-	responsesTerminalCompleted responsesTerminalEvent = "response.completed"
-	responsesTerminalFailed    responsesTerminalEvent = "response.failed"
+	responsesTerminalCompleted  responsesTerminalEvent = "response.completed"
+	responsesTerminalFailed     responsesTerminalEvent = "response.failed"
+	responsesTerminalIncomplete responsesTerminalEvent = "response.incomplete"
 )
 
 type responsesFailureState struct {
@@ -92,6 +124,12 @@ func (st *chatToResponsesState) customToolOutputIndex(idx int) int {
 	if st.CurrentMsgID != "" || st.shouldFallbackReasoning() {
 		outputIndex++
 	}
+	// refusal 独立 message item 已占据 output：refusal→text→tool 时该 item 仍位于 tool 之前需偏移，
+	// 无条件加（RefusalItemInOutput 仅在独立 refusal 打开时置位，append 模式置位的是
+	// RefusalAppendedToMsg 不置此项，与 CurrentMsgID 分支天然互斥，不会重复加）。
+	if st.RefusalItemInOutput {
+		outputIndex++
+	}
 	return outputIndex
 }
 
@@ -109,28 +147,18 @@ func (st *chatToResponsesState) builtinToolKind(idx int) string {
 	return ""
 }
 
+// builtinToolItemID 返回 builtin 工具 item id。前缀 ts_/ws_ 与
+// docs/responses-protocol.md §3.6/3.7 及非流式侧（responses_to_chat.go）保持一致。
 func (st *chatToResponsesState) builtinToolItemID(idx int) string {
 	callID := st.FuncCallIDs[idx]
 	switch st.builtinToolKind(idx) {
 	case "tool_search":
-		return fmt.Sprintf("tsc_%s", callID)
+		return fmt.Sprintf("ts_%s", callID)
 	case "web_search":
-		return fmt.Sprintf("wsc_%s", callID)
+		return fmt.Sprintf("ws_%s", callID)
 	default:
 		return ""
 	}
-}
-
-func builtinToolArgumentsValue(args string) interface{} {
-	trimmed := strings.TrimSpace(args)
-	if trimmed == "" {
-		return map[string]interface{}{}
-	}
-	parsed := gjson.Parse(trimmed)
-	if (parsed.IsObject() || parsed.IsArray()) && gjson.Valid(trimmed) {
-		return parsed.Value()
-	}
-	return args
 }
 
 func (st *chatToResponsesState) emitBuiltinLifecycleEvent(idx int, nextSeq func() int, suffix string) string {
@@ -182,6 +210,10 @@ func (st *chatToResponsesState) emitBuiltinSearchQueryDone(idx int, query string
 
 func (st *chatToResponsesState) shouldFallbackReasoning() bool {
 	text := st.TextBuf.String() + st.PendingTextBuf.String()
+	if st.RefusalBuf.Len() > 0 {
+		// refusal 已有独立 message item（refusal part），不再兜底复制 reasoning 文本
+		return false
+	}
 	return st.FallbackReasoningToMessage && strings.TrimSpace(text) == "" && st.ReasoningBuf.Len() > 0
 }
 
@@ -202,14 +234,15 @@ func (st *chatToResponsesState) addToolCallItemIfNeeded(idx int, nextSeq func() 
 		item, _ = sjson.Set(item, "item.id", itemID)
 		item, _ = sjson.Set(item, "item.name", originalName)
 	} else if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "tool_search") {
-		itemID := fmt.Sprintf("tsc_%s", callID)
-		item = `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"tool_search_call","status":"in_progress","arguments":{},"call_id":"","name":"tool_search","execution":"client"}}`
+		itemID := fmt.Sprintf("ts_%s", callID)
+		item = `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"tool_search_call","status":"in_progress","arguments":"","call_id":"","name":"tool_search","execution":"client"}}`
 		item, _ = sjson.Set(item, "item.id", itemID)
 		item, _ = sjson.Set(item, "item.name", name)
 		item, _ = sjson.Set(item, "item.call_id", callID)
 	} else if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "web_search") {
-		itemID := fmt.Sprintf("wsc_%s", callID)
-		item = `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"web_search_call","status":"in_progress","arguments":{},"call_id":"","name":"web_search","execution":"client"}}`
+		// web_search_call 无 execution 字段（docs §3.6 与上游格式一致）
+		itemID := fmt.Sprintf("ws_%s", callID)
+		item = `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"web_search_call","status":"in_progress","arguments":"","call_id":"","name":"web_search"}}`
 		item, _ = sjson.Set(item, "item.id", itemID)
 		item, _ = sjson.Set(item, "item.name", name)
 		item, _ = sjson.Set(item, "item.call_id", callID)
@@ -238,6 +271,57 @@ func (st *chatToResponsesState) addToolCallItemIfNeeded(idx int, nextSeq func() 
 	return out
 }
 
+// findFuncIdxByCallID 在已登记的 tool_calls 里按 call id 反查 key（部分上游每个 chunk
+// 重发完整 tool_call，若按 id 重新分配 key 会把同一个 call 拆成多个 item）。
+func (st *chatToResponsesState) findFuncIdxByCallID(callID string) (int, bool) {
+	if callID == "" {
+		return 0, false
+	}
+	for k, v := range st.FuncCallIDs {
+		if v == callID {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+// anonToolCallIdx 为缺 index 的畸形 tool_calls delta 给出跨 chunk 稳定的 key。
+// 规则（OpenAI 流式语义里 index 是同一 call 的 delta 归并唯一依据，缺它只能按到达顺序推断）：
+//  1. 带 id：先按 id 复用既有 key，否则分配一个未被显式 index 或先前匿名 call 占用的新 key，并记为当前 call；
+//  2. 不带 id：续用最近的匿名 call（纯 arguments delta）；
+//  3. 二者皆不可用：无法可靠关联，返回 false 由调用方跳过并 Warn，而非静默覆盖 0 号 key。
+//
+// 分配出去的 key 记入 AnonToolKeys：显式 index 落到这些 key 上时要按 call id 判归属
+// （见 ConvertOpenAIChatToResponsesWithContext 的 tool_calls 分支），否则匿名 call 与
+// 显式 call 会共用同一 FuncArgsBuf 并互相覆盖 FuncCallIDs。
+func (st *chatToResponsesState) anonToolCallIdx(callID string) (int, bool) {
+	if callID != "" {
+		if k, ok := st.findFuncIdxByCallID(callID); ok {
+			st.AnonToolCallIdx = k
+			st.AnonToolCallActive = true
+			return k, true
+		}
+		// FuncNames/FuncCallIDs/FuncArgsBuf 任一非空都视为 key 已占用：
+		// 显式 index 的 delta 可以只带 name（id 在前一 chunk 已到），漏判 FuncNames 会撞 key
+		for st.FuncArgsBuf[st.NextAnonToolIdx] != nil || st.FuncCallIDs[st.NextAnonToolIdx] != "" ||
+			st.FuncNames[st.NextAnonToolIdx] != "" {
+			st.NextAnonToolIdx++
+		}
+		st.AnonToolCallIdx = st.NextAnonToolIdx
+		st.NextAnonToolIdx++
+		st.AnonToolCallActive = true
+		if st.AnonToolKeys == nil {
+			st.AnonToolKeys = make(map[int]bool)
+		}
+		st.AnonToolKeys[st.AnonToolCallIdx] = true
+		return st.AnonToolCallIdx, true
+	}
+	if st.AnonToolCallActive {
+		return st.AnonToolCallIdx, true
+	}
+	return 0, false
+}
+
 var chatDataTag = []byte("data:")
 
 func emitResponsesEvent(event string, payload string) string {
@@ -264,7 +348,7 @@ func GetStreamCompletedBody(param interface{}, originalRequestRawJSON []byte) []
 	// 兜底：尚未生成过 completed 事件时，按原有逻辑生成
 	events := st.generateCompletedEvents(originalRequestRawJSON)
 	for _, event := range events {
-		if strings.Contains(event, "response.completed") {
+		if strings.Contains(event, "response.completed") || strings.Contains(event, "response.incomplete") {
 			dataPrefix := "data: "
 			idx := strings.Index(event, dataPrefix)
 			if idx >= 0 {
@@ -286,18 +370,6 @@ func effectiveCacheCreationTokens(cacheCreation, cacheCreation5m, cacheCreation1
 
 func calculateClaudeTotalTokens(inputTokens, outputTokens, cacheReadTokens, cacheCreation, cacheCreation5m, cacheCreation1h int64) int64 {
 	return inputTokens + outputTokens + cacheReadTokens + effectiveCacheCreationTokens(cacheCreation, cacheCreation5m, cacheCreation1h)
-}
-
-func normalizeInputTokensWithCache(inputTokens, cacheReadTokens, cacheCreation, cacheCreation5m, cacheCreation1h int64) int64 {
-	cacheTokens := cacheReadTokens + effectiveCacheCreationTokens(cacheCreation, cacheCreation5m, cacheCreation1h)
-	if cacheTokens <= 0 {
-		return inputTokens
-	}
-	normalized := inputTokens - cacheTokens
-	if normalized < 0 {
-		return 0
-	}
-	return normalized
 }
 
 // ensureCodexToolContext 初始化 Codex 工具上下文
@@ -405,6 +477,16 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 
 		// 重置状态
 		st.TextBuf.Reset()
+		st.RefusalBuf.Reset()
+		st.InRefusalBlock = false
+		st.CurrentRefusalMsgID = ""
+		st.CurrentRefusalOutputIndex = 0
+		st.CurrentTextOutputIndex = 0
+		st.RefusalItemInOutput = false
+		st.RefusalAppendedToMsg = false
+		st.WarnedTextDropAfterRefusal = false
+		st.RefusalViolationSeen = false
+		st.FinishReason = ""
 		st.ReasoningBuf.Reset()
 		st.ReasoningActive = false
 		st.InTextBlock = false
@@ -419,10 +501,20 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		st.FuncNames = make(map[int]string)
 		st.FuncCallIDs = make(map[int]string)
 		st.FuncItemAdded = make(map[int]bool)
+		st.NextAnonToolIdx = 0
+		st.AnonToolCallIdx = 0
+		st.AnonToolCallActive = false
+		st.WarnedAnonToolDrop = false
+		st.AnonToolKeys = make(map[int]bool)
+		st.TextParts = nil
+		st.TextPartBuf.Reset()
+		st.TextPartCount = 0
+		st.CurrentTextContentIndex = 0
 		st.InputTokens = 0
 		st.OutputTokens = 0
 		st.TerminalEvent = ""
 		st.CachedTokens = 0
+		st.CacheWriteTokens = 0
 		st.ReasoningTokens = 0
 		st.CacheCreationTokens = 0
 		st.CacheCreation5mTokens = 0
@@ -456,7 +548,6 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		// OpenAI 格式基础字段
 		if v := usage.Get("prompt_tokens"); v.Exists() {
 			st.InputTokens = v.Int()
-			st.InputTokensIncludeCache = true
 		}
 		if v := usage.Get("completion_tokens"); v.Exists() {
 			st.OutputTokens = v.Int()
@@ -465,10 +556,12 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 			st.TotalTokens = v.Int()
 		}
 
-		// OpenAI 格式详细字段
+		// OpenAI 格式详细字段（chat §8.1 cache_write_tokens → responses §6 input_tokens_details.cache_write_tokens）
 		if v := usage.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
 			st.CachedTokens = v.Int()
-			st.HasCacheDetails = true
+		}
+		if v := usage.Get("prompt_tokens_details.cache_write_tokens"); v.Exists() {
+			st.CacheWriteTokens = v.Int()
 		}
 		if v := usage.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
 			st.ReasoningTokens = v.Int()
@@ -477,7 +570,6 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		// Claude 格式基础字段（优先级高于 OpenAI）
 		if v := usage.Get("input_tokens"); v.Exists() {
 			st.InputTokens = v.Int()
-			st.InputTokensIncludeCache = false
 		}
 		if v := usage.Get("output_tokens"); v.Exists() {
 			st.OutputTokens = v.Int()
@@ -487,7 +579,6 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		if v := usage.Get("cache_read_input_tokens"); v.Exists() {
 			st.CachedTokens = v.Int()
 			st.HasClaudeCacheFields = true
-			st.HasCacheDetails = true
 		}
 		if v := usage.Get("cache_creation_input_tokens"); v.Exists() {
 			st.CacheCreationTokens = v.Int()
@@ -521,12 +612,19 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 	}
 
 	for _, choice := range choices.Array() {
+		finishReason := choice.Get("finish_reason").String()
+
+		// 持久化最后一个非空 finish_reason：length → response.incomplete 语义（chat §6.2 → responses §4）。
+		// 必须在 delta 存在性检查之前读取：部分上游的收尾 chunk 只带 finish_reason 不带 delta，
+		// 提前跳过会丢失 length 语义导致终态误判为 completed。
+		if finishReason != "" && finishReason != "null" {
+			st.FinishReason = finishReason
+		}
+
 		delta := choice.Get("delta")
 		if !delta.Exists() {
 			continue
 		}
-
-		finishReason := choice.Get("finish_reason").String()
 
 		// 处理 reasoning_content（OpenAI o1 模型的原生 reasoning 字段）
 		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() && reasoning.String() != "" {
@@ -544,6 +642,12 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 			}
 		}
 
+		// 处理 refusal（chat §7.2 delta.refusal → responses §7 response.refusal.delta/done）。
+		// 按 chat §4 refusal 与 text 互斥，handleRefusalPart 在需要时会先关闭 text/reasoning 块。
+		if refusal := delta.Get("refusal"); refusal.Exists() && refusal.String() != "" {
+			out = append(out, st.handleRefusalPart(refusal.String(), nextSeq)...)
+		}
+
 		// 处理 tool_calls
 		if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			out = append(out, st.flushThinkTagBuf(nextSeq)...)
@@ -551,7 +655,33 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 				out = append(out, st.flushPendingWhitespace(nextSeq)...)
 			}
 			for _, tc := range toolCalls.Array() {
-				idx := int(tc.Get("index").Int())
+				idxNode := tc.Get("index")
+				tcCallID := tc.Get("id").String()
+				idx := int(idxNode.Int())
+				if !idxNode.Exists() || idxNode.Type == gjson.Null {
+					// 上游畸形：delta.tool_calls 缺 index。禁止回落到 0 —— 同流多个 call 会
+					// 互相覆盖 FuncArgsBuf/FuncNames/FuncCallIDs 导致 arguments 串包。
+					key, ok := st.anonToolCallIdx(tcCallID)
+					if !ok {
+						if !st.WarnedAnonToolDrop {
+							st.WarnedAnonToolDrop = true
+							logger.Log.Warnf("drop tool_calls delta without index and with no anonymous call to correlate: response_id=%s", st.ResponseID)
+						}
+						continue
+					}
+					idx = key
+				} else if st.AnonToolKeys[idx] && st.FuncCallIDs[idx] != tcCallID {
+					// 反向争用：显式 index 落在匿名分配的 key 上，且 call id 与本 item 归属的匿名 call 不同。
+					// 直接写入会让两个不同 call 共用 FuncArgsBuf（arguments 混流）并覆盖 FuncCallIDs（静默串包），
+					// 故丢弃该 delta：畸形流丢一段优于两 call 混污。匿名 key 归属不被接管，
+					// 该匿名 call 后续的无 index delta 仍落到自己那个 item。
+					if !st.WarnedAnonToolDrop {
+						st.WarnedAnonToolDrop = true
+						logger.Log.Warnf("drop tool_calls delta whose explicit index collides with an anonymous call key: response_id=%s index=%d anon_call_id=%s incoming_call_id=%s",
+							st.ResponseID, idx, st.FuncCallIDs[idx], tcCallID)
+					}
+					continue
+				}
 
 				// 如果 reasoning 还在活跃状态，先关闭它
 				if st.ReasoningActive {
@@ -561,6 +691,11 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 				// 如果 text block 还在活跃状态，先关闭它
 				if st.InTextBlock {
 					out = append(out, st.closeTextBlock(nextSeq)...)
+				}
+
+				// 如果 refusal block 还在活跃状态，先关闭它（与 text 互斥）
+				if st.InRefusalBlock {
+					out = append(out, st.closeRefusalBlock(nextSeq)...)
 				}
 
 				// 初始化 tool call 状态
@@ -615,6 +750,10 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 						out = append(out, st.addToolCallItemIfNeeded(idx, nextSeq)...)
 					}
 				}
+				// tool 属非 text 内容块：处理完毕后复位「refusal 刚关闭」违规窗口。
+				// 必须放在本分支 closeRefusalBlock 之后——refusal→tool→text 中 refusal 由 tool
+				// 关闭触发的置位会被立即复位，后续 text 属「中间隔了其他块」的正常续写
+				st.RefusalViolationSeen = false
 			}
 		}
 
@@ -631,6 +770,9 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 			}
 			if st.InTextBlock {
 				out = append(out, st.closeTextBlock(nextSeq)...)
+			}
+			if st.InRefusalBlock {
+				out = append(out, st.closeRefusalBlock(nextSeq)...)
 			}
 			if st.InFuncBlock {
 				out = append(out, st.closeFuncBlocks(nextSeq)...)
@@ -673,14 +815,26 @@ func (st *chatToResponsesState) handleReasoningPart(reasoningText string, nextSe
 	if reasoningText == "" {
 		return nil
 	}
+	// reasoning 属非 text 内容块：到达即复位「refusal 刚关闭」违规窗口，
+	// 其后的 refusal→reasoning→text 不再按「紧随 refusal 的违规 text」处理
+	st.RefusalViolationSeen = false
 	var out []string
 
 	// 开始 reasoning block
 	if !st.ReasoningActive {
 		st.ReasoningActive = true
 		st.ReasoningIndex = 0
+		// 已占独立 item 数推导顺延：refusal 独立 message item、text message item（打开中或已关闭）
+		// 均需让位，保证 refusal→text→reasoning 三重乱序时 reasoning 不撞 text 的 index，
+		// 与终态数组还原（各 item 用各自快照 index 排序）一致
+		if st.RefusalItemInOutput {
+			st.ReasoningIndex++
+		}
+		if st.CurrentMsgID != "" {
+			st.ReasoningIndex++
+		}
 		st.ReasoningBuf.Reset()
-		st.ReasoningItemID = fmt.Sprintf("rs_%s_0", st.ResponseID)
+		st.ReasoningItemID = fmt.Sprintf("rs_%s_%d", st.ResponseID, st.ReasoningIndex)
 
 		// response.output_item.added for reasoning
 		item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`
@@ -718,52 +872,93 @@ func (st *chatToResponsesState) shouldDelayLeadingWhitespace(contentText string)
 		(st.ReasoningPartAdded || st.ReasoningActive || st.ReasoningBuf.Len() > 0)
 }
 
+// textOutputIndex 返回 text 块的 output_index：reasoning/refusal 独立 item 已占据
+// 更小 index 时顺延（与 handleReasoningPart 的 refusal 顺延同构），保证跨 item 唯一。
+func (st *chatToResponsesState) textOutputIndex() int {
+	idx := 0
+	if st.ReasoningPartAdded {
+		idx = 1
+	}
+	if st.RefusalItemInOutput {
+		idx++
+	}
+	return idx
+}
+
 func (st *chatToResponsesState) emitContentPart(contentText string, nextSeq func() int) []string {
 	if contentText == "" {
 		return nil
 	}
 	var out []string
 
+	// 违规交错防御，最终判定条件 —— 新 text 段（text 块未打开且本流已建过 message item）满足任一即丢弃：
+	//  1. InRefusalBlock：refusal 增量仍在进行中来了 text（chat §4 互斥已被上游破坏，无法给出无矛盾事件序）；
+	//  2. RefusalAppendedToMsg：该 message item 已挂 refusal part（追加模式），再追加 text part 会违反
+	//     「output_text 在前、refusal 在后」的还原顺序（防御路径，粘滞判定是有意为之）；
+	//  3. RefusalViolationSeen：refusal 刚关闭的一次性窗口内直接命中 text（如 finish 关闭 refusal 后
+	//     仍来的迟到 text 段）；中途有任何非 text 内容块到达即复位，不算「紧随 refusal 关闭」。
+	// 三种情况都与非流式侧「drop text part after refusal part」（responses_to_chat.go）同构：丢弃并一次性 Warn。
+	// refusal→text 首段属正常顺延：此时 text item 尚不存在（CurrentMsgID==""，判定不成立）或违规标志
+	// 已被 tool/refusal 重开复位，故 refusal→text→tool→text 的第二段 text 保留为同 item 的新 output_text part。
+	// 放在关闭 refusal 块之前：丢弃时保留 refusal 累积。
+	if !st.InTextBlock && st.CurrentMsgID != "" &&
+		(st.InRefusalBlock || st.RefusalAppendedToMsg || st.RefusalViolationSeen) {
+		if !st.WarnedTextDropAfterRefusal {
+			st.WarnedTextDropAfterRefusal = true
+			logger.Log.Warnf("drop text content directly following refusal delta (chat §4 mutual exclusion violated by upstream): response_id=%s dropped_len=%d", st.ResponseID, len(contentText))
+		}
+		return out
+	}
+
 	// 如果 reasoning 还在活跃状态，先关闭它
 	if st.ReasoningActive {
 		out = append(out, st.closeReasoningBlock(nextSeq)...)
 	}
 
+	// 如果 refusal 块还在活跃状态，先关闭它（refusal→text 乱序，chat §4 互斥）
+	if st.InRefusalBlock {
+		out = append(out, st.closeRefusalBlock(nextSeq)...)
+	}
+
 	// 开始 text block
 	if !st.InTextBlock {
 		st.InTextBlock = true
-		// 计算 output_index：如果有 reasoning 则为 1，否则为 0
-		outputIndex := 0
-		if st.ReasoningPartAdded {
-			outputIndex = 1
-		}
-		st.CurrentMsgID = fmt.Sprintf("msg_%s_%d", st.ResponseID, outputIndex)
+		st.TextPartBuf.Reset()
+		if st.CurrentMsgID == "" {
+			outputIndex := st.textOutputIndex()
+			st.CurrentTextOutputIndex = outputIndex // 快照：此后 delta/done/终态排序复用，不随 reasoning 后到重算
+			st.CurrentMsgID = fmt.Sprintf("msg_%s_%d", st.ResponseID, outputIndex)
 
-		// response.output_item.added for message
-		item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`
-		item, _ = sjson.Set(item, "sequence_number", nextSeq())
-		item, _ = sjson.Set(item, "output_index", outputIndex)
-		item, _ = sjson.Set(item, "item.id", st.CurrentMsgID)
-		out = append(out, emitResponsesEvent("response.output_item.added", item))
+			// response.output_item.added for message（仅首段建 item；重开时复用同一 item 不再发 added）
+			item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`
+			item, _ = sjson.Set(item, "sequence_number", nextSeq())
+			item, _ = sjson.Set(item, "output_index", st.CurrentTextOutputIndex)
+			item, _ = sjson.Set(item, "item.id", st.CurrentMsgID)
+			out = append(out, emitResponsesEvent("response.output_item.added", item))
+		}
+		// 每一段 text 都是该 message item 上一个独立 output_text part：content_index 递增、
+		// item id 与 output_index 沿用首段快照，避免重开时同 ID 再发 output_item.added
+		st.CurrentTextContentIndex = st.TextPartCount
+		st.TextPartCount++
 
 		// response.content_part.added
 		part := `{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`
 		part, _ = sjson.Set(part, "sequence_number", nextSeq())
 		part, _ = sjson.Set(part, "item_id", st.CurrentMsgID)
-		part, _ = sjson.Set(part, "output_index", outputIndex)
+		part, _ = sjson.Set(part, "output_index", st.CurrentTextOutputIndex)
+		part, _ = sjson.Set(part, "content_index", st.CurrentTextContentIndex)
 		out = append(out, emitResponsesEvent("response.content_part.added", part))
 	}
 
 	// 发送 text delta
 	st.TextBuf.WriteString(contentText)
-	outputIndex := 0
-	if st.ReasoningPartAdded {
-		outputIndex = 1
-	}
+	st.TextPartBuf.WriteString(contentText)
+	outputIndex := st.CurrentTextOutputIndex // 复用打开时快照，保证同一 item 事件 index 恒定
 	msg := `{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`
 	msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
 	msg, _ = sjson.Set(msg, "item_id", st.CurrentMsgID)
 	msg, _ = sjson.Set(msg, "output_index", outputIndex)
+	msg, _ = sjson.Set(msg, "content_index", st.CurrentTextContentIndex)
 	msg, _ = sjson.Set(msg, "delta", contentText)
 	out = append(out, emitResponsesEvent("response.output_text.delta", msg))
 	return out
@@ -850,17 +1045,22 @@ func (st *chatToResponsesState) closeTextBlock(nextSeq func() int) []string {
 	}
 
 	var out []string
-	outputIndex := 0
-	if st.ReasoningPartAdded {
-		outputIndex = 1
-	}
+	// 复用打开时记录的 index 快照：reasoning 后到（refusal→text→reasoning 乱序）时按
+	// ReasoningPartAdded 重算会与打开时的 index 矛盾（added/delta 与 done 不一致），
+	// 快照保证同一 item 的事件 output_index 恒定
+	outputIndex := st.CurrentTextOutputIndex
+	contentIndex := st.CurrentTextContentIndex
+	// done 系列按「当前段」而非全文：多段 text（refusal→text→tool→text）各自对应一个
+	// output_text part，全文塞进每段的 done 会让各 part 内容重复
+	partText := st.TextPartBuf.String()
 
 	// response.output_text.done
 	done := `{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`
 	done, _ = sjson.Set(done, "sequence_number", nextSeq())
 	done, _ = sjson.Set(done, "item_id", st.CurrentMsgID)
 	done, _ = sjson.Set(done, "output_index", outputIndex)
-	done, _ = sjson.Set(done, "text", st.TextBuf.String())
+	done, _ = sjson.Set(done, "content_index", contentIndex)
+	done, _ = sjson.Set(done, "text", partText)
 	out = append(out, emitResponsesEvent("response.output_text.done", done))
 
 	// response.content_part.done
@@ -868,18 +1068,212 @@ func (st *chatToResponsesState) closeTextBlock(nextSeq func() int) []string {
 	partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
 	partDone, _ = sjson.Set(partDone, "item_id", st.CurrentMsgID)
 	partDone, _ = sjson.Set(partDone, "output_index", outputIndex)
-	partDone, _ = sjson.Set(partDone, "part.text", st.TextBuf.String())
+	partDone, _ = sjson.Set(partDone, "content_index", contentIndex)
+	partDone, _ = sjson.Set(partDone, "part.text", partText)
 	out = append(out, emitResponsesEvent("response.content_part.done", partDone))
 
-	// response.output_item.done for message
-	final := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`
-	final, _ = sjson.Set(final, "sequence_number", nextSeq())
-	final, _ = sjson.Set(final, "output_index", outputIndex)
-	final, _ = sjson.Set(final, "item.id", st.CurrentMsgID)
-	final, _ = sjson.Set(final, "item.content.0.text", st.TextBuf.String())
-	out = append(out, emitResponsesEvent("response.output_item.done", final))
+	// 归档本段，供后续段与终态数组按 content part 顺序还原
+	st.TextParts = append(st.TextParts, partText)
+
+	// 段关闭不发 item 级 output_item.done：协议 docs/responses-protocol.md §7 output item
+	// 事件语义是每个 item 恰好一条 added/done（ResponseOutputItemDoneEvent 的 marked done
+	// 为一次性状态转换，done 携带该 item 最终完整 content）。text 段关闭不代表 message item
+	// 定稿——后续 text 段/追加 refusal 仍会增补内容，唯一 done 由统一终态补发点
+	// emitMessageItemDoneEvent 在终态事件前按与 response.output 同源快照发出。
+	// part 级 output_text.done + content_part.done 每段各一条，与 item 级 done 无关，保留。
 
 	st.InTextBlock = false
+	return out
+}
+
+// messageTextContentParts 按 content_index 顺序构造 message item 的完整 content part 列表：
+// 已归档 text 段 + text 块仍打开时缓冲中的当前段（InTextBlock 门控，防止与「先归档再取」双计）
+// + 追加模式的 refusal part（恒排在全部 output_text part 之后，下标即 refusalContentIndex）。
+// 唯一 output_item.done（统一终态补发点 emitMessageItemDoneEvent）与终态 response.output 一律复用本函数现取，
+// 保证 done 恒为该 item 的最终完整内容（协议 docs/responses-protocol.md §7 output item
+// 事件：done 携带最终完整 content）。
+func (st *chatToResponsesState) messageTextContentParts() []interface{} {
+	parts := make([]interface{}, 0, len(st.TextParts)+2)
+	for _, text := range st.TextParts {
+		parts = append(parts, map[string]interface{}{
+			"type":        "output_text",
+			"annotations": []interface{}{},
+			"logprobs":    []interface{}{},
+			"text":        text,
+		})
+	}
+	if st.InTextBlock && st.TextPartBuf.Len() > 0 {
+		parts = append(parts, map[string]interface{}{
+			"type":        "output_text",
+			"annotations": []interface{}{},
+			"logprobs":    []interface{}{},
+			"text":        st.TextPartBuf.String(),
+		})
+	}
+	if st.RefusalAppendedToMsg && st.RefusalBuf.Len() > 0 {
+		parts = append(parts, map[string]interface{}{
+			"type":    "refusal",
+			"refusal": st.RefusalBuf.String(),
+		})
+	}
+	return parts
+}
+
+// emitMessageItemDoneEvent 为单个 message item 生成 output_item.done 事件。
+// item 快照（type/id/role/status/content）必须传入终态 response.output 数组的同一构建
+// 产物，保证每 item 恒且仅一条 done 且与终态天然同源一致。
+// 协议 docs/responses-protocol.md §7：output item 事件按 added/done 成对标记生命周期，
+// ResponseOutputItemDoneEvent 的 marked done 是一次性状态转换，done 携带该 item 最终
+// 完整 content——故一切 message item done 仅在终态补发点发出，流中途 close* 不发。
+func emitMessageItemDoneEvent(item map[string]interface{}, outputIndex int, nextSeq func() int) string {
+	payload := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`
+	payload, _ = sjson.Set(payload, "sequence_number", nextSeq())
+	payload, _ = sjson.Set(payload, "output_index", outputIndex)
+	payload, _ = sjson.Set(payload, "item", item)
+	return emitResponsesEvent("response.output_item.done", payload)
+}
+
+// handleRefusalPart 发射 refusal 块相关事件，并维护 InRefusalBlock/RefusalBuf 状态。
+// 事件序列与文本块对称（responses §5/§7）：output_item.added(message) →
+// content_part.added(refusal part) → response.refusal.delta。
+// refusal 与 text 互斥（chat §4），若 text/reasoning 块尚在活跃则先关闭。
+// 所有 refusal 事件使用打开时记录的 CurrentRefusalOutputIndex，close 时不按 ReasoningPartAdded 重算，
+// 保证同一 item 的事件 output_index 恒定、跨 item 唯一。
+func (st *chatToResponsesState) handleRefusalPart(refusalText string, nextSeq func() int) []string {
+	if refusalText == "" {
+		return nil
+	}
+	// refusal 到达（续写或重开）本身是非 text 内容块：复位上一轮「refusal 刚关闭」窗口；
+	// 紧随重开 refusal 的违规 text 由 emitContentPart 守卫的 InRefusalBlock 分支兜住
+	st.RefusalViolationSeen = false
+	var out []string
+
+	// 若 reasoning 或 text 块仍活跃，先关闭（chat §4 refusal 与 text 互斥）
+	if st.ReasoningActive {
+		out = append(out, st.closeReasoningBlock(nextSeq)...)
+	}
+	if st.InTextBlock {
+		out = append(out, st.closeTextBlock(nextSeq)...)
+	}
+
+	// 开始 refusal block
+	if !st.InRefusalBlock {
+		st.InRefusalBlock = true
+		switch {
+		case st.RefusalItemInOutput:
+			// 复用先前已定稿的独立 refusal item（refusal→text→refusal 交错）：
+			// id 与 output_index 全部沿用其打开时快照（CurrentRefusalMsgID / CurrentRefusalOutputIndex
+			// 在此之前不会被改写），既不重复发 output_item.added，也不按 ReasoningPartAdded 重算 index
+			//（重算会与该 refusal item 已发事件矛盾，或撞 text item 的 index）。
+			// 视为同一 refusal part 的续写：不发 content_part.added，文本并入 RefusalBuf，
+			// close 时的 refusal.done / 终态 item 均以合并后全文为准。
+		case st.CurrentMsgID != "":
+			// 防御路径：text block 已关闭（互斥违反）后仍到 refusal —— 复用该 message item 追加 refusal part，
+			// 对齐非流式 convertChatMessageToOutput 的合并行为（responses §5 允许 message content 含 refusal part），
+			// 不新建同 ID 的 message item 导致 item id 重复。
+			st.RefusalAppendedToMsg = true
+			st.CurrentRefusalMsgID = st.CurrentMsgID
+			// index 必须继承被复用 item 的快照：按 ReasoningPartAdded 重算会让同一 item_id 的
+			// text 事件与 refusal 事件 output_index 互相矛盾
+			st.CurrentRefusalOutputIndex = st.CurrentTextOutputIndex
+
+			// response.content_part.added for refusal part（追加到既有 message item）
+			part := `{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}`
+			part, _ = sjson.Set(part, "sequence_number", nextSeq())
+			part, _ = sjson.Set(part, "item_id", st.CurrentRefusalMsgID)
+			part, _ = sjson.Set(part, "output_index", st.CurrentRefusalOutputIndex)
+			part, _ = sjson.Set(part, "content_index", st.refusalContentIndex())
+			out = append(out, emitResponsesEvent("response.content_part.added", part))
+		default:
+			// 新建独立 refusal message item：reasoning 已占 0 时顺延 1
+			st.CurrentRefusalOutputIndex = 0
+			if st.ReasoningPartAdded {
+				st.CurrentRefusalOutputIndex = 1
+			}
+			st.RefusalItemInOutput = true
+			st.CurrentRefusalMsgID = fmt.Sprintf("msg_%s_%d", st.ResponseID, st.CurrentRefusalOutputIndex)
+
+			// response.output_item.added for message
+			item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`
+			item, _ = sjson.Set(item, "sequence_number", nextSeq())
+			item, _ = sjson.Set(item, "output_index", st.CurrentRefusalOutputIndex)
+			item, _ = sjson.Set(item, "item.id", st.CurrentRefusalMsgID)
+			out = append(out, emitResponsesEvent("response.output_item.added", item))
+
+			// response.content_part.added for refusal part
+			part := `{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}`
+			part, _ = sjson.Set(part, "sequence_number", nextSeq())
+			part, _ = sjson.Set(part, "item_id", st.CurrentRefusalMsgID)
+			part, _ = sjson.Set(part, "output_index", st.CurrentRefusalOutputIndex)
+			out = append(out, emitResponsesEvent("response.content_part.added", part))
+		}
+	}
+
+	// 发送 refusal delta
+	st.RefusalBuf.WriteString(refusalText)
+	msg := `{"type":"response.refusal.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`
+	msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
+	msg, _ = sjson.Set(msg, "item_id", st.CurrentRefusalMsgID)
+	msg, _ = sjson.Set(msg, "output_index", st.CurrentRefusalOutputIndex)
+	msg, _ = sjson.Set(msg, "content_index", st.refusalContentIndex())
+	msg, _ = sjson.Set(msg, "delta", refusalText)
+	out = append(out, emitResponsesEvent("response.refusal.delta", msg))
+	return out
+}
+
+// refusalContentIndex 返回 refusal part 的 content_index：追加模式（text→refusal 防御路径）
+// 时 refusal 排在消息已有的全部 output_text part 之后（单段 text 即第二个 part），
+// 其余场景（独立 refusal item）为 0。
+func (st *chatToResponsesState) refusalContentIndex() int {
+	if st.RefusalAppendedToMsg {
+		return st.TextPartCount
+	}
+	return 0
+}
+
+// closeRefusalBlock 关闭 refusal block：仅发 part 级事件（refusal.done / content_part.done），
+// item 级 output_item.done 统一由终态补发点 emitMessageItemDoneEvent 发出
+func (st *chatToResponsesState) closeRefusalBlock(nextSeq func() int) []string {
+	if !st.InRefusalBlock {
+		return nil
+	}
+
+	var out []string
+	// 复用打开时记录的 index，不按当前 ReasoningPartAdded 重算：
+	// refusal→reasoning 乱序场景下拒绝块打开时尚未见 reasoning，重算会让同一 item 的
+	// delta/done 事件 output_index 前后矛盾（终态数组按流式已定 index 还原顺序见 generateCompletedEvents）。
+	outputIndex := st.CurrentRefusalOutputIndex
+	contentIndex := st.refusalContentIndex()
+	full := st.RefusalBuf.String()
+
+	// response.refusal.done
+	done := `{"type":"response.refusal.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"refusal":"","logprobs":[]}`
+	done, _ = sjson.Set(done, "sequence_number", nextSeq())
+	done, _ = sjson.Set(done, "item_id", st.CurrentRefusalMsgID)
+	done, _ = sjson.Set(done, "output_index", outputIndex)
+	done, _ = sjson.Set(done, "content_index", contentIndex)
+	done, _ = sjson.Set(done, "refusal", full)
+	out = append(out, emitResponsesEvent("response.refusal.done", done))
+
+	// response.content_part.done
+	partDone := `{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}`
+	partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
+	partDone, _ = sjson.Set(partDone, "item_id", st.CurrentRefusalMsgID)
+	partDone, _ = sjson.Set(partDone, "output_index", outputIndex)
+	partDone, _ = sjson.Set(partDone, "content_index", contentIndex)
+	partDone, _ = sjson.Set(partDone, "part.refusal", full)
+	out = append(out, emitResponsesEvent("response.content_part.done", partDone))
+
+	// refusal 块关闭不发 item 级 output_item.done（含独立 item 复用续写与追加模式两类）：
+	// refusal 可重开续写（RefusalBuf 合并全文持续增长），块关闭 ≠ item 定稿。message item
+	// 唯一 done 统一由终态补发点发出（generateCompletedEvents / generateFailedEvents），
+	// 与终态 response.output 同源（协议 docs/responses-protocol.md §7：每个 output item
+	// 恰好一条 added/done，marked done 为一次性状态转换，done 携带最终完整 content）。
+
+	st.InRefusalBlock = false
+	// refusal 刚关闭：开启一次性违规窗口，下一个内容块若直接是新 text 段按违规丢弃
+	// （由随后到达的 tool/reasoning/refusal 复位，见各 handle* 与 tool_calls 分支）
+	st.RefusalViolationSeen = true
 	return out
 }
 
@@ -934,25 +1328,25 @@ func (st *chatToResponsesState) closeFuncBlocks(nextSeq func() int) []string {
 		} else if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "tool_search") {
 			out = append(out, st.emitBuiltinSearchQueryDone(idx, args, nextSeq))
 			out = append(out, st.emitBuiltinLifecycleEvent(idx, nextSeq, "completed"))
-			itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"tool_search_call","status":"completed","arguments":{},"call_id":"","name":"tool_search","execution":"client"}}`
+			itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"tool_search_call","status":"completed","arguments":"","call_id":"","name":"tool_search","execution":"client"}}`
 			itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
 			itemDone, _ = sjson.Set(itemDone, "output_index", outputIndex)
-			itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("tsc_%s", callID))
+			itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("ts_%s", callID))
 			itemDone, _ = sjson.Set(itemDone, "item.name", name)
 			itemDone, _ = sjson.Set(itemDone, "item.call_id", callID)
-			itemDone, _ = sjson.Set(itemDone, "item.arguments", builtinToolArgumentsValue(args))
+			itemDone, _ = sjson.Set(itemDone, "item.arguments", args)
 			out = append(out, emitResponsesEvent("response.output_item.done", itemDone))
 			continue
 		} else if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "web_search") {
 			out = append(out, st.emitBuiltinSearchQueryDone(idx, args, nextSeq))
 			out = append(out, st.emitBuiltinLifecycleEvent(idx, nextSeq, "completed"))
-			itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"web_search_call","status":"completed","arguments":{},"call_id":"","name":"web_search","execution":"client"}}`
+			itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"web_search_call","status":"completed","arguments":"","call_id":"","name":"web_search"}}`
 			itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
 			itemDone, _ = sjson.Set(itemDone, "output_index", outputIndex)
-			itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("wsc_%s", callID))
+			itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("ws_%s", callID))
 			itemDone, _ = sjson.Set(itemDone, "item.name", name)
 			itemDone, _ = sjson.Set(itemDone, "item.call_id", callID)
-			itemDone, _ = sjson.Set(itemDone, "item.arguments", builtinToolArgumentsValue(args))
+			itemDone, _ = sjson.Set(itemDone, "item.arguments", args)
 			out = append(out, emitResponsesEvent("response.output_item.done", itemDone))
 			continue
 		}
@@ -1006,6 +1400,9 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 	if st.InTextBlock {
 		out = append(out, st.closeTextBlock(nextSeq)...)
 	}
+	if st.InRefusalBlock {
+		out = append(out, st.closeRefusalBlock(nextSeq)...)
+	}
 	if st.InFuncBlock {
 		out = append(out, st.closeFuncBlocks(nextSeq)...)
 	}
@@ -1058,20 +1455,35 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		partDone, _ = sjson.Set(partDone, "part.text", full)
 		out = append(out, emitResponsesEvent("response.content_part.done", partDone))
 
-		// 6. response.output_item.done
-		itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`
-		itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
-		itemDone, _ = sjson.Set(itemDone, "output_index", outputIndex)
-		itemDone, _ = sjson.Set(itemDone, "item.id", msgID)
-		itemDone, _ = sjson.Set(itemDone, "item.content.0.text", full)
-		out = append(out, emitResponsesEvent("response.output_item.done", itemDone))
+		// fallback 合成 item 的 output_item.done 不在此发：统一由下方终态补发点
+		// 从终态 outputs 数组同源生成（每 message item 恒且仅一条 done）
 	}
 
-	// 构建 response.completed
-	completed := `{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`
-	completed, _ = sjson.Set(completed, "sequence_number", nextSeq())
+	// 构建终态事件：finish_reason=length/content_filter 时为 response.incomplete（chat §6.2 → responses §4 status/incomplete_details）。
+	// length → max_output_tokens；content_filter 原样映射（与响应侧 responses_to_chat.go 非流式路径对称，chat §6.2）。
+	// responses §5 message item 未定义 truncated 字段，truncated 只标记在 response 主对象上（§4 示例字段）。
+	terminal := responsesTerminalCompleted
+	statusValue := "completed"
+	incompleteReason := ""
+	switch st.FinishReason {
+	case "length":
+		terminal = responsesTerminalIncomplete
+		statusValue = "incomplete"
+		incompleteReason = "max_output_tokens"
+	case "content_filter":
+		terminal = responsesTerminalIncomplete
+		statusValue = "incomplete"
+		incompleteReason = "content_filter"
+	}
+	completed := `{"type":"","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null}}`
+	completed, _ = sjson.Set(completed, "type", string(terminal))
+	completed, _ = sjson.Set(completed, "response.status", statusValue)
 	completed, _ = sjson.Set(completed, "response.id", st.ResponseID)
 	completed, _ = sjson.Set(completed, "response.created_at", st.CreatedAt)
+	if terminal == responsesTerminalIncomplete {
+		completed, _ = sjson.Set(completed, "response.incomplete_details", map[string]interface{}{"reason": incompleteReason})
+		completed, _ = sjson.Set(completed, "response.truncated", true)
+	}
 
 	// 注入原始请求字段
 	if originalRequestRawJSON != nil {
@@ -1114,9 +1526,14 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 	// 构建 output 数组
 	var outputs []interface{}
 
+	hasReasoning := st.ReasoningBuf.Len() > 0 || st.ReasoningPartAdded
+	// 追加模式（text→refusal 防御路径）下 refusal part 已并入 text message item，不产出独立 item
+	hasStandaloneRefusal := st.RefusalBuf.Len() > 0 && !st.RefusalAppendedToMsg
+
 	// reasoning item（如果有）
-	if st.ReasoningBuf.Len() > 0 || st.ReasoningPartAdded {
-		r := map[string]interface{}{
+	var reasoningItem map[string]interface{}
+	if hasReasoning {
+		reasoningItem = map[string]interface{}{
 			"id":     st.ReasoningItemID,
 			"type":   "reasoning",
 			"status": "completed",
@@ -1125,29 +1542,27 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 				"text": st.ReasoningBuf.String(),
 			}},
 		}
-		outputs = append(outputs, r)
 	}
 
 	// message item（如果有文本块）。触发 reasoning fallback 时不额外输出纯空白 message。
+	var messageItem map[string]interface{}
 	if hasTextBlock && !shouldFallbackReasoning {
-		m := map[string]interface{}{
-			"id":     st.CurrentMsgID,
-			"type":   "message",
-			"status": "completed",
-			"content": []interface{}{map[string]interface{}{
-				"type":        "output_text",
-				"annotations": []interface{}{},
-				"logprobs":    []interface{}{},
-				"text":        st.TextBuf.String(),
-			}},
-			"role": "assistant",
+		// content 按流式已定的 content_index 逐段还原（多段 text 各占一个 output_text part）；
+		// 防御路径的 refusal part 合并（responses §5 允许 message content 含 refusal part，
+		// 与流式事件序列及非流式 convertChatMessageToOutput 合并行为对齐）已由
+		// messageTextContentParts 统一并入，与流式唯一 output_item.done 同源现取、逐项一致
+		messageItem = map[string]interface{}{
+			"id":      st.CurrentMsgID,
+			"type":    "message",
+			"status":  "completed",
+			"content": st.messageTextContentParts(),
+			"role":    "assistant",
 		}
-		outputs = append(outputs, m)
 	}
 
 	// 兜底 message item（无 content 仅 reasoning 时，把 reasoning 文本复制为 message 渲染）
 	if shouldFallbackReasoning {
-		m := map[string]interface{}{
+		messageItem = map[string]interface{}{
 			"id":     fmt.Sprintf("msg_%s_1", st.ResponseID),
 			"type":   "message",
 			"status": "completed",
@@ -1159,7 +1574,49 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 			}},
 			"role": "assistant",
 		}
-		outputs = append(outputs, m)
+	}
+
+	// refusal message item（chat §6.1 message.refusal → responses §5 refusal content part）。
+	// closeRefusalBlock 已在此前关闭块阶段把完整文本写入 RefusalBuf；流式期间已有独立 refusal 事件序列。
+	var refusalItem map[string]interface{}
+	if hasStandaloneRefusal {
+		refusalItem = map[string]interface{}{
+			"id":     st.CurrentRefusalMsgID,
+			"type":   "message",
+			"status": "completed",
+			"content": []interface{}{map[string]interface{}{
+				"type":    "refusal",
+				"refusal": st.RefusalBuf.String(),
+			}},
+			"role": "assistant",
+		}
+	}
+
+	// 按流式已定的 output_index 还原终态数组顺序：refusal/reasoning/text 存在乱序到达
+	// （refusal→reasoning→text）时各自占据的 index 已在流式阶段顺延，此处按 index 升序
+	// 排列三项，保证终态数组与各事件的 output_index 一致（item 不重复占用同一 index）。
+	type orderedOutputItem struct {
+		index int
+		item  interface{}
+	}
+	orderedOutputs := make([]orderedOutputItem, 0, 3)
+	if reasoningItem != nil {
+		orderedOutputs = append(orderedOutputs, orderedOutputItem{st.ReasoningIndex, reasoningItem})
+	}
+	if messageItem != nil {
+		messageIndex := st.CurrentTextOutputIndex // 流式快照 index 还原，与 id 后缀/流式事件一致
+		if shouldFallbackReasoning {
+			// 兜底 message 固定占 index 1（id 为 msg_<respID>_1，text 块从未打开，无快照可言）
+			messageIndex = 1
+		}
+		orderedOutputs = append(orderedOutputs, orderedOutputItem{messageIndex, messageItem})
+	}
+	if refusalItem != nil {
+		orderedOutputs = append(orderedOutputs, orderedOutputItem{st.CurrentRefusalOutputIndex, refusalItem})
+	}
+	sort.Slice(orderedOutputs, func(i, j int) bool { return orderedOutputs[i].index < orderedOutputs[j].index })
+	for _, o := range orderedOutputs {
+		outputs = append(outputs, o.item)
 	}
 
 	// function_call items
@@ -1195,10 +1652,10 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 			}
 			if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "tool_search") {
 				item := map[string]interface{}{
-					"id":        fmt.Sprintf("tsc_%s", callID),
+					"id":        fmt.Sprintf("ts_%s", callID),
 					"type":      "tool_search_call",
 					"status":    "completed",
-					"arguments": builtinToolArgumentsValue(args),
+					"arguments": args,
 					"call_id":   callID,
 					"name":      name,
 					"execution": "client",
@@ -1207,14 +1664,14 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 				continue
 			}
 			if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "web_search") {
+				// web_search_call 无 execution 字段（docs §3.6 与上游格式一致）
 				item := map[string]interface{}{
-					"id":        fmt.Sprintf("wsc_%s", callID),
+					"id":        fmt.Sprintf("ws_%s", callID),
 					"type":      "web_search_call",
 					"status":    "completed",
-					"arguments": builtinToolArgumentsValue(args),
+					"arguments": args,
 					"call_id":   callID,
 					"name":      name,
-					"execution": "client",
 				}
 				outputs = append(outputs, item)
 				continue
@@ -1245,43 +1702,43 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		reasoningTokens = int64(st.ReasoningBuf.Len() / 4)
 	}
 
+	// 输入口径与 docs/responses-protocol.md §6 及非流式 parseUsage 对齐：
+	// input_tokens 为总输入（含 cached），cached 命中数仅经 input_tokens_details.cached_tokens 单独表达，
+	// 不再从主字段扣除（旧实现曾对 OpenAI 上游扣除 cached，与协议总口径相悖，已移除）。
+	// OpenAI prompt_tokens 已含 cached → 直通；Claude input_tokens 不含 cache → 保持上游原值。
 	inputTokens := st.InputTokens
-	if st.InputTokensIncludeCache {
-		inputTokens = normalizeInputTokensWithCache(
-			st.InputTokens,
-			st.CachedTokens,
-			st.CacheCreationTokens,
-			st.CacheCreation5mTokens,
-			st.CacheCreation1hTokens,
-		)
-	}
 
 	// 始终添加基础 usage 字段，即使值为 0
 	completed, _ = sjson.Set(completed, "response.usage.input_tokens", inputTokens)
 	completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.OutputTokens)
 	total := st.TotalTokens
-	if total == 0 || st.CachedTokens > 0 || effectiveCacheCreationTokens(st.CacheCreationTokens, st.CacheCreation5mTokens, st.CacheCreation1hTokens) > 0 {
-		total = calculateClaudeTotalTokens(
-			inputTokens,
-			st.OutputTokens,
-			st.CachedTokens,
-			st.CacheCreationTokens,
-			st.CacheCreation5mTokens,
-			st.CacheCreation1hTokens,
-		)
+	needTotalRecalc := st.HasClaudeCacheFields && (st.CachedTokens > 0 || effectiveCacheCreationTokens(st.CacheCreationTokens, st.CacheCreation5mTokens, st.CacheCreation1hTokens) > 0)
+	if total == 0 || needTotalRecalc {
+		if st.HasClaudeCacheFields {
+			// Claude 上游：input_tokens 不含 cache，total 需汇集 cache 三件套（与上游 total 口径一致）
+			total = calculateClaudeTotalTokens(
+				inputTokens,
+				st.OutputTokens,
+				st.CachedTokens,
+				st.CacheCreationTokens,
+				st.CacheCreation5mTokens,
+				st.CacheCreation1hTokens,
+			)
+		} else {
+			// OpenAI 上游：input_tokens 已含 cached，total = input + output（responses §6）
+			total = inputTokens + st.OutputTokens
+		}
 	}
 	completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 
-	// 可选的详情字段，仅在有值时添加
-	// input_tokens_details
-	if !st.HasClaudeCacheFields && st.HasCacheDetails && st.CachedTokens > 0 {
-		completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
-	}
-
+	// 详情字段（responses §6：usage 内字段含两个 details 对象全部必填）：
+	// details 对象与子字段恒存在，值为 0 也输出 —— 旧实现「有值才添加」会让按必填解析的客户端拿到 undefined。
+	// input_tokens_details：OpenAI 与 Claude 路径均写入标准字段，
+	// Claude 同时保留下方 cache_read_input_tokens 透传（下游既有消费方兼容）
+	completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
+	completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cache_write_tokens", st.CacheWriteTokens)
 	// output_tokens_details
-	if reasoningTokens > 0 {
-		completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
-	}
+	completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
 
 	// Claude 缓存 TTL 细分字段
 	if st.CacheCreationTokens > 0 {
@@ -1300,9 +1757,52 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		completed, _ = sjson.Set(completed, "response.usage.cache_ttl", st.CacheTTL)
 	}
 
+	// message item done 终态统一补发点（reviewer v2 裁决：放弃「定稿点」概念）：
+	// 所有 message item（text item 与独立 refusal item 一体适用）的唯一 output_item.done
+	// 只在终态事件前发出，item 快照直接复用上方 outputs 数组构建产物——done 与终态
+	// response.output 天然同源一致，每 item 恒且仅一条，refusal 续写/复用、多段 text
+	// 追加等一切增长路径都不再产生过期快照或重复 done（协议 docs/responses-protocol.md
+	// §7：added/done 成对标记 item 生命周期，marked done 为一次性状态转换，done 携带
+	// 最终完整 content）。发射顺序沿用 outputs 数组（流式 output_index 升序）。
+	// 防御性兜底分支（当前状态机下不可达）：前导空白被 Think 状态机吞掉或走延迟缓冲，
+	// 无法同时满足「已 added（CurrentMsgID != ""）」与「TrimSpace 为空」，仅守
+	// added/done 成对不变量（快照 messageTextContentParts 现取）
+	if shouldFallbackReasoning && st.CurrentMsgID != "" {
+		blankItem := map[string]interface{}{
+			"id":      st.CurrentMsgID,
+			"type":    "message",
+			"status":  "completed",
+			"content": st.messageTextContentParts(),
+			"role":    "assistant",
+		}
+		out = append(out, emitMessageItemDoneEvent(blankItem, st.CurrentTextOutputIndex, nextSeq))
+	}
+	for _, o := range outputs {
+		item, ok := o.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := item["type"].(string); t != "message" {
+			continue
+		}
+		id, _ := item["id"].(string)
+		doneIndex := st.CurrentTextOutputIndex
+		switch {
+		case st.RefusalItemInOutput && id == st.CurrentRefusalMsgID:
+			// 独立 refusal item：打开时快照 index
+			doneIndex = st.CurrentRefusalOutputIndex
+		case shouldFallbackReasoning && id == fmt.Sprintf("msg_%s_1", st.ResponseID):
+			// reasoning fallback 合成 item：固定占 1（reasoning 占 0）
+			doneIndex = 1
+		}
+		out = append(out, emitMessageItemDoneEvent(item, doneIndex, nextSeq))
+	}
+	// completed/incomplete 自身 sequence_number 在所有补发事件之后取号，保证全流严格递增
+	completed, _ = sjson.Set(completed, "sequence_number", nextSeq())
+
 	st.CompletedBodyJSON = []byte(completed)
-	st.TerminalEvent = responsesTerminalCompleted
-	out = append(out, emitResponsesEvent(string(responsesTerminalCompleted), completed))
+	st.TerminalEvent = terminal
+	out = append(out, emitResponsesEvent(string(terminal), completed))
 	return out
 }
 
@@ -1326,8 +1826,44 @@ func (st *chatToResponsesState) generateFailedEvents(originalRequestRawJSON []by
 	if st.InTextBlock {
 		out = append(out, st.closeTextBlock(nextSeq)...)
 	}
+	if st.InRefusalBlock {
+		out = append(out, st.closeRefusalBlock(nextSeq)...)
+	}
 	if st.InFuncBlock {
 		out = append(out, st.closeFuncBlocks(nextSeq)...)
+	}
+
+	// failed 终态统一补发点：为流式已 added 的全部 message item（独立 refusal item +
+	// text item）按 output_index 升序、在 response.failed 前补发唯一 done（added/done
+	// 成对不变量，同 generateCompletedEvents 补发点）。failed 终态无 output 数组，快照
+	// 与 completed 终态构建同源：refusal item = [RefusalBuf 合并全文]，
+	// text item = messageTextContentParts（TextParts+追加 refusal 合并）
+	type failedMsgDone struct {
+		index int
+		item  map[string]interface{}
+	}
+	var failedPendings []failedMsgDone
+	if st.RefusalItemInOutput && st.RefusalBuf.Len() > 0 {
+		failedPendings = append(failedPendings, failedMsgDone{st.CurrentRefusalOutputIndex, map[string]interface{}{
+			"id":      st.CurrentRefusalMsgID,
+			"type":    "message",
+			"status":  "completed",
+			"content": []interface{}{map[string]interface{}{"type": "refusal", "refusal": st.RefusalBuf.String()}},
+			"role":    "assistant",
+		}})
+	}
+	if st.CurrentMsgID != "" {
+		failedPendings = append(failedPendings, failedMsgDone{st.CurrentTextOutputIndex, map[string]interface{}{
+			"id":      st.CurrentMsgID,
+			"type":    "message",
+			"status":  "completed",
+			"content": st.messageTextContentParts(),
+			"role":    "assistant",
+		}})
+	}
+	sort.Slice(failedPendings, func(i, j int) bool { return failedPendings[i].index < failedPendings[j].index })
+	for _, p := range failedPendings {
+		out = append(out, emitMessageItemDoneEvent(p.item, p.index, nextSeq))
 	}
 
 	if st.ResponseID == "" {

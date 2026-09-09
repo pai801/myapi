@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pai801/myapi/common"
 	"github.com/pai801/myapi/common/ctxkey"
+	"github.com/pai801/myapi/relay/adaptor/codex"
 )
 
 type errReader struct {
@@ -429,6 +430,121 @@ func TestForwardChatResponsesStream_FailedTerminalMarksStreamErrored(t *testing.
 	body := recorder.Body.String()
 	if !strings.Contains(body, `event: response.failed`) {
 		t.Fatalf("expected failed terminal event in converted output, got %q", body)
+	}
+}
+
+func TestForwardChatResponsesStream_IncompleteTerminalStopsReadWithoutFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	// incomplete 终态后上游连接被掐断：若终态不被识别，转发循环会继续读至传输错误，
+	// 使成功的截断响应被误判为 FailedTerminal（上层据此回滚额度）
+	streamReader := &errAfterFirstReadReader{
+		data: strings.Join([]string{
+			`data: {"id":"chatcmpl_incomplete","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":"length"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`,
+			"",
+			`data: [DONE]`,
+			"",
+		}, "\n") + "\n",
+		err: io.ErrUnexpectedEOF,
+	}
+
+	var converterState any
+	result, err := forwardChatResponsesStream(c, streamReader, []byte(`{"model":"gpt-4o"}`), &converterState, false)
+	if err != nil {
+		t.Fatalf("expected incomplete terminal to stop reading before transport error, got %v", err)
+	}
+	if !result.SuccessTerminal || !result.IncompleteTerminal || !result.TerminalSeen {
+		t.Fatalf("expected incomplete terminal to be recognized as success terminal, got %+v", result)
+	}
+	if result.FailedTerminal || result.StreamErrored || result.FailureError != nil {
+		t.Fatalf("expected incomplete terminal not to be treated as failure, got %+v", result)
+	}
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `event: response.incomplete`) {
+		t.Fatalf("expected incomplete terminal event forwarded to client, got %q", body)
+	}
+	if strings.Count(body, `event: response.incomplete`) != 1 {
+		t.Fatalf("expected exactly one incomplete terminal event, got %q", body)
+	}
+	if strings.Contains(body, `event: response.completed`) {
+		t.Fatalf("expected incomplete terminal not to be rewritten as completed, got %q", body)
+	}
+	if strings.Contains(body, `event: error`) {
+		t.Fatalf("expected no terminal error event after early return on incomplete terminal, got %q", body)
+	}
+}
+
+func TestForwardChatResponsesStream_IncompleteTerminalExposesUsageAndBodyForBilling(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl_incomplete_usage","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":"length"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")
+
+	requestBody := []byte(`{"model":"gpt-4o"}`)
+	var converterState any
+	result, err := forwardChatResponsesStream(c, strings.NewReader(stream), requestBody, &converterState, false)
+	if err != nil {
+		t.Fatalf("expected incomplete terminal stream to finish cleanly, got %v", err)
+	}
+	if !result.SuccessTerminal || !result.IncompleteTerminal {
+		t.Fatalf("expected incomplete terminal to be recognized, got %+v", result)
+	}
+	if result.StreamErrored || result.FailedTerminal {
+		t.Fatalf("expected incomplete terminal to stay on success path, got %+v", result)
+	}
+
+	// 与 relayResponsesConverted 消费口径一致：usage 与日志响应体从转换器状态提取
+	pt, ct, tt, _ := codex.GetStreamUsage(converterState)
+	if pt != 2 || ct != 3 || tt != 5 {
+		t.Fatalf("expected usage 2/3/5 extracted on incomplete terminal, got %d/%d/%d", pt, ct, tt)
+	}
+	terminalBody := codex.GetStreamCompletedBody(converterState, requestBody)
+	if terminalBody == nil {
+		t.Fatalf("expected terminal response body available for logging on incomplete terminal")
+	}
+	if !strings.Contains(string(terminalBody), `"status":"incomplete"`) {
+		t.Fatalf("expected terminal body to keep incomplete status for distinction, got %s", terminalBody)
+	}
+	if !strings.Contains(string(terminalBody), `max_output_tokens`) {
+		t.Fatalf("expected incomplete_details reason preserved in terminal body, got %s", terminalBody)
+	}
+}
+
+func TestParseConvertedEventMeta_TerminalClassification(t *testing.T) {
+	completed := parseConvertedEventMeta("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+	if !completed.Completed || completed.Incomplete || completed.Failed {
+		t.Fatalf("expected completed meta to set only Completed, got %+v", completed)
+	}
+
+	incomplete := parseConvertedEventMeta("event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n")
+	if !incomplete.Incomplete || incomplete.Completed || incomplete.Failed {
+		t.Fatalf("expected incomplete meta to set only Incomplete, got %+v", incomplete)
+	}
+
+	failed := parseConvertedEventMeta("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"request_failed\"}}}\n\n")
+	if !failed.Failed || failed.Completed || failed.Incomplete {
+		t.Fatalf("expected failed meta to set only Failed, got %+v", failed)
+	}
+	if failed.StreamErr == nil || failed.StreamErr.Message != "boom" {
+		t.Fatalf("expected failed meta to carry stream error, got %+v", failed.StreamErr)
+	}
+
+	normal := parseConvertedEventMeta("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+	if normal.Completed || normal.Incomplete || normal.Failed {
+		t.Fatalf("expected non-terminal meta to set no terminal flag, got %+v", normal)
 	}
 }
 

@@ -763,25 +763,34 @@ func TestConvertOpenAIChatToResponses_InterleavedToolTerminalOrdering(t *testing
 	}
 
 	outputDonePayloads := parseResponsesEventData(allEvents, "response.output_item.done")
+	// 新 done 策略（协议 §7：每 item 恒且仅一条 done，done 携带最终完整 content）：
+	// text 段关闭（tool 到达）不再提前发 message done，唯一 done 在终态补发点发出，
+	// 故本流 done 顺序为 [function_call, message]，两者均先于 response.completed。
+	// 旧断言「message done 先于 tool done」锁定的是「item 级早关 done」实现策略
+	// （该策略导致同 item done 内容增补/重复 done，与 marked done 一次性语义矛盾），非协议要求。
 	if len(outputDonePayloads) != 2 {
 		t.Fatalf("expected 2 output_item.done events, got %#v", outputDonePayloads)
 	}
 	firstItem, _ := outputDonePayloads[0]["item"].(map[string]interface{})
 	secondItem, _ := outputDonePayloads[1]["item"].(map[string]interface{})
-	if firstItem["type"] != "message" || firstItem["id"] != "msg_resp_interleaved_conv_0" {
-		t.Fatalf("expected first done item to be canonical message, got %#v", firstItem)
+	if firstItem["type"] != "function_call" || firstItem["id"] != "fc_call_interleaved_conv" || firstItem["status"] != "completed" {
+		t.Fatalf("expected first done item to be completed function call, got %#v", firstItem)
 	}
-	if secondItem["type"] != "function_call" || secondItem["id"] != "fc_call_interleaved_conv" || secondItem["status"] != "completed" {
-		t.Fatalf("expected second done item to be completed function call, got %#v", secondItem)
+	if secondItem["type"] != "message" || secondItem["id"] != "msg_resp_interleaved_conv_0" {
+		t.Fatalf("expected second (terminal-flushed) done item to be canonical message, got %#v", secondItem)
+	}
+	if msgContent, _ := secondItem["content"].([]interface{}); len(msgContent) != 1 ||
+		msgContent[0].(map[string]interface{})["text"] != "assistant first" {
+		t.Fatalf("expected message done to carry final full text content, got %#v", secondItem["content"])
 	}
 	if messageDoneIndex < 0 {
 		t.Fatalf("expected message completion event in generated SSE, got %#v", allEvents)
 	}
-	if toolDoneIndex <= messageDoneIndex {
-		t.Fatalf("expected tool completion after message completion, got %#v", allEvents)
+	if messageDoneIndex <= toolDoneIndex {
+		t.Fatalf("expected message completion after tool completion (terminal flush), got %#v", allEvents)
 	}
-	if completedIndex <= toolDoneIndex {
-		t.Fatalf("expected response.completed after tool completion, got %#v", allEvents)
+	if completedIndex <= messageDoneIndex {
+		t.Fatalf("expected response.completed after all item completions, got %#v", allEvents)
 	}
 
 	completedPayloads := parseResponsesEventData(allEvents, "response.completed")
@@ -2542,6 +2551,176 @@ func TestStreamResponsesHandler_ExplicitFailedDoesNotSynthesizeCompleted(t *test
 	}
 	if strings.Count(body, `"type":"response.failed"`) != 1 {
 		t.Fatalf("expected failed payload preserved, got %q", body)
+	}
+}
+
+func TestStreamResponsesHandler_IncompleteTerminalTreatedAsSuccessTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 上游以 response.incomplete 截断收尾（无 [DONE]）：应识别为成功终态，
+	// 迟到的 completed 事件必须丢弃，不得改写 incomplete 终态
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_incomplete","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		"",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_incomplete","role":"assistant","content":[{"type":"output_text","text":"partial"}]}}`,
+		"",
+		`event: response.incomplete`,
+		`data: {"type":"response.incomplete","response":{"id":"resp_incomplete","model":"gpt-4o","status":"incomplete","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},"incomplete_details":{"reason":"max_output_tokens"}}}`,
+		"",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_incomplete","model":"gpt-4o","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":9,"total_tokens":10}}}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err != nil {
+		t.Fatalf("expected incomplete terminal to be a success terminal without error, got %+v", err)
+	}
+	if usage == nil || usage.PromptTokens != 1 || usage.CompletionTokens != 2 || usage.TotalTokens != 3 {
+		t.Fatalf("expected usage extracted on incomplete terminal same as completed, got %#v", usage)
+	}
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `event: response.incomplete`) {
+		t.Fatalf("expected incomplete terminal event forwarded, got %q", body)
+	}
+	if !strings.Contains(body, `"incomplete_details":{"reason":"max_output_tokens"}`) {
+		t.Fatalf("expected raw incomplete_details payload preserved for client, got %q", body)
+	}
+	if strings.Contains(body, `event: response.completed`) {
+		t.Fatalf("expected late completed event dropped after incomplete terminal, got %q", body)
+	}
+	// 成功终态识别后按 completed 同口径补发 done 收尾
+	if !strings.Contains(body, `[DONE]`) {
+		t.Fatalf("expected done marker emitted for recognized incomplete terminal, got %q", body)
+	}
+
+	rawBody := c.GetString(ctxkey.ResponseBody)
+	if rawBody == "" {
+		t.Fatalf("expected response body stored in context")
+	}
+	if !strings.Contains(rawBody, `"status":"incomplete"`) || strings.Contains(rawBody, `"status":"failed"`) {
+		t.Fatalf("expected capture kept distinguishable incomplete status, got %q", rawBody)
+	}
+	if strings.Contains(rawBody, `"total_tokens":10`) {
+		t.Fatalf("expected late completed usage not to pollute capture, got %q", rawBody)
+	}
+	var capture map[string]interface{}
+	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
+		t.Fatalf("unmarshal capture json: %v", err)
+	}
+	respJSON, ok := capture["response"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected response snapshot in capture, got %#v", capture["response"])
+	}
+	output, ok := respJSON["output"].([]interface{})
+	if !ok || len(output) != 1 {
+		t.Fatalf("expected aggregated output item on incomplete terminal, got %#v", respJSON["output"])
+	}
+}
+
+func TestStreamResponsesHandler_ReadErrorAfterIncompleteTerminalKeepsIncompleteCapture(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// incomplete 终态识别后出现传输错误：与 completed 同口径，不得把捕获改写为 failed 或补发 error 事件
+	streamReader := &errReader{
+		chunks: []string{
+			strings.Join([]string{
+				`event: response.created`,
+				`data: {"type":"response.created","response":{"id":"resp_incomplete_read_err","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+				"",
+				`event: response.incomplete`,
+				`data: {"type":"response.incomplete","response":{"id":"resp_incomplete_read_err","model":"gpt-4o","status":"incomplete","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},"incomplete_details":{"reason":"content_filter"}}}`,
+				"",
+				"",
+			}, "\n"),
+		},
+		err: io.ErrUnexpectedEOF,
+	}
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: streamReader}
+
+	err, _, usage := StreamResponsesHandler(c, resp)
+	if err != nil {
+		t.Fatalf("expected read error after incomplete terminal to stay silent, got %+v", err)
+	}
+	if usage == nil || usage.TotalTokens != 3 {
+		t.Fatalf("expected usage snapshot preserved, got %#v", usage)
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, `event: error`) {
+		t.Fatalf("expected no terminal error event when read error follows incomplete terminal, got %q", body)
+	}
+	rawBody := c.GetString(ctxkey.ResponseBody)
+	if !strings.Contains(rawBody, `"status":"incomplete"`) || strings.Contains(rawBody, `"status":"failed"`) {
+		t.Fatalf("expected capture status stays incomplete after post-terminal read error, got %q", rawBody)
+	}
+}
+
+func TestStreamResponsesHandler_PreservesIncompleteDetailsInCaptureSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 快照经 ResponsesResponse 结构体反序列化/序列化中介，incomplete_details 缺字段会在日志 capture 中丢失
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_inc_details","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+		"",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_inc_details","role":"assistant","content":[{"type":"output_text","text":"partial"}]}}`,
+		"",
+		`event: response.incomplete`,
+		`data: {"type":"response.incomplete","response":{"id":"resp_inc_details","model":"gpt-4o","status":"incomplete","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},"incomplete_details":{"reason":"max_output_tokens"}}}`,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	err, _, _ := StreamResponsesHandler(c, resp)
+	if err != nil {
+		t.Fatalf("stream handler returned error: %+v", err)
+	}
+
+	rawBody := c.GetString(ctxkey.ResponseBody)
+	if rawBody == "" {
+		t.Fatalf("expected response body stored in context")
+	}
+	if !strings.Contains(rawBody, `"incomplete_details":{"reason":"max_output_tokens"}`) {
+		t.Fatalf("expected incomplete_details preserved in capture snapshot, got %q", rawBody)
+	}
+
+	var capture map[string]interface{}
+	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
+		t.Fatalf("unmarshal capture json: %v", err)
+	}
+	respJSON, ok := capture["response"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected response snapshot in capture, got %#v", capture["response"])
+	}
+	if respJSON["status"] != "incomplete" {
+		t.Fatalf("expected capture status incomplete, got %#v", respJSON["status"])
+	}
+	details, ok := respJSON["incomplete_details"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected incomplete_details object in capture snapshot, got %#v", respJSON["incomplete_details"])
+	}
+	if details["reason"] != "max_output_tokens" {
+		t.Fatalf("expected truncation reason preserved for log consumers, got %#v", details["reason"])
 	}
 }
 
