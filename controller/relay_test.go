@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -98,15 +99,15 @@ func TestProcessChannelRelayErrorLogDecision(t *testing.T) {
 	// This test verifies the log output of processChannelRelayError
 	// without triggering DB side effects.
 	//
-// processChannelRelayError calls ShouldDisableChannel (which depends on
-		// config.AutomaticDisableChannelEnabled), then either DisableChannel
-		// (DB write) or Emit (goroutine) + CooldownGlobal.ReportFailure (in-memory).
-		//
-		// Since DisableChannel requires DB access, we test the path where
-		// AutomaticDisableChannelEnabled is false, which triggers the cooldown path.
-		Convey("processChannelRelayError with disable disabled goes to cooldown path", t, func() {
-			// DisableChannel is disabled by default, so ShouldDisableChannel returns false
-			// and we hit the cooldown path (Emit + CooldownGlobal.ReportFailure)
+	// processChannelRelayError calls ShouldDisableChannel (which depends on
+	// config.AutomaticDisableChannelEnabled), then either DisableChannel
+	// (DB write) or Emit (goroutine) + CooldownGlobal.ReportFailure (in-memory).
+	//
+	// Since DisableChannel requires DB access, we test the path where
+	// AutomaticDisableChannelEnabled is false, which triggers the cooldown path.
+	Convey("processChannelRelayError with disable disabled goes to cooldown path", t, func() {
+		// DisableChannel is disabled by default, so ShouldDisableChannel returns false
+		// and we hit the cooldown path (Emit + CooldownGlobal.ReportFailure)
 		err := model.ErrorWithStatusCode{
 			Error: model.Error{
 				Message: "test error",
@@ -120,5 +121,73 @@ func TestProcessChannelRelayErrorLogDecision(t *testing.T) {
 		So(func() {
 			processChannelRelayError(context.Background(), 1, 1, "test-ch", "test-model", err)
 		}, ShouldNotPanic)
+	})
+}
+
+// TestShouldRetry_CommittedResponseSuppressesRetry 锁定契约 §1.3：SSE 响应已提交后不得重试，
+// 否则会向同一响应追加第二段流。
+func TestShouldRetry_CommittedResponseSuppressesRetry(t *testing.T) {
+	Convey("响应已提交后 shouldRetry 必须为 false", t, func() {
+		bizErr := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadGateway,
+			Error:      model.Error{Message: "responses stream failed", Type: "upstream_error", Code: "invalid_upstream_response"},
+		}
+
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		// 未提交：5xx 语义允许重试（保持既有行为）
+		So(shouldRetry(c, bizErr), ShouldBeTrue)
+
+		// 一旦写出 body（SSE 已提交），不得再重试
+		_, _ = c.Writer.WriteString("data: {\"error\":\"x\"}\n\n")
+		So(c.Writer.Written(), ShouldBeTrue)
+		So(shouldRetry(c, bizErr), ShouldBeFalse)
+	})
+}
+
+// TestResponseCommittedDetection_WriteHeaderAloneIsNotCommitted 记录 gin Written() 语义（本修复的判定依据）：
+// 仅 WriteHeader 不置位（非流式只写状态码时不得据此抑制重试/JSON），写出 body 或 Flush 后才算已提交。
+// 两条失败路径（codex StreamResponsesHandler handler.go:163、chatgptsub streamChatFromResponses main.go:261）
+// 均在 WriteHeader 后立即调用 c.Writer.Flush()，Flush 内部 WriteHeaderNow 会置位 Written()，故返回错误时可靠。
+func TestResponseCommittedDetection_WriteHeaderAloneIsNotCommitted(t *testing.T) {
+	Convey("gin Written() 判定", t, func() {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		So(c.Writer.Written(), ShouldBeFalse)
+
+		c.Writer.WriteHeader(http.StatusOK)
+		So(c.Writer.Written(), ShouldBeFalse)
+
+		_, _ = c.Writer.WriteString("data: {\"error\":\"x\"}\n\n")
+		So(c.Writer.Written(), ShouldBeTrue)
+	})
+}
+
+// TestRenderFinalRelayError_SkipsCommittedResponse 锁定契约 §1.3：最终 JSON 错误体只在响应
+// 未提交时写出；已提交时不得向 SSE 响应追加任何内容。
+func TestRenderFinalRelayError_SkipsCommittedResponse(t *testing.T) {
+	bizErr := &model.ErrorWithStatusCode{
+		StatusCode: http.StatusBadGateway,
+		Error:      model.Error{Message: "responses stream failed", Type: "upstream_error", Code: "invalid_upstream_response"},
+	}
+
+	Convey("最终错误体渲染", t, func() {
+		Convey("未提交：写出 502 JSON 错误体", func() {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			renderFinalRelayError(c, bizErr)
+			So(recorder.Code, ShouldEqual, http.StatusBadGateway)
+			So(recorder.Body.String(), ShouldContainSubstring, `"error"`)
+			So(recorder.Body.String(), ShouldContainSubstring, "invalid_upstream_response")
+		})
+
+		Convey("已提交：不追加任何内容", func() {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			_, _ = c.Writer.WriteString("data: {\"error\":\"x\"}\n\n")
+			committed := recorder.Body.String()
+			renderFinalRelayError(c, bizErr)
+			So(recorder.Body.String(), ShouldEqual, committed)
+		})
 	})
 }

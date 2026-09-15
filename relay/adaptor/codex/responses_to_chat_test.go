@@ -2,11 +2,85 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/pai801/myapi/common/logger"
+	relaymodel "github.com/pai801/myapi/relay/model"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/tidwall/gjson"
 )
+
+// ===== T6 契约适配 wrapper：按最终签名调用真实函数并断言成功路径无错误 =====
+
+func convReqRaw(modelName string, raw []byte, stream bool) []byte {
+	out, err := ConvertResponsesToChatRequest(modelName, raw, stream)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convRespRaw(body []byte, model string, fb bool) []byte {
+	out, err := ConvertChatResponseToResponses(body, model, fb)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convRespCtxRaw(body []byte, model string, fb bool, req []byte) []byte {
+	out, err := ConvertChatResponseToResponsesWithContext(body, model, fb, req)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convItem(item map[string]interface{}, state *inputConversionState) map[string]interface{} {
+	out, err := convertInputItem(item, state)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convMsgs(input interface{}) []interface{} {
+	out, err := convertInputToMessages(input)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convContent(content []interface{}, role string) interface{} {
+	out, err := convertContentArray(content, role)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convTools(tools []interface{}) []interface{} {
+	out, err := convertToolsToOpenAI(tools)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convFnCallItem(item map[string]interface{}) map[string]interface{} {
+	out, err := convertFunctionCallItem(item)
+	So(err, ShouldBeNil)
+	return out
+}
+
+func convMsgToOutput(message map[string]interface{}, ctx *CodexToolContext) []interface{} {
+	out, err := convertChatMessageToOutput(message, ctx, "resp_test")
+	So(err, ShouldBeNil)
+	return out
+}
+
+// soPCE 断言 err 为共享协议转换错误（契约 §1.3）且 Code 为期望的稳定机器码。
+func soPCE(err error, code string) {
+	pce, ok := err.(*relaymodel.ProtocolConversionError)
+	So(ok, ShouldBeTrue)
+	So(pce.Code, ShouldEqual, code)
+}
+
+// strictDecode 以 DisallowUnknownFields 级别解码（契约 §1.1：样本与产物必须能按协议严格 schema 解码）。
+func strictDecode(src string, target interface{}) error {
+	dec := json.NewDecoder(strings.NewReader(src))
+	dec.DisallowUnknownFields()
+	return dec.Decode(target)
+}
 
 // parseOutputArray 从 ConvertChatResponseToResponses 的结果中提取 output 数组
 func parseOutputArray(respBytes []byte) []interface{} {
@@ -49,7 +123,7 @@ func TestConvertChatResponseToResponses_FallbackReasoning(t *testing.T) {
 			}
 			chatBody, _ := json.Marshal(chatResp)
 
-			result := ConvertChatResponseToResponses(chatBody, "deepseek-flash", true)
+			result := convRespRaw(chatBody, "deepseek-flash", true)
 			output := parseOutputArray(result)
 
 			So(output, ShouldNotBeNil)
@@ -79,7 +153,7 @@ func TestConvertChatResponseToResponses_FallbackReasoning(t *testing.T) {
 			}
 			chatBody, _ := json.Marshal(chatResp)
 
-			result := ConvertChatResponseToResponses(chatBody, "deepseek-flash", false)
+			result := convRespRaw(chatBody, "deepseek-flash", false)
 			output := parseOutputArray(result)
 
 			So(output, ShouldNotBeNil)
@@ -106,7 +180,7 @@ func TestConvertChatResponseToResponses_FallbackReasoning(t *testing.T) {
 			}
 			chatBody, _ := json.Marshal(chatResp)
 
-			result := ConvertChatResponseToResponses(chatBody, "deepseek-flash", true)
+			result := convRespRaw(chatBody, "deepseek-flash", true)
 			output := parseOutputArray(result)
 
 			So(output, ShouldNotBeNil)
@@ -139,7 +213,7 @@ func TestConvertToolsToOpenAI_FunctionTool(t *testing.T) {
 				},
 			}
 
-			result := convertToolsToOpenAI(tools)
+			result := convTools(tools)
 
 			So(len(result), ShouldEqual, 1)
 			out := result[0].(map[string]interface{})
@@ -166,7 +240,7 @@ func TestConvertToolsToOpenAI_FunctionTool(t *testing.T) {
 				},
 			}
 
-			result := convertToolsToOpenAI(tools)
+			result := convTools(tools)
 
 			So(len(result), ShouldEqual, 1)
 			fn := result[0].(map[string]interface{})["function"].(map[string]interface{})
@@ -188,7 +262,7 @@ func TestConvertToolsToOpenAI_CustomTool(t *testing.T) {
 				},
 			}
 
-			result := convertToolsToOpenAI(tools)
+			result := convTools(tools)
 
 			So(len(result), ShouldEqual, 1)
 			out := result[0].(map[string]interface{})
@@ -215,7 +289,7 @@ func TestConvertToolsToOpenAI_CustomTool(t *testing.T) {
 				},
 			}
 
-			result := convertToolsToOpenAI(tools)
+			result := convTools(tools)
 
 			So(len(result), ShouldEqual, 1)
 			fn := result[0].(map[string]interface{})["function"].(map[string]interface{})
@@ -236,7 +310,7 @@ func TestConvertToolsToOpenAI_ApplyPatchTool(t *testing.T) {
 			},
 		}
 
-		result := convertToolsToOpenAI(tools)
+		result := convTools(tools)
 
 		So(len(result), ShouldEqual, 6)
 
@@ -319,7 +393,7 @@ func TestConvertToolsToOpenAI_NamespaceTool(t *testing.T) {
 			},
 		}
 
-		result := convertToolsToOpenAI(tools)
+		result := convTools(tools)
 
 		So(len(result), ShouldEqual, 2)
 		names := make(map[string]map[string]interface{}, 2)
@@ -335,57 +409,35 @@ func TestConvertToolsToOpenAI_NamespaceTool(t *testing.T) {
 }
 
 func TestConvertToolsToOpenAI_BuiltinTool(t *testing.T) {
-	Convey("convertToolsToOpenAI: 内建工具 web_search / local_shell / computer_use 扁平化", t, func() {
+	Convey("convertToolsToOpenAI: DN-6 白名单外内建工具（web_search/local_shell/computer_use）丢弃且不报错，不再 400", t, func() {
+		for _, typ := range []string{"web_search", "local_shell", "computer_use"} {
+			out, err := convertToolsToOpenAI([]interface{}{
+				map[string]interface{}{"type": typ, "name": "custom_named"},
+			})
+			So(err, ShouldBeNil)
+			So(len(out), ShouldEqual, 0)
+		}
+	})
 
-		Convey("web_search 无 name 字段 → 名字等于 type，description 固定为 built-in tool", func() {
-			tools := []interface{}{
-				map[string]interface{}{
-					"type": "web_search",
-				},
-			}
-
-			result := convertToolsToOpenAI(tools)
-
-			So(len(result), ShouldEqual, 1)
-			out := result[0].(map[string]interface{})
-			So(out["type"], ShouldEqual, "function")
-			fn := out["function"].(map[string]interface{})
-			So(fn["name"], ShouldEqual, "web_search")
-			So(fn["description"], ShouldEqual, "built-in tool")
-			params := fn["parameters"].(map[string]interface{})
-			So(params["properties"].(map[string]interface{})["input"].(map[string]interface{})["type"], ShouldEqual, "string")
-			req := params["required"].([]interface{})
-			So(req[0], ShouldEqual, "input")
+	Convey("DN-6 白名单外工具与合法 function 混排 → 仅丢弃前者，合法工具保留", t, func() {
+		out, err := convertToolsToOpenAI([]interface{}{
+			map[string]interface{}{"type": "web_search"},
+			map[string]interface{}{"type": "function", "name": "get_weather"},
 		})
+		So(err, ShouldBeNil)
+		So(len(out), ShouldEqual, 1)
+		fn := out[0].(map[string]interface{})["function"].(map[string]interface{})
+		So(fn["name"], ShouldEqual, "get_weather")
+	})
 
-		Convey("local_shell 带 name 字段时优先使用 name", func() {
-			tools := []interface{}{
-				map[string]interface{}{
-					"type": "local_shell",
-					"name": "shell_run",
-				},
-			}
-
-			result := convertToolsToOpenAI(tools)
-
-			So(len(result), ShouldEqual, 1)
-			fn := result[0].(map[string]interface{})["function"].(map[string]interface{})
-			So(fn["name"], ShouldEqual, "shell_run")
+	Convey("DN-6 白名单边界：tool_search（execution=client 客户端代理执行闭环）继续按现有回归转换", t, func() {
+		out, err := convertToolsToOpenAI([]interface{}{
+			map[string]interface{}{"type": "tool_search"},
 		})
-
-		Convey("computer_use 同样被保留", func() {
-			tools := []interface{}{
-				map[string]interface{}{
-					"type": "computer_use",
-				},
-			}
-
-			result := convertToolsToOpenAI(tools)
-
-			So(len(result), ShouldEqual, 1)
-			fn := result[0].(map[string]interface{})["function"].(map[string]interface{})
-			So(fn["name"], ShouldEqual, "computer_use")
-		})
+		So(err, ShouldBeNil)
+		So(len(out), ShouldEqual, 1)
+		fn := out[0].(map[string]interface{})["function"].(map[string]interface{})
+		So(fn["name"], ShouldEqual, "tool_search")
 	})
 }
 
@@ -409,7 +461,7 @@ func TestConvertResponsesToChatRequest_ToolSearchPreservesMetadata(t *testing.T)
 			}]
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		tools := chatReq["tools"].([]interface{})
@@ -452,7 +504,7 @@ func TestConvertResponsesToChatRequest_ToolSearchNestedFunctionPreservesMetadata
 			}]
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		tools := chatReq["tools"].([]interface{})
@@ -474,6 +526,8 @@ func TestConvertResponsesToChatRequest_BuiltinToolOutputItems(t *testing.T) {
 		reqBody := []byte(`{
 			"model": "gpt-test",
 			"input": [
+				{"type": "tool_search_call", "call_id": "ts_call_1", "name": "tool_search", "arguments": {"query": "agent tool"}},
+				{"type": "web_search_call", "call_id": "ws_call_1", "name": "web_search", "arguments": {"query": "One API"}},
 				{
 					"type": "tool_search_output",
 					"call_id": "ts_call_1",
@@ -496,14 +550,15 @@ func TestConvertResponsesToChatRequest_BuiltinToolOutputItems(t *testing.T) {
 			]
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		messages, ok := chatReq["messages"].([]interface{})
 		So(ok, ShouldBeTrue)
-		So(len(messages), ShouldEqual, 2)
+		// 相邻两个 call 合并为一条 assistant.tool_calls[]，随后两条配对 output
+		So(len(messages), ShouldEqual, 3)
 
-		toolSearchOutput := messages[0].(map[string]interface{})
+		toolSearchOutput := messages[1].(map[string]interface{})
 		So(toolSearchOutput["role"], ShouldEqual, "tool")
 		So(toolSearchOutput["tool_call_id"], ShouldEqual, "ts_call_1")
 		toolSearchContent, ok := toolSearchOutput["content"].(string)
@@ -511,7 +566,7 @@ func TestConvertResponsesToChatRequest_BuiltinToolOutputItems(t *testing.T) {
 		So(toolSearchContent, ShouldContainSubstring, `"query":"agent tool"`)
 		So(toolSearchContent, ShouldContainSubstring, `"tools":[{"description":"utility tool","name":"utility"}]`)
 
-		webSearchOutput := messages[1].(map[string]interface{})
+		webSearchOutput := messages[2].(map[string]interface{})
 		So(webSearchOutput["role"], ShouldEqual, "tool")
 		So(webSearchOutput["tool_call_id"], ShouldEqual, "ws_call_1")
 		webSearchContent, ok := webSearchOutput["content"].(string)
@@ -525,6 +580,8 @@ func TestConvertResponsesToChatRequest_BuiltinToolOutputPayloadFallback(t *testi
 		reqBody := []byte(`{
 			"model": "gpt-test",
 			"input": [
+				{"type": "tool_search_call", "call_id": "ts_call_2", "name": "tool_search", "arguments": {"query": "agents"}},
+				{"type": "web_search_call", "call_id": "ws_call_2", "name": "web_search", "arguments": {"query": "One API"}},
 				{
 					"type": "tool_search_output",
 					"call_id": "ts_call_2",
@@ -550,13 +607,13 @@ func TestConvertResponsesToChatRequest_BuiltinToolOutputPayloadFallback(t *testi
 			]
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		messages := chatReq["messages"].([]interface{})
-		So(len(messages), ShouldEqual, 2)
+		So(len(messages), ShouldEqual, 3)
 
-		toolSearchOutput := messages[0].(map[string]interface{})
+		toolSearchOutput := messages[1].(map[string]interface{})
 		So(toolSearchOutput["role"], ShouldEqual, "tool")
 		toolSearchContent, ok := toolSearchOutput["content"].(string)
 		So(ok, ShouldBeTrue)
@@ -564,7 +621,7 @@ func TestConvertResponsesToChatRequest_BuiltinToolOutputPayloadFallback(t *testi
 		So(toolSearchContent, ShouldContainSubstring, `"multi_agent_v1"`)
 		So(toolSearchContent, ShouldContainSubstring, `"spawn_agent"`)
 
-		webSearchOutput := messages[1].(map[string]interface{})
+		webSearchOutput := messages[2].(map[string]interface{})
 		So(webSearchOutput["role"], ShouldEqual, "tool")
 		webSearchContent, ok := webSearchOutput["content"].(string)
 		So(ok, ShouldBeTrue)
@@ -581,6 +638,7 @@ func TestConvertResponsesToChatRequest_MergesDiscoveredNamespaceTools(t *testing
 				{"type": "function", "name": "existing_tool", "description": "existing", "parameters": {"type": "object", "properties": {}}}
 			],
 			"input": [
+				{"type": "tool_search_call", "call_id": "ts_call_3", "name": "tool_search", "arguments": {"query": "agents"}},
 				{
 					"type": "tool_search_output",
 					"call_id": "ts_call_3",
@@ -598,7 +656,7 @@ func TestConvertResponsesToChatRequest_MergesDiscoveredNamespaceTools(t *testing
 			]
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		tools := chatReq["tools"].([]interface{})
@@ -649,7 +707,7 @@ func TestConvertToolsToOpenAI_MixedTools(t *testing.T) {
 			},
 		}
 
-		result := convertToolsToOpenAI(tools)
+		result := convTools(tools)
 
 		So(len(result), ShouldEqual, 4)
 		names := make([]string, 0, 4)
@@ -665,12 +723,12 @@ func TestConvertToolsToOpenAI_EmptyTools(t *testing.T) {
 	Convey("convertToolsToOpenAI: 空输入不 panic，返回空结果", t, func() {
 
 		Convey("nil 切片", func() {
-			result := convertToolsToOpenAI(nil)
+			result := convTools(nil)
 			So(len(result), ShouldEqual, 0)
 		})
 
 		Convey("空切片", func() {
-			result := convertToolsToOpenAI([]interface{}{})
+			result := convTools([]interface{}{})
 			So(len(result), ShouldEqual, 0)
 		})
 	})
@@ -685,7 +743,7 @@ func TestConvertFunctionCallItem_NoNamespace(t *testing.T) {
 			"arguments": "{\"path\":\"a.txt\"}",
 		}
 
-		result := convertFunctionCallItem(item)
+		result := convFnCallItem(item)
 
 		So(result["role"], ShouldEqual, "assistant")
 		tcs, ok := result["tool_calls"].([]interface{})
@@ -710,7 +768,7 @@ func TestConvertFunctionCallItem_WithNamespaceDoubleUnderscore(t *testing.T) {
 			"arguments": "{}",
 		}
 
-		result := convertFunctionCallItem(item)
+		result := convFnCallItem(item)
 
 		So(result["role"], ShouldEqual, "assistant")
 		tcs := result["tool_calls"].([]interface{})
@@ -733,7 +791,7 @@ func TestConvertFunctionCallItem_WithNamespaceNoSuffix(t *testing.T) {
 			"arguments": "{}",
 		}
 
-		result := convertFunctionCallItem(item)
+		result := convFnCallItem(item)
 
 		So(result["role"], ShouldEqual, "assistant")
 		tcs := result["tool_calls"].([]interface{})
@@ -754,7 +812,7 @@ func TestConvertFunctionCallItem_EmptyArguments(t *testing.T) {
 			"name":    "noop",
 		}
 
-		result := convertFunctionCallItem(item)
+		result := convFnCallItem(item)
 
 		tcs := result["tool_calls"].([]interface{})
 		So(len(tcs), ShouldEqual, 1)
@@ -774,7 +832,7 @@ func TestConvertFunctionCallItem_EmptyNamespace(t *testing.T) {
 			"arguments": "{}",
 		}
 
-		result := convertFunctionCallItem(item)
+		result := convFnCallItem(item)
 
 		tcs := result["tool_calls"].([]interface{})
 		So(len(tcs), ShouldEqual, 1)
@@ -794,7 +852,7 @@ func TestConvertFunctionCallItem_NamespaceWithoutName(t *testing.T) {
 			"arguments": "{}",
 		}
 
-		result := convertFunctionCallItem(item)
+		result := convFnCallItem(item)
 
 		So(result["role"], ShouldEqual, "assistant")
 		tcs := result["tool_calls"].([]interface{})
@@ -855,7 +913,7 @@ func TestConvertChatResponseToResponses_BackwardCompat(t *testing.T) {
 		Convey("namespace 风格 tool_call name → 输出 function_call.name=原 name，无 namespace 字段，无 id/status", func() {
 			chatBody := chatRespWithToolCalls("myapp__exec", "{\"cmd\":\"ls\"}", "call_001")
 
-			result := ConvertChatResponseToResponses(chatBody, "gpt-test", false)
+			result := convRespRaw(chatBody, "gpt-test", false)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -876,7 +934,7 @@ func TestConvertChatResponseToResponses_BackwardCompat(t *testing.T) {
 		Convey("自定义工具代理名 → 旧入口仅作为普通 function_call 输出，不变 custom_tool_call", func() {
 			chatBody := chatRespWithToolCalls("apply_patch_add_file", "{\"path\":\"a.txt\",\"content\":\"x\"}", "call_002")
 
-			result := ConvertChatResponseToResponses(chatBody, "gpt-test", false)
+			result := convRespRaw(chatBody, "gpt-test", false)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -936,7 +994,7 @@ func TestConvertChatResponseToResponsesWithContext_NamespaceAndCustomSemantics(t
 		}
 		chatBody, _ := json.Marshal(chatResp)
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 2)
@@ -972,7 +1030,7 @@ func TestConvertChatResponseToResponsesWithContext_PlainFunction(t *testing.T) {
 			}`)
 			chatBody := chatRespWithToolCalls("get_weather", "{\"city\":\"SF\"}", "call_100")
 
-			result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+			result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -1009,7 +1067,7 @@ func TestConvertChatResponseToResponsesWithContext_NamespaceFunction(t *testing.
 			}`)
 			chatBody := chatRespWithToolCalls("myapp__exec", "{\"cmd\":\"ls\"}", "call_200")
 
-			result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+			result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -1037,7 +1095,7 @@ func TestConvertChatResponseToResponsesWithContext_CustomTool(t *testing.T) {
 			}`)
 			chatBody := chatRespWithToolCalls("my_grammar", "{\"input\":\"raw text\"}", "call_300")
 
-			result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+			result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -1064,7 +1122,7 @@ func TestConvertChatResponseToResponsesWithContext_ApplyPatchProxy(t *testing.T)
 			}`)
 			chatBody := chatRespWithToolCalls("apply_patch_add_file", "{\"path\":\"a.txt\",\"content\":\"hello\"}", "call_400")
 
-			result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+			result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -1086,7 +1144,7 @@ func TestConvertChatResponseToResponsesWithContext_NilRequest(t *testing.T) {
 		Convey("退化到旧 3 参数行为：tool_call 原样输出，无 id/status/namespace/custom_tool_call", func() {
 			chatBody := chatRespWithToolCalls("myapp__exec", "{\"cmd\":\"ls\"}", "call_500")
 
-			result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, nil)
+			result := convRespCtxRaw(chatBody, "gpt-test", false, nil)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -1106,8 +1164,8 @@ func TestConvertChatResponseToResponsesWithContext_NilRequest(t *testing.T) {
 		Convey("新旧入口在 nil rawJSON 场景下输出完全一致", func() {
 			chatBody := chatRespWithToolCalls("apply_patch_add_file", "{\"path\":\"a.txt\",\"content\":\"x\"}", "call_501")
 
-			oldOut := ConvertChatResponseToResponses(chatBody, "gpt-test", false)
-			newOut := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, nil)
+			oldOut := convRespRaw(chatBody, "gpt-test", false)
+			newOut := convRespCtxRaw(chatBody, "gpt-test", false, nil)
 
 			So(string(newOut), ShouldEqualJSON, string(oldOut))
 		})
@@ -1126,7 +1184,7 @@ func TestConvertChatResponseToResponsesWithContext_UnknownTool(t *testing.T) {
 			}`)
 			chatBody := chatRespWithToolCalls("unknown_fn", "{\"a\":1}", "call_600")
 
-			result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+			result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -1144,20 +1202,14 @@ func TestConvertChatResponseToResponsesWithContext_UnknownTool(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestConvertInputItem_CustomToolCall_ApplyPatch(t *testing.T) {
-	Convey("convertInputItem: type:custom_tool_call apply_patch → assistant message + tool_calls，input 字符串透传为 arguments", t, func() {
+	Convey("convertInputItem: custom_tool_call（P0-2）历史 input 按声明 schema 编码为 {\"input\":raw} arguments", t, func() {
 		patch := "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"
-		item := map[string]interface{}{
-			"type":    "custom_tool_call",
-			"call_id": "c1",
-			"name":    "apply_patch",
-			"input":   patch,
-		}
-
-		result := convertInputItem(item, nil)
-
-		So(result, ShouldNotBeNil)
-		So(result["role"], ShouldEqual, "assistant")
-		tcs, ok := result["tool_calls"].([]interface{})
+		msg, err := convertInputItem(map[string]interface{}{
+			"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": patch,
+		}, nil)
+		So(err, ShouldBeNil)
+		So(msg["role"], ShouldEqual, "assistant")
+		tcs, ok := msg["tool_calls"].([]interface{})
 		So(ok, ShouldBeTrue)
 		So(len(tcs), ShouldEqual, 1)
 		tc := tcs[0].(map[string]interface{})
@@ -1165,30 +1217,32 @@ func TestConvertInputItem_CustomToolCall_ApplyPatch(t *testing.T) {
 		So(tc["type"], ShouldEqual, "function")
 		fn := tc["function"].(map[string]interface{})
 		So(fn["name"], ShouldEqual, "apply_patch")
-		So(fn["arguments"], ShouldEqual, patch)
+		assertCustomArgumentsMatchInputSchema(fn["arguments"].(string), patch)
 	})
 }
 
+// assertCustomArgumentsMatchInputSchema 校验 arguments JSON 与 custom 工具声明的
+// {type:object, properties:{input:{type:string}}, required:[input]} schema 一致（P0-2）。
+func assertCustomArgumentsMatchInputSchema(arguments string, wantInput string) {
+	var argsMap map[string]interface{}
+	So(json.Unmarshal([]byte(arguments), &argsMap), ShouldBeNil)
+	inputVal, has := argsMap["input"]
+	So(has, ShouldBeTrue)
+	input, isStr := inputVal.(string)
+	So(isStr, ShouldBeTrue)
+	So(input, ShouldEqual, wantInput)
+}
+
 func TestConvertInputItem_CustomToolCall_PlainCustom(t *testing.T) {
-	Convey("convertInputItem: type:custom_tool_call 普通 custom 工具 → tool_calls.arguments=raw input 字符串", t, func() {
-		item := map[string]interface{}{
-			"type":    "custom_tool_call",
-			"call_id": "c2",
-			"name":    "my_grammar",
-			"input":   "some raw text",
-		}
-
-		result := convertInputItem(item, nil)
-
-		So(result, ShouldNotBeNil)
-		So(result["role"], ShouldEqual, "assistant")
-		tcs := result["tool_calls"].([]interface{})
-		So(len(tcs), ShouldEqual, 1)
-		tc := tcs[0].(map[string]interface{})
-		So(tc["id"], ShouldEqual, "c2")
-		fn := tc["function"].(map[string]interface{})
+	Convey("convertInputItem: 普通 custom 工具同样按 {\"input\":...} 包装（声明与调用同 schema）", t, func() {
+		msg, err := convertInputItem(map[string]interface{}{
+			"type": "custom_tool_call", "call_id": "c2", "name": "my_grammar", "input": "some raw text",
+		}, nil)
+		So(err, ShouldBeNil)
+		tcs := msg["tool_calls"].([]interface{})
+		fn := tcs[0].(map[string]interface{})["function"].(map[string]interface{})
 		So(fn["name"], ShouldEqual, "my_grammar")
-		So(fn["arguments"], ShouldEqual, "some raw text")
+		assertCustomArgumentsMatchInputSchema(fn["arguments"].(string), "some raw text")
 	})
 }
 
@@ -1200,7 +1254,7 @@ func TestConvertInputItem_CustomToolCallOutput_StringOutput(t *testing.T) {
 			"output":  "result text",
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "tool")
@@ -1220,7 +1274,7 @@ func TestConvertInputItem_CustomToolCallOutput_ObjectOutput(t *testing.T) {
 			},
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "tool")
@@ -1239,7 +1293,7 @@ func TestConvertInputItem_Reasoning(t *testing.T) {
 			},
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "assistant")
@@ -1250,37 +1304,54 @@ func TestConvertInputItem_Reasoning(t *testing.T) {
 }
 
 func TestConvertInputItem_ReasoningEmptyIgnored(t *testing.T) {
-	Convey("convertInputItem: type:reasoning 无可用文本时不生成空 assistant message", t, func() {
-		Convey("空 reasoning", func() {
-			result := convertInputItem(map[string]interface{}{"type": "reasoning"}, nil)
-
-			So(result, ShouldBeNil)
+	Convey("convertInputItem: 空 reasoning 不产出空消息；能力性不可映射 block/item 丢弃并放行（P1-2）", t, func() {
+		Convey("空 reasoning 无信息量 → nil 且不报错", func() {
+			msg, err := convertInputItem(map[string]interface{}{"type": "reasoning"}, nil)
+			So(msg, ShouldBeNil)
+			So(err, ShouldBeNil)
 		})
 
-		Convey("summary item 非 summary_text 或缺 text", func() {
-			item := map[string]interface{}{
+		Convey("summary block type 非 summary_text → 丢弃该 block，保留其余有效 summary", func() {
+			msg, err := convertInputItem(map[string]interface{}{
 				"type": "reasoning",
 				"summary": []interface{}{
 					map[string]interface{}{"type": "other", "text": "ignored"},
-					map[string]interface{}{"text": "ignored without type"},
-					map[string]interface{}{"type": "summary_text"},
+					map[string]interface{}{"type": "summary_text", "text": "kept"},
 				},
-			}
-
-			result := convertInputItem(item, nil)
-
-			So(result, ShouldBeNil)
+			}, nil)
+			So(err, ShouldBeNil)
+			So(msg, ShouldNotBeNil)
+			So(msg["reasoning_content"], ShouldEqual, "kept")
 		})
 
-		Convey("content 非 string", func() {
-			item := map[string]interface{}{
+		Convey("summary_text block 缺 text → invalid_source_shape（结构性非法维持 400）", func() {
+			_, err := convertInputItem(map[string]interface{}{
 				"type":    "reasoning",
-				"content": []interface{}{map[string]interface{}{"text": "ignored"}},
-			}
+				"summary": []interface{}{map[string]interface{}{"type": "summary_text"}},
+			}, nil)
+			soPCE(err, relaymodel.CodeInvalidSourceShape)
+		})
 
-			result := convertInputItem(item, nil)
+		Convey("content block 数组非 reasoning_text 元素 → 丢弃该 block 继续（不再拒绝）", func() {
+			msg, err := convertInputItem(map[string]interface{}{
+				"type": "reasoning",
+				"content": []interface{}{
+					map[string]interface{}{"text": "ignored"},
+					map[string]interface{}{"type": "reasoning_text", "text": "kept reasoning"},
+				},
+			}, nil)
+			So(err, ShouldBeNil)
+			So(msg, ShouldNotBeNil)
+			So(msg["reasoning_content"], ShouldEqual, "kept reasoning")
+		})
 
-			So(result, ShouldBeNil)
+		Convey("仅 encrypted_content 的 reasoning item → 丢弃该 item 放行（不报错、无输出）", func() {
+			msg, err := convertInputItem(map[string]interface{}{
+				"type":              "reasoning",
+				"encrypted_content": "enc_123",
+			}, nil)
+			So(err, ShouldBeNil)
+			So(msg, ShouldBeNil)
 		})
 	})
 }
@@ -1295,7 +1366,7 @@ func TestConvertResponsesToChatRequest_ReasoningInputUsesReasoningContent(t *tes
 			]
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("deepseek-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("deepseek-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		messages := chatReq["messages"].([]interface{})
@@ -1317,7 +1388,7 @@ func TestConvertInputItem_ToolSearchCall(t *testing.T) {
 			"arguments": map[string]interface{}{"query": "test"},
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "assistant")
@@ -1336,7 +1407,7 @@ func TestConvertInputItem_ToolSearchCallOutput(t *testing.T) {
 			"output":  []interface{}{map[string]interface{}{"result": "x"}},
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "tool")
@@ -1354,7 +1425,7 @@ func TestConvertInputItem_WebSearchCall(t *testing.T) {
 			"arguments": map[string]interface{}{"query": "test"},
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "assistant")
@@ -1373,7 +1444,7 @@ func TestConvertInputItem_WebSearchCallOutput(t *testing.T) {
 			"output":  []interface{}{map[string]interface{}{"result": "x"}},
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "tool")
@@ -1383,19 +1454,15 @@ func TestConvertInputItem_WebSearchCallOutput(t *testing.T) {
 }
 
 func TestConvertInputItem_UnknownType_Fallback(t *testing.T) {
-	Convey("convertInputItem: 未知 type → 显式丢弃，不再误判为 message", t, func() {
-		item := map[string]interface{}{
-			"type": "future_type",
-		}
-
-		result := convertInputItem(item, nil)
-
-		So(result, ShouldBeNil)
+	Convey("convertInputItem: 未知 type → 丢弃该 item 且不报错（不再拒绝整个请求）", t, func() {
+		msg, err := convertInputItem(map[string]interface{}{"type": "future_type"}, nil)
+		So(err, ShouldBeNil)
+		So(msg, ShouldBeNil)
 	})
 }
 
 func TestConvertInputToMessages_MixedWithNewCases(t *testing.T) {
-	Convey("convertInputToMessages: 混合 message + function_call + custom_tool_call + custom_tool_call_output + tool_search_call + reasoning → 全部按新规则转换", t, func() {
+	Convey("convertInputToMessages: 混合历史 → 连续 calls 合并（P1-5）、custom arguments 包装（P0-2）", t, func() {
 		input := []interface{}{
 			map[string]interface{}{"type": "message", "role": "user", "content": "hi"},
 			map[string]interface{}{"type": "function_call", "call_id": "fc1", "name": "read_file", "arguments": "{\"path\":\"a.txt\"}"},
@@ -1405,75 +1472,64 @@ func TestConvertInputToMessages_MixedWithNewCases(t *testing.T) {
 			map[string]interface{}{"type": "reasoning", "content": "thinking..."},
 		}
 
-		msgs := convertInputToMessages(input)
+		msgs, err := convertInputToMessages(input)
+		So(err, ShouldBeNil)
+		// function_call 与紧随的 custom_tool_call 合并为同一 assistant.tool_calls[]（P1-5）：6 items → 5 messages
+		So(len(msgs), ShouldEqual, 5)
 
-		// 期望 6 条：message + function_call + custom_tool_call + custom_tool_call_output + tool_search_call + reasoning
-		So(len(msgs), ShouldEqual, 6)
-
-		// 1. message
 		m0 := msgs[0].(map[string]interface{})
 		So(m0["role"], ShouldEqual, "user")
 		So(m0["content"], ShouldEqual, "hi")
 
-		// 2. function_call（保留原行为）
 		m1 := msgs[1].(map[string]interface{})
 		So(m1["role"], ShouldEqual, "assistant")
-		fc1Tcs := m1["tool_calls"].([]interface{})
-		So(len(fc1Tcs), ShouldEqual, 1)
-		So(fc1Tcs[0].(map[string]interface{})["id"], ShouldEqual, "fc1")
-		So(fc1Tcs[0].(map[string]interface{})["function"].(map[string]interface{})["name"], ShouldEqual, "read_file")
+		_, hasContent := m1["content"]
+		So(hasContent, ShouldBeFalse)
+		tcs := m1["tool_calls"].([]interface{})
+		So(len(tcs), ShouldEqual, 2)
+		fc1 := tcs[0].(map[string]interface{})
+		So(fc1["id"], ShouldEqual, "fc1")
+		So(fc1["function"].(map[string]interface{})["name"], ShouldEqual, "read_file")
+		So(fc1["function"].(map[string]interface{})["arguments"], ShouldEqual, "{\"path\":\"a.txt\"}")
+		ctc := tcs[1].(map[string]interface{})
+		So(ctc["id"], ShouldEqual, "c1")
+		So(ctc["type"], ShouldEqual, "function")
+		So(ctc["function"].(map[string]interface{})["name"], ShouldEqual, "apply_patch")
+		assertCustomArgumentsMatchInputSchema(ctc["function"].(map[string]interface{})["arguments"].(string), "patch text")
 
-		// 3. custom_tool_call（新行为）
 		m2 := msgs[2].(map[string]interface{})
-		So(m2["role"], ShouldEqual, "assistant")
-		ctcTcs := m2["tool_calls"].([]interface{})
-		So(len(ctcTcs), ShouldEqual, 1)
-		ctcTc := ctcTcs[0].(map[string]interface{})
-		So(ctcTc["id"], ShouldEqual, "c1")
-		So(ctcTc["type"], ShouldEqual, "function")
-		ctcFn := ctcTc["function"].(map[string]interface{})
-		So(ctcFn["name"], ShouldEqual, "apply_patch")
-		So(ctcFn["arguments"], ShouldEqual, "patch text")
+		So(m2["role"], ShouldEqual, "tool")
+		So(m2["tool_call_id"], ShouldEqual, "c1")
+		So(m2["content"], ShouldEqual, "patch applied")
 
-		// 4. custom_tool_call_output（新行为）
 		m3 := msgs[3].(map[string]interface{})
-		So(m3["role"], ShouldEqual, "tool")
-		So(m3["tool_call_id"], ShouldEqual, "c1")
-		So(m3["content"], ShouldEqual, "patch applied")
+		So(m3["role"], ShouldEqual, "assistant")
+		So(m3["tool_calls"].([]interface{})[0].(map[string]interface{})["function"].(map[string]interface{})["name"], ShouldEqual, "tool_search")
 
-		// 5. tool_search_call（新行为）
 		m4 := msgs[4].(map[string]interface{})
 		So(m4["role"], ShouldEqual, "assistant")
-		So(m4["tool_calls"].([]interface{})[0].(map[string]interface{})["function"].(map[string]interface{})["name"], ShouldEqual, "tool_search")
-
-		// 6. reasoning（新行为）
-		m5 := msgs[5].(map[string]interface{})
-		So(m5["role"], ShouldEqual, "assistant")
-		So(m5["reasoning_content"], ShouldEqual, "thinking...")
-		_, hasContent := m5["content"]
-		So(hasContent, ShouldBeFalse)
+		So(m4["reasoning_content"], ShouldEqual, "thinking...")
+		_, hasContent4 := m4["content"]
+		So(hasContent4, ShouldBeFalse)
 	})
 }
 
 func TestResponsesChatResponsesRoundTrip_ToolSearchCallPreserved(t *testing.T) {
-	Convey("responses→chat→responses: function_call/custom_tool_call/tool_search_call/web_search_call 保留", t, func() {
+	Convey("responses→chat→responses: function/custom/tool_search/web_search 保留；连续 calls 合并（P1-5）", t, func() {
+		patch := "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"
 		input := []interface{}{
 			map[string]interface{}{"type": "function_call", "call_id": "fc1", "name": "read_file", "arguments": "{\"path\":\"a.txt\"}"},
-			map[string]interface{}{"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"},
+			map[string]interface{}{"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": patch},
 			map[string]interface{}{"type": "tool_search_call", "call_id": "ts1", "name": "search_docs", "arguments": map[string]interface{}{"query": "codex", "top_k": 3}},
 			map[string]interface{}{"type": "web_search_call", "call_id": "ws1", "name": "web_search", "arguments": map[string]interface{}{"query": "codex"}},
 		}
 
-		msgs := convertInputToMessages(input)
-		So(len(msgs), ShouldEqual, 4)
-
-		var toolCalls []interface{}
-		for _, msg := range msgs {
-			m := msg.(map[string]interface{})
-			if tcs, ok := m["tool_calls"].([]interface{}); ok {
-				toolCalls = append(toolCalls, tcs...)
-			}
-		}
+		msgs, err := convertInputToMessages(input)
+		So(err, ShouldBeNil)
+		// 4 个连续 call items 合并为一条 assistant message（tool_calls[] 保序）
+		So(len(msgs), ShouldEqual, 1)
+		toolCalls, ok := msgs[0].(map[string]interface{})["tool_calls"].([]interface{})
+		So(ok, ShouldBeTrue)
 		So(len(toolCalls), ShouldEqual, 4)
 
 		chatResp := map[string]interface{}{
@@ -1494,24 +1550,24 @@ func TestResponsesChatResponsesRoundTrip_ToolSearchCallPreserved(t *testing.T) {
 		chatBody, _ := json.Marshal(chatResp)
 		reqBody := []byte(`{"model":"gpt-test","tools":[{"type":"function","name":"read_file","description":"x","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch","description":"patch files"},{"type":"tool_search","name":"tool_search"},{"type":"web_search","name":"web_search"}]}`)
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		result, err := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		So(err, ShouldBeNil)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 4)
 		So(output[0].(map[string]interface{})["type"], ShouldEqual, "function_call")
 		So(output[0].(map[string]interface{})["call_id"], ShouldEqual, "fc1")
-		So(output[1].(map[string]interface{})["type"], ShouldEqual, "custom_tool_call")
-		So(output[1].(map[string]interface{})["call_id"], ShouldEqual, "c1")
+		customItem := output[1].(map[string]interface{})
+		So(customItem["type"], ShouldEqual, "custom_tool_call")
+		So(customItem["call_id"], ShouldEqual, "c1")
+		// P0-2 往返闭环：{\"input\":raw} 包装的 arguments 经响应侧还原回 raw input
+		So(customItem["input"], ShouldEqual, patch)
 		So(output[2].(map[string]interface{})["type"], ShouldEqual, "tool_search_call")
 		So(output[2].(map[string]interface{})["call_id"], ShouldEqual, "ts1")
 		So(output[3].(map[string]interface{})["type"], ShouldEqual, "web_search_call")
 		So(output[3].(map[string]interface{})["call_id"], ShouldEqual, "ws1")
 	})
 }
-
-// -----------------------------------------------------------------------------
-// 8 个遗留 advisory 的补测：锁死边界行为（TDD 退化为补 GREEN）
-// -----------------------------------------------------------------------------
 
 func TestConvertFunctionCallItem_NamespaceNonString(t *testing.T) {
 	Convey("convertFunctionCallItem: namespace 字段非 string（nil / 数字 / 嵌套对象）→ type assertion 失败，跳过 flatten，原 name 保持", t, func() {
@@ -1524,7 +1580,7 @@ func TestConvertFunctionCallItem_NamespaceNonString(t *testing.T) {
 				"name":      "exec",
 				"arguments": "{}",
 			}
-			result := convertFunctionCallItem(item)
+			result := convFnCallItem(item)
 			tcs := result["tool_calls"].([]interface{})
 			fn := tcs[0].(map[string]interface{})["function"].(map[string]interface{})
 			So(fn["name"], ShouldEqual, "exec")
@@ -1538,7 +1594,7 @@ func TestConvertFunctionCallItem_NamespaceNonString(t *testing.T) {
 				"name":      "exec",
 				"arguments": "{}",
 			}
-			result := convertFunctionCallItem(item)
+			result := convFnCallItem(item)
 			tcs := result["tool_calls"].([]interface{})
 			fn := tcs[0].(map[string]interface{})["function"].(map[string]interface{})
 			So(fn["name"], ShouldEqual, "exec")
@@ -1552,7 +1608,7 @@ func TestConvertFunctionCallItem_NamespaceNonString(t *testing.T) {
 				"name":      "exec",
 				"arguments": "{}",
 			}
-			result := convertFunctionCallItem(item)
+			result := convFnCallItem(item)
 			tcs := result["tool_calls"].([]interface{})
 			fn := tcs[0].(map[string]interface{})["function"].(map[string]interface{})
 			So(fn["name"], ShouldEqual, "exec")
@@ -1569,7 +1625,7 @@ func TestConvertFunctionCallItem_NameWithoutArguments(t *testing.T) {
 			// 注意：故意不设置 arguments 字段
 		}
 
-		result := convertFunctionCallItem(item)
+		result := convFnCallItem(item)
 
 		tcs := result["tool_calls"].([]interface{})
 		So(len(tcs), ShouldEqual, 1)
@@ -1587,7 +1643,7 @@ func TestConvertChatResponseToResponsesWithContext_EmptyTools(t *testing.T) {
 		}`)
 		chatBody := chatRespWithToolCalls("get_weather", "{\"city\":\"SF\"}", "call_empty")
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 1)
@@ -1615,7 +1671,7 @@ func TestConvertChatResponseToResponsesWithContext_ApplyPatchProxy_DeleteFile(t 
 		}`)
 		chatBody := chatRespWithToolCalls("apply_patch_delete_file", "{\"path\":\"a.txt\"}", "call_del")
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 1)
@@ -1641,7 +1697,7 @@ func TestConvertChatResponseToResponsesWithContext_ApplyPatchProxy_UpdateFile(t 
 		args := `{"path":"a.txt","hunks":[{"context":"ctx line","lines":[{"op":"context","text":"x"},{"op":"remove","text":"old"},{"op":"add","text":"new"}]}]}`
 		chatBody := chatRespWithToolCalls("apply_patch_update_file", args, "call_upd")
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 1)
@@ -1671,7 +1727,7 @@ func TestConvertChatResponseToResponsesWithContext_ApplyPatchProxy_ReplaceFile(t
 		}`)
 		chatBody := chatRespWithToolCalls("apply_patch_replace_file", `{"path":"a.txt","content":"new content"}`, "call_rpl")
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 1)
@@ -1697,7 +1753,7 @@ func TestConvertChatResponseToResponsesWithContext_ApplyPatchProxy_Batch(t *test
 		args := `{"operations":[{"type":"add_file","path":"a.txt","content":"hello"},{"type":"delete_file","path":"b.txt"}]}`
 		chatBody := chatRespWithToolCalls("apply_patch_batch", args, "call_batch")
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		result := convRespCtxRaw(chatBody, "gpt-test", false, reqBody)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 1)
@@ -1717,14 +1773,13 @@ func TestConvertChatResponseToResponsesWithContext_ApplyPatchProxy_Batch(t *test
 }
 
 func TestConvertChatResponseToResponsesWithContext_ToolCallIDMissing(t *testing.T) {
-	Convey("ConvertChatResponseToResponsesWithContext: upstream tool_call id 字段缺失 → id/call_id 均为 \"\"，不 panic，补字段仍为 fc_+空字符串", t, func() {
+	Convey("P0-3: 上游 tool_call 缺 id → malformed_tool_call，不产出空 call_id/空 id item", t, func() {
 		reqBody := []byte(`{
 			"model": "gpt-test",
 			"tools": [
 				{"type": "function", "name": "get_weather", "description": "x", "parameters": {"type": "object"}}
 			]
 		}`)
-		// 自构 chat body，tool_call 故意不带 id 字段
 		chatResp := map[string]interface{}{
 			"id":      "chat_no_id",
 			"created": 1700000000,
@@ -1750,17 +1805,9 @@ func TestConvertChatResponseToResponsesWithContext_ToolCallIDMissing(t *testing.
 		}
 		chatBody, _ := json.Marshal(chatResp)
 
-		result := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
-		output := parseOutputArray(result)
-
-		So(len(output), ShouldEqual, 1)
-		item := output[0].(map[string]interface{})
-		So(item["type"], ShouldEqual, "function_call")
-		// id 缺失 → call_id 为 ""，new path 补的 id 为 "fc_"
-		So(item["call_id"], ShouldEqual, "")
-		So(item["id"], ShouldEqual, "fc_")
-		So(item["status"], ShouldEqual, "completed")
-		So(item["name"], ShouldEqual, "get_weather")
+		out, err := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-test", false, reqBody)
+		So(out, ShouldBeNil)
+		soPCE(err, relaymodel.CodeMalformedToolCall)
 	})
 }
 
@@ -1769,46 +1816,71 @@ func TestConvertResponsesToChatRequest_ReasoningEffortMapping(t *testing.T) {
 		reqBase := func(effort string) []byte {
 			body, _ := json.Marshal(map[string]interface{}{
 				"model":     "gpt-test",
+				"input":     "hi",
 				"reasoning": map[string]interface{}{"effort": effort},
 			})
 			return body
 		}
 
 		Convey("max → reasoning_effort=max（回归：Codex 默认发 max，之前落入 default 被映射成 auto）", func() {
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("max"), false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBase("max"), false))
 			So(chatReq["reasoning_effort"], ShouldEqual, "max")
 		})
 
 		Convey("none/minimal/low/medium/high/xhigh 正常映射（minimal 直通，不降级为 low）", func() {
-			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("none"), false))["reasoning_effort"], ShouldEqual, "none")
-			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("minimal"), false))["reasoning_effort"], ShouldEqual, "minimal")
-			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("low"), false))["reasoning_effort"], ShouldEqual, "low")
-			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("medium"), false))["reasoning_effort"], ShouldEqual, "medium")
-			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("high"), false))["reasoning_effort"], ShouldEqual, "high")
-			So(parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("xhigh"), false))["reasoning_effort"], ShouldEqual, "xhigh")
+			So(parseChatRequest(convReqRaw("gpt-test", reqBase("none"), false))["reasoning_effort"], ShouldEqual, "none")
+			So(parseChatRequest(convReqRaw("gpt-test", reqBase("minimal"), false))["reasoning_effort"], ShouldEqual, "minimal")
+			So(parseChatRequest(convReqRaw("gpt-test", reqBase("low"), false))["reasoning_effort"], ShouldEqual, "low")
+			So(parseChatRequest(convReqRaw("gpt-test", reqBase("medium"), false))["reasoning_effort"], ShouldEqual, "medium")
+			So(parseChatRequest(convReqRaw("gpt-test", reqBase("high"), false))["reasoning_effort"], ShouldEqual, "high")
+			So(parseChatRequest(convReqRaw("gpt-test", reqBase("xhigh"), false))["reasoning_effort"], ShouldEqual, "xhigh")
 		})
 
 		Convey("auto → 映射为 high（上游枚举不含 auto，透传会 400）", func() {
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("auto"), false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBase("auto"), false))
 			So(chatReq["reasoning_effort"], ShouldEqual, "high")
 		})
 
 		Convey("未知 effort → 兜底 high（不再兜底 auto）", func() {
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBase("ultra"), false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBase("ultra"), false))
 			So(chatReq["reasoning_effort"], ShouldEqual, "high")
 		})
 
 		Convey("无 reasoning 字段 → 不设置 reasoning_effort", func() {
-			body, _ := json.Marshal(map[string]interface{}{"model": "gpt-test"})
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", body, false))
+			body, _ := json.Marshal(map[string]interface{}{"model": "gpt-test", "input": "hi"})
+			chatReq := parseChatRequest(convReqRaw("gpt-test", body, false))
 			_, has := chatReq["reasoning_effort"]
 			So(has, ShouldBeFalse)
 		})
 	})
 }
 
+// agentMessageWarnCounter 统计 path=agent_message 的 warnDropped 次数，其余日志委托原 logger。
+type agentMessageWarnCounter struct {
+	logger.ILogger
+	drops int
+}
+
+func (l *agentMessageWarnCounter) Warnf(format string, args ...interface{}) {
+	if strings.Contains(fmt.Sprintf(format, args...), "path=agent_message") {
+		l.drops++
+		return
+	}
+	l.ILogger.Warnf(format, args...)
+}
+
+// countAgentMessageWarnDrops 在 run 执行期间收集 agent_message 块丢弃告警并返回其条数。
+func countAgentMessageWarnDrops(run func()) int {
+	orig := logger.Log
+	cl := &agentMessageWarnCounter{ILogger: orig}
+	logger.Log = cl
+	defer func() { logger.Log = orig }()
+	run()
+	return cl.drops
+}
+
 func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
-	Convey("ConvertResponsesToChatRequest: input 中的 agent_message item 转为 assistant message", t, func() {
+	Convey("ConvertResponsesToChatRequest: input 中的 agent_message item 转为 assistant message（phase 按 DN-5 丢弃标记保留文本）", t, func() {
 
 		Convey("T1: 单个 agent_message 含 2 个 text 块 → assistant 消息按换行拼接且顺序正确", func() {
 			reqBody := []byte(`{
@@ -1825,7 +1897,7 @@ func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
 				]
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			So(chatReq, ShouldNotBeNil)
 			messages := chatReq["messages"].([]interface{})
@@ -1835,19 +1907,21 @@ func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
 			So(msg["content"], ShouldEqual, "first part\nsecond part")
 		})
 
-		Convey("T2: agent_message content 为空数组 → 丢弃且不报错", func() {
+		Convey("T2: agent_message content 为空数组 → 无信息量丢弃且不报错", func() {
 			reqBody := []byte(`{
 				"model": "gpt-test",
 				"input": [
-					{"type": "agent_message", "id": "am_2", "content": []}
+					{"type": "agent_message", "id": "am_2", "content": []},
+					{"type": "message", "role": "user", "content": "hi"}
 				]
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			So(chatReq, ShouldNotBeNil)
 			messages := chatReq["messages"].([]interface{})
-			So(len(messages), ShouldEqual, 0)
+			So(len(messages), ShouldEqual, 1)
+			So(messages[0].(map[string]interface{})["content"], ShouldEqual, "hi")
 		})
 
 		Convey("T3: agent_message 与 message 混排 → 顺序保持、各自内容正确", func() {
@@ -1866,7 +1940,7 @@ func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
 				]
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			So(chatReq, ShouldNotBeNil)
 			messages := chatReq["messages"].([]interface{})
@@ -1882,7 +1956,7 @@ func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
 			So(m2["content"], ShouldEqual, "again")
 		})
 
-		Convey("T4: content 混排非 text 块/空文本/有效文本 → 只保留有效文本块", func() {
+		Convey("T4: content 混排非文本块 → 丢弃非文本块，保留文本并放行（§3.9 文本块接受 text/input_text/output_text）", func() {
 			reqBody := []byte(`{
 				"model": "gpt-test",
 				"input": [
@@ -1891,16 +1965,12 @@ func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
 						"id": "am_4",
 						"content": [
 							{"type": "image_url", "image_url": {"url": "http://x"}},
-							{"type": "text", "text": ""},
-							{"type": "text", "text": "valid part"},
-							"not-a-map"
+							{"type": "text", "text": "valid part"}
 						]
 					}
 				]
 			}`)
-
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 			So(chatReq, ShouldNotBeNil)
 			messages := chatReq["messages"].([]interface{})
 			So(len(messages), ShouldEqual, 1)
@@ -1908,8 +1978,271 @@ func TestConvertResponsesToChatRequest_AgentMessageItem(t *testing.T) {
 			So(msg["role"], ShouldEqual, "assistant")
 			So(msg["content"], ShouldEqual, "valid part")
 		})
+
+		Convey("T5: agent_message 含 input_text 块 → 文本保留并产出 assistant 消息（真实 codex CLI 流量回归锁定）", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_5",
+						"content": [
+							{"type": "input_text", "text": "Sender: /root/task_a\nagent done"}
+						]
+					}
+				]
+			}`)
+
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			content := msg["content"].(string)
+			So(strings.Contains(content, "Sender: /root/task_a"), ShouldBeTrue)
+			So(strings.Contains(content, "agent done"), ShouldBeTrue)
+		})
+
+		Convey("T6: input_text/encrypted_content 与非法块（图片）混排 → 文本合并，图片丢弃并计入 dropped 日志计数", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_6",
+						"content": [
+							{"type": "input_text", "text": "first input part"},
+							{"type": "image_url", "image_url": {"url": "http://x"}},
+							{"type": "encrypted_content", "encrypted_content": "payload part"}
+						]
+					}
+				]
+			}`)
+
+			var chatReq map[string]interface{}
+			drops := countAgentMessageWarnDrops(func() {
+				chatReq = parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+			})
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			So(msg["content"], ShouldEqual, "first input part\npayload part")
+			So(drops, ShouldEqual, 1)
+		})
+
+		Convey("T9: 真实流量形状 input_text 表头 + encrypted_content 明文载荷 → 表头与正文都保留且顺序正确", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_9",
+						"content": [
+							{"type": "input_text", "text": "Message Type: NEW_TASK\nTask name: /root/utility_make_test_file\nSender: /root\nPayload:\n"},
+							{"type": "encrypted_content", "encrypted_content": "请在 /Users/rafe/work/github/myapi 当前目录下创建 test.txt，内容为一个随机数字"}
+						]
+					}
+				]
+			}`)
+
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			content := msg["content"].(string)
+			So(strings.Contains(content, "Message Type: NEW_TASK"), ShouldBeTrue)
+			So(strings.Contains(content, "Payload:"), ShouldBeTrue)
+			So(strings.Contains(content, "创建 test.txt"), ShouldBeTrue)
+			So(strings.Index(content, "Message Type: NEW_TASK"), ShouldBeLessThan, strings.Index(content, "创建 test.txt"))
+		})
+
+		Convey("T10a: encrypted_content 字段缺失 → 块丢弃、warnDropped 计数 +1，请求其余消息保留", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "agent_message", "id": "am_10a", "content": [{"type": "encrypted_content"}]},
+					{"type": "message", "role": "user", "content": "hi"}
+				]
+			}`)
+
+			var chatReq map[string]interface{}
+			drops := countAgentMessageWarnDrops(func() {
+				chatReq = parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+			})
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			So(messages[0].(map[string]interface{})["content"], ShouldEqual, "hi")
+			So(drops, ShouldEqual, 1)
+		})
+
+		Convey("T10b: encrypted_content 字段非字符串 → 块丢弃、warnDropped 计数 +1", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "agent_message", "id": "am_10b", "content": [{"type": "encrypted_content", "encrypted_content": 123}]},
+					{"type": "message", "role": "user", "content": "hi"}
+				]
+			}`)
+
+			var chatReq map[string]interface{}
+			drops := countAgentMessageWarnDrops(func() {
+				chatReq = parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+			})
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			So(messages[0].(map[string]interface{})["content"], ShouldEqual, "hi")
+			So(drops, ShouldEqual, 1)
+		})
+
+		Convey("T10c: encrypted_content 字段为空串 → 块丢弃、warnDropped 计数 +1", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "agent_message", "id": "am_10c", "content": [{"type": "encrypted_content", "encrypted_content": ""}]},
+					{"type": "message", "role": "user", "content": "hi"}
+				]
+			}`)
+
+			var chatReq map[string]interface{}
+			drops := countAgentMessageWarnDrops(func() {
+				chatReq = parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+			})
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			So(messages[0].(map[string]interface{})["content"], ShouldEqual, "hi")
+			So(drops, ShouldEqual, 1)
+		})
+
+		Convey("T10d: encrypted_content 字段为 JSON null → 块丢弃、warnDropped 计数 +1", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "agent_message", "id": "am_10d", "content": [{"type": "encrypted_content", "encrypted_content": null}]},
+					{"type": "message", "role": "user", "content": "hi"}
+				]
+			}`)
+
+			var chatReq map[string]interface{}
+			drops := countAgentMessageWarnDrops(func() {
+				chatReq = parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+			})
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			So(messages[0].(map[string]interface{})["content"], ShouldEqual, "hi")
+			So(drops, ShouldEqual, 1)
+		})
+
+		Convey("T11: 连续两个 encrypted_content 块 → 两段正文按块顺序拼接且都保留", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_11",
+						"content": [
+							{"type": "encrypted_content", "encrypted_content": "payload one"},
+							{"type": "encrypted_content", "encrypted_content": "payload two"}
+						]
+					}
+				]
+			}`)
+
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			So(msg["content"], ShouldEqual, "payload one\npayload two")
+		})
+
+		Convey("T12: 块无 type 字段但带 encrypted_content 明文 → 按载荷保留且请求不 400", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_12",
+						"content": [
+							{"encrypted_content": "Message Type: NEW_TASK\nPayload:\nbare payload body"}
+						]
+					}
+				]
+			}`)
+
+			var chatReq map[string]interface{}
+			drops := countAgentMessageWarnDrops(func() {
+				chatReq = parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+			})
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			So(msg["content"], ShouldEqual, "Message Type: NEW_TASK\nPayload:\nbare payload body")
+			So(drops, ShouldEqual, 0)
+		})
+
+		Convey("T7: 块无 type 字段但有 text → 归一为 input_text 保留文本（与 message 路径口径对齐）", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_7",
+						"content": [
+							{"text": "no type text part"}
+						]
+					}
+				]
+			}`)
+
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
+
+			So(chatReq, ShouldNotBeNil)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			So(msg["content"], ShouldEqual, "no type text part")
+		})
+
+		Convey("T8: content 含非对象块 → invalid_source_shape", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{
+						"type": "agent_message",
+						"id": "am_7",
+						"content": ["not-a-map"]
+					}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", reqBody, false)
+			So(out, ShouldBeNil)
+			soPCE(err, relaymodel.CodeInvalidSourceShape)
+		})
 	})
 }
+
 func TestConvertResponsesToChatRequest_TextFormat(t *testing.T) {
 	Convey("ConvertResponsesToChatRequest: text.format → response_format", t, func() {
 
@@ -1928,7 +2261,7 @@ func TestConvertResponsesToChatRequest_TextFormat(t *testing.T) {
 				}
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			rf, ok := chatReq["response_format"].(map[string]interface{})
 			So(ok, ShouldBeTrue)
@@ -1952,7 +2285,7 @@ func TestConvertResponsesToChatRequest_TextFormat(t *testing.T) {
 				"text": {"format": {"type": "json_object"}}
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			rf, ok := chatReq["response_format"].(map[string]interface{})
 			So(ok, ShouldBeTrue)
@@ -1966,7 +2299,7 @@ func TestConvertResponsesToChatRequest_TextFormat(t *testing.T) {
 				"text": {"format": {"type": "text"}}
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			rf, ok := chatReq["response_format"].(map[string]interface{})
 			So(ok, ShouldBeTrue)
@@ -1980,7 +2313,7 @@ func TestConvertResponsesToChatRequest_TextFormat(t *testing.T) {
 				"text": {"verbosity": "high"}
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			_, has := chatReq["response_format"]
 			So(has, ShouldBeFalse)
@@ -1993,7 +2326,7 @@ func TestConvertResponsesToChatRequest_TextFormat(t *testing.T) {
 				"text": {"format": {"type": "future_format", "extra": 1}}
 			}`)
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 			rf, ok := chatReq["response_format"].(map[string]interface{})
 			So(ok, ShouldBeTrue)
@@ -2004,51 +2337,32 @@ func TestConvertResponsesToChatRequest_TextFormat(t *testing.T) {
 }
 
 func TestConvertResponsesToChatRequest_RefusalPart(t *testing.T) {
-	Convey("ConvertResponsesToChatRequest: input message 的 refusal part → chat content part", t, func() {
+	reqWithAssistantContent := func(contentJSON string) string {
+		return `{
+			"model": "gpt-test",
+			"input": [
+				{
+					"type": "message",
+					"role": "__ROLE__",
+					"content": ` + contentJSON + `
+				}
+			]
+		}`
+	}
 
-		Convey("T1: assistant text+refusal 并存 → 按 chat §4 互斥规则保留 refusal 丢弃 text", func() {
-			reqBody := []byte(`{
-				"model": "gpt-test",
-				"input": [
-					{
-						"type": "message",
-						"role": "assistant",
-						"content": [
-							{"type": "output_text", "text": "I can do this part"},
-							{"type": "refusal", "refusal": "but I cannot do that"}
-						]
-					}
-				]
-			}`)
+	Convey("ConvertResponsesToChatRequest: role×part 矩阵（P1-3）—— refusal 仅 assistant 且与 text/media 互斥，违规 part 丢弃并放行", t, func() {
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
-			messages := chatReq["messages"].([]interface{})
-			So(len(messages), ShouldEqual, 1)
-			msg := messages[0].(map[string]interface{})
+		Convey("T1: assistant text+refusal 并存 → 保留文本、丢弃 refusal 并放行", func() {
+			chatReq := parseChatRequest(convReqRaw("gpt-test", []byte(strings.Replace(reqWithAssistantContent(
+				`[{"type": "output_text", "text": "I can do this part"},{"type": "refusal", "refusal": "but I cannot do that"}]`), `__ROLE__`, "assistant", 1)), false))
+			msg := chatReq["messages"].([]interface{})[0].(map[string]interface{})
 			So(msg["role"], ShouldEqual, "assistant")
-			content, ok := msg["content"].([]interface{})
-			So(ok, ShouldBeTrue)
-			So(len(content), ShouldEqual, 1)
-			refusalPart := content[0].(map[string]interface{})
-			So(refusalPart["type"], ShouldEqual, "refusal")
-			So(refusalPart["refusal"], ShouldEqual, "but I cannot do that")
+			So(msg["content"], ShouldEqual, "I can do this part")
 		})
 
 		Convey("T2: 仅 refusal part → content 数组只含 refusal part", func() {
-			reqBody := []byte(`{
-				"model": "gpt-test",
-				"input": [
-					{
-						"type": "message",
-						"role": "assistant",
-						"content": [{"type": "refusal", "refusal": "I refuse"}]
-					}
-				]
-			}`)
-
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
+			chatReq := parseChatRequest(convReqRaw("gpt-test", []byte(strings.Replace(reqWithAssistantContent(
+				`[{"type": "refusal", "refusal": "I refuse"}]`), `__ROLE__`, "assistant", 1)), false))
 			messages := chatReq["messages"].([]interface{})
 			msg := messages[0].(map[string]interface{})
 			content, ok := msg["content"].([]interface{})
@@ -2058,23 +2372,9 @@ func TestConvertResponsesToChatRequest_RefusalPart(t *testing.T) {
 			So(content[0].(map[string]interface{})["refusal"], ShouldEqual, "I refuse")
 		})
 
-		Convey("T3: refusal part 文本为空 → 忽略，行为与现状一致（纯文本消息拼成字符串）", func() {
-			reqBody := []byte(`{
-				"model": "gpt-test",
-				"input": [
-					{
-						"type": "message",
-						"role": "assistant",
-						"content": [
-							{"type": "refusal", "refusal": ""},
-							{"type": "output_text", "text": "normal reply"}
-						]
-					}
-				]
-			}`)
-
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
+		Convey("T3: refusal part 文本为空 → 无信息量跳过，纯文本消息拼成字符串（锁定为预期降级）", func() {
+			chatReq := parseChatRequest(convReqRaw("gpt-test", []byte(strings.Replace(reqWithAssistantContent(
+				`[{"type": "refusal", "refusal": ""},{"type": "output_text", "text": "normal reply"}]`), `__ROLE__`, "assistant", 1)), false))
 			messages := chatReq["messages"].([]interface{})
 			msg := messages[0].(map[string]interface{})
 			content, ok := msg["content"].(string)
@@ -2082,111 +2382,53 @@ func TestConvertResponsesToChatRequest_RefusalPart(t *testing.T) {
 			So(content, ShouldEqual, "normal reply")
 		})
 
-		Convey("T4: user 消息含 refusal part → 丢弃（chat §4 refusal 仅 assistant），text 保留", func() {
-			reqBody := []byte(`{
-				"model": "gpt-test",
-				"input": [
-					{
-						"type": "message",
-						"role": "user",
-						"content": [
-							{"type": "input_text", "text": "please help"},
-							{"type": "refusal", "refusal": "stray refusal"}
-						]
-					}
-				]
-			}`)
-
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
-			messages := chatReq["messages"].([]interface{})
-			msg := messages[0].(map[string]interface{})
+		Convey("T4: user 消息含 refusal part → 丢弃该 refusal，保留文本并放行", func() {
+			chatReq := parseChatRequest(convReqRaw("gpt-test", []byte(strings.Replace(reqWithAssistantContent(
+				`[{"type": "input_text", "text": "please help"},{"type": "refusal", "refusal": "stray refusal"}]`), `__ROLE__`, "user", 1)), false))
+			msg := chatReq["messages"].([]interface{})[0].(map[string]interface{})
 			So(msg["role"], ShouldEqual, "user")
-			content := msg["content"]
-			// 仅剩 text，且按纯文本消息拼成字符串
-			So(content, ShouldEqual, "please help")
+			So(msg["content"], ShouldEqual, "please help")
 		})
 
-		Convey("T5: system 消息仅 refusal part → 丢弃后 content 为空串", func() {
-			reqBody := []byte(`{
-				"model": "gpt-test",
-				"input": [
-					{
-						"type": "message",
-						"role": "system",
-						"content": [{"type": "refusal", "refusal": "should not appear"}]
-					}
-				]
-			}`)
-
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
-			messages := chatReq["messages"].([]interface{})
-			msg := messages[0].(map[string]interface{})
-			So(msg["role"], ShouldEqual, "system")
-			So(msg["content"], ShouldEqual, "")
+		Convey("T5: system 消息仅 refusal part → refusal 丢弃、整条消息无剩余内容 → 丢弃该 item 且不报错", func() {
+			msg, err := convertMessageItem(map[string]interface{}{
+				"type":    "message",
+				"role":    "system",
+				"content": []interface{}{map[string]interface{}{"type": "refusal", "refusal": "should not appear"}},
+			})
+			So(err, ShouldBeNil)
+			So(msg, ShouldBeNil)
 		})
 
-		Convey("T6: refusal 先行 + output_text 后到（[refusal, text] 乱序）→ 互斥保留 refusal，与 [text, refusal] 顺序结果等价", func() {
-			reqBody := []byte(`{
-				"model": "gpt-test",
-				"input": [
-					{
-						"type": "message",
-						"role": "assistant",
-						"content": [
-							{"type": "refusal", "refusal": "but I cannot do that"},
-							{"type": "output_text", "text": "I can do this part"}
-						]
-					}
-				]
-			}`)
+		Convey("T6: [refusal, text] 乱序 → 保留文本、丢弃 refusal 并放行（互斥与顺序无关）", func() {
+			chatReq := parseChatRequest(convReqRaw("gpt-test", []byte(strings.Replace(reqWithAssistantContent(
+				`[{"type": "refusal", "refusal": "but I cannot do that"},{"type": "output_text", "text": "I can do this part"}]`), `__ROLE__`, "assistant", 1)), false))
+			msg := chatReq["messages"].([]interface{})[0].(map[string]interface{})
+			So(msg["content"], ShouldEqual, "I can do this part")
+		})
 
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
-			messages := chatReq["messages"].([]interface{})
-			So(len(messages), ShouldEqual, 1)
-			msg := messages[0].(map[string]interface{})
-			So(msg["role"], ShouldEqual, "assistant")
+		Convey("T7: assistant refusal+image（[refusal, media] 乱序）→ 丢弃 assistant 不允许的 image，保留 refusal", func() {
+			chatReq := parseChatRequest(convReqRaw("gpt-test", []byte(strings.Replace(reqWithAssistantContent(
+				`[{"type": "refusal", "refusal": "cannot show"},{"type": "input_image", "image_url": {"url": "http://x/img.png"}}]`), `__ROLE__`, "assistant", 1)), false))
+			msg := chatReq["messages"].([]interface{})[0].(map[string]interface{})
 			content, ok := msg["content"].([]interface{})
 			So(ok, ShouldBeTrue)
 			So(len(content), ShouldEqual, 1)
-			refusalPart := content[0].(map[string]interface{})
-			So(refusalPart["type"], ShouldEqual, "refusal")
-			So(refusalPart["refusal"], ShouldEqual, "but I cannot do that")
+			So(content[0].(map[string]interface{})["type"], ShouldEqual, "refusal")
 		})
 
-		Convey("T7: refusal 先行 + image 后到（[refusal, media] 乱序）→ 互斥丢弃 media，只保留 refusal", func() {
-			reqBody := []byte(`{
-				"model": "gpt-test",
-				"input": [
-					{
-						"type": "message",
-						"role": "assistant",
-						"content": [
-							{"type": "refusal", "refusal": "cannot show"},
-							{"type": "input_image", "image_url": {"url": "http://x/img.png"}}
-						]
-					}
-				]
-			}`)
-
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
-
-			messages := chatReq["messages"].([]interface{})
-			So(len(messages), ShouldEqual, 1)
-			msg := messages[0].(map[string]interface{})
-			content, ok := msg["content"].([]interface{})
-			So(ok, ShouldBeTrue)
-			So(len(content), ShouldEqual, 1)
-			refusalPart := content[0].(map[string]interface{})
-			So(refusalPart["type"], ShouldEqual, "refusal")
-			So(refusalPart["refusal"], ShouldEqual, "cannot show")
+		Convey("T8: developer 消息含 image part → image 丢弃、消息无剩余内容 → 丢弃该 item 且不报错", func() {
+			msg, err := convertMessageItem(map[string]interface{}{
+				"type":    "message",
+				"role":    "developer",
+				"content": []interface{}{map[string]interface{}{"type": "input_image", "image_url": "http://img"}},
+			})
+			So(err, ShouldBeNil)
+			So(msg, ShouldBeNil)
 		})
 	})
 }
 
-// parseResponsesMap 解析 ConvertChatResponseToResponsesWithContext 的完整响应对象（含 status 等顶层字段）。
 func parseResponsesMap(respBytes []byte) map[string]interface{} {
 	var resp map[string]interface{}
 	if err := json.Unmarshal(respBytes, &resp); err != nil {
@@ -2216,7 +2458,7 @@ func TestConvertChatResponseToResponses_Refusal(t *testing.T) {
 			}
 			chatBody, _ := json.Marshal(chatResp)
 
-			result := ConvertChatResponseToResponses(chatBody, "gpt-test", false)
+			result := convRespRaw(chatBody, "gpt-test", false)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -2249,7 +2491,7 @@ func TestConvertChatResponseToResponses_Refusal(t *testing.T) {
 			}
 			chatBody, _ := json.Marshal(chatResp)
 
-			result := ConvertChatResponseToResponses(chatBody, "gpt-test", false)
+			result := convRespRaw(chatBody, "gpt-test", false)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 1)
@@ -2280,7 +2522,7 @@ func TestConvertChatResponseToResponses_Refusal(t *testing.T) {
 			}
 			chatBody, _ := json.Marshal(chatResp)
 
-			result := ConvertChatResponseToResponses(chatBody, "gpt-test", false)
+			result := convRespRaw(chatBody, "gpt-test", false)
 			output := parseOutputArray(result)
 
 			So(len(output), ShouldEqual, 0)
@@ -2312,27 +2554,32 @@ func TestConvertChatResponseToResponses_FinishReasonStatus(t *testing.T) {
 		}
 
 		Convey("T1: length → status=incomplete + incomplete_details.reason=max_output_tokens + truncated", func() {
-			resp := parseResponsesMap(ConvertChatResponseToResponses(chatBodyWithFinish("length"), "gpt-test", false))
+			resp := parseResponsesMap(convRespRaw(chatBodyWithFinish("length"), "gpt-test", false))
 			So(resp["status"], ShouldEqual, "incomplete")
 			details := resp["incomplete_details"].(map[string]interface{})
 			So(details["reason"], ShouldEqual, "max_output_tokens")
 			So(resp["truncated"], ShouldEqual, true)
 		})
 
-		Convey("T2: stop → status=completed 且无 incomplete_details", func() {
-			resp := parseResponsesMap(ConvertChatResponseToResponses(chatBodyWithFinish("stop"), "gpt-test", false))
+		Convey("T2: stop → status=completed，incomplete_details 按 §4 输出 null（键恒存在）", func() {
+			resp := parseResponsesMap(convRespRaw(chatBodyWithFinish("stop"), "gpt-test", false))
 			So(resp["status"], ShouldEqual, "completed")
 			_, has := resp["incomplete_details"]
-			So(has, ShouldBeFalse)
+			So(has, ShouldBeTrue)
+			So(resp["incomplete_details"], ShouldBeNil)
+			_, hasErr := resp["error"]
+			So(hasErr, ShouldBeTrue)
+			So(resp["error"], ShouldBeNil)
+			So(resp["truncated"], ShouldEqual, false)
 		})
 
 		Convey("T3: tool_calls → status=completed", func() {
-			resp := parseResponsesMap(ConvertChatResponseToResponses(chatBodyWithFinish("tool_calls"), "gpt-test", false))
+			resp := parseResponsesMap(convRespRaw(chatBodyWithFinish("tool_calls"), "gpt-test", false))
 			So(resp["status"], ShouldEqual, "completed")
 		})
 
 		Convey("T4: content_filter → status=incomplete + incomplete_details.reason=content_filter + truncated", func() {
-			resp := parseResponsesMap(ConvertChatResponseToResponses(chatBodyWithFinish("content_filter"), "gpt-test", false))
+			resp := parseResponsesMap(convRespRaw(chatBodyWithFinish("content_filter"), "gpt-test", false))
 			So(resp["status"], ShouldEqual, "incomplete")
 			details := resp["incomplete_details"].(map[string]interface{})
 			So(details["reason"], ShouldEqual, "content_filter")
@@ -2347,7 +2594,7 @@ func TestConvertChatResponseToResponses_FinishReasonStatus(t *testing.T) {
 				"choices": []interface{}{},
 			}
 			b, _ := json.Marshal(chatResp)
-			resp := parseResponsesMap(ConvertChatResponseToResponses(b, "gpt-test", false))
+			resp := parseResponsesMap(convRespRaw(b, "gpt-test", false))
 			So(resp["status"], ShouldEqual, "completed")
 		})
 	})
@@ -2359,6 +2606,7 @@ func TestConvertResponsesToChatRequest_ToolChoice(t *testing.T) {
 		reqBody := func(toolChoice interface{}) []byte {
 			body, _ := json.Marshal(map[string]interface{}{
 				"model": "gpt-test",
+				"input": "go",
 				"tools": []interface{}{
 					map[string]interface{}{
 						"type": "function",
@@ -2374,7 +2622,7 @@ func TestConvertResponsesToChatRequest_ToolChoice(t *testing.T) {
 		}
 
 		Convey("T1: responses 的 {type:function, name} 对象 → chat 的 {type:function, function:{name}} 嵌套形状", func() {
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody(map[string]interface{}{
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody(map[string]interface{}{
 				"type": "function",
 				"name": "get_weather",
 			}), false))
@@ -2391,13 +2639,13 @@ func TestConvertResponsesToChatRequest_ToolChoice(t *testing.T) {
 					"name": "get_weather",
 				},
 			}
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody(chatShape), false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody(chatShape), false))
 			So(chatReq["tool_choice"], ShouldResemble, chatShape)
 		})
 
 		Convey("T3: 字符串 auto/none/required → 原样直通", func() {
 			for _, s := range []string{"auto", "none", "required"} {
-				chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody(s), false))
+				chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody(s), false))
 				So(chatReq["tool_choice"], ShouldEqual, s)
 			}
 		})
@@ -2407,27 +2655,56 @@ func TestConvertResponsesToChatRequest_ToolChoice(t *testing.T) {
 				"type":   "custom",
 				"custom": map[string]interface{}{"name": "x"},
 			}
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody(custom), false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody(custom), false))
 			So(chatReq["tool_choice"], ShouldResemble, custom)
 		})
 
 		Convey("T7: 字符串 function:<name> → chat {type:function, function:{name}}（chat §5.2 强制调用形状）", func() {
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody("function:get_weather"), false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody("function:get_weather"), false))
 			tc := chatReq["tool_choice"].(map[string]interface{})
 			So(tc["type"], ShouldEqual, "function")
 			So(tc["function"].(map[string]interface{})["name"], ShouldEqual, "get_weather")
 		})
 
-		Convey("T8: 指向工具 id 等 chat 不可表达的字符串 → 显式降级 auto，不透传非法形状", func() {
+		Convey("T8: 指向工具 id 等 chat 不可表达的字符串 → 丢弃整个 tool_choice 并放行（等效缺省 auto）", func() {
 			for _, s := range []string{"call_abc123", "custom:apply_patch", "function:", "mcp:server_x"} {
-				chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody(s), false))
-				So(chatReq["tool_choice"], ShouldEqual, "auto")
+				out, err := ConvertResponsesToChatRequest("gpt-test", reqBody(s), false)
+				So(err, ShouldBeNil)
+				So(out, ShouldNotBeNil)
+				_, has := parseChatRequest(out)["tool_choice"]
+				So(has, ShouldBeFalse)
 			}
+		})
+
+		Convey("T9: 未知 tool_choice 对象 type → 丢弃整个 tool_choice 并放行", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", reqBody(map[string]interface{}{"type": "weird_shape"}), false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+			_, has := parseChatRequest(out)["tool_choice"]
+			So(has, ShouldBeFalse)
+		})
+
+		Convey("T10: tool_choice 指向被 DN-6 丢弃的工具 → 连同 tool_choice 一并丢弃并放行", func() {
+			body, _ := json.Marshal(map[string]interface{}{
+				"model":       "gpt-test",
+				"input":       "go",
+				"tools":       []interface{}{map[string]interface{}{"type": "web_search"}},
+				"tool_choice": "function:web_search",
+			})
+			out, err := ConvertResponsesToChatRequest("gpt-test", body, false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+			chatReq := parseChatRequest(out)
+			_, hasTools := chatReq["tools"]
+			So(hasTools, ShouldBeFalse)
+			_, hasChoice := chatReq["tool_choice"]
+			So(hasChoice, ShouldBeFalse)
 		})
 
 		Convey("T5: tool_choice 缺失 → 不设置该字段", func() {
 			body, _ := json.Marshal(map[string]interface{}{
 				"model": "gpt-test",
+				"input": "go",
 				"tools": []interface{}{
 					map[string]interface{}{
 						"type": "function",
@@ -2435,7 +2712,7 @@ func TestConvertResponsesToChatRequest_ToolChoice(t *testing.T) {
 					},
 				},
 			})
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", body, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", body, false))
 			_, has := chatReq["tool_choice"]
 			So(has, ShouldBeFalse)
 		})
@@ -2443,9 +2720,10 @@ func TestConvertResponsesToChatRequest_ToolChoice(t *testing.T) {
 		Convey("T6: 无 tools 时 tool_choice 不写入（沿用既有门槛）", func() {
 			body, _ := json.Marshal(map[string]interface{}{
 				"model":       "gpt-test",
+				"input":       "go",
 				"tool_choice": "auto",
 			})
-			chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", body, false))
+			chatReq := parseChatRequest(convReqRaw("gpt-test", body, false))
 			_, has := chatReq["tool_choice"]
 			So(has, ShouldBeFalse)
 		})
@@ -2473,17 +2751,17 @@ func TestConvertChatResponseToResponses_CreatedAtKey(t *testing.T) {
 		b, _ := json.Marshal(chatBody)
 
 		Convey("T1: 非流式响应写 created_at 键，值为 chat created 原值（Unix 秒）", func() {
-			resp := parseResponsesMap(ConvertChatResponseToResponses(b, "gpt-test", false))
+			resp := parseResponsesMap(convRespRaw(b, "gpt-test", false))
 			So(resp["created_at"], ShouldEqual, int64(1700000000))
 		})
 
 		Convey("T2: 不写 chat 风格的 created 键", func() {
-			resp := parseResponsesMap(ConvertChatResponseToResponses(b, "gpt-test", false))
+			resp := parseResponsesMap(convRespRaw(b, "gpt-test", false))
 			_, hasCreated := resp["created"]
 			So(hasCreated, ShouldBeFalse)
 		})
 
-		Convey("T3: chat 响应无 created → 不写 created_at", func() {
+		Convey("T3: chat 响应缺 created → created_at 仍必含（responses §4，网关时间兜底，不伪装字段缺失）", func() {
 			noCreated := map[string]interface{}{
 				"id":    "chat_nots",
 				"model": "gpt-test",
@@ -2498,16 +2776,16 @@ func TestConvertChatResponseToResponses_CreatedAtKey(t *testing.T) {
 				},
 			}
 			nb, _ := json.Marshal(noCreated)
-			resp := parseResponsesMap(ConvertChatResponseToResponses(nb, "gpt-test", false))
-			_, has := resp["created_at"]
-			So(has, ShouldBeFalse)
+			resp := parseResponsesMap(convRespRaw(nb, "gpt-test", false))
+			ca, has := resp["created_at"]
+			So(has, ShouldBeTrue)
+			// JSON 数字解码为 float64（wire 层），网关时间兜底必为正 Unix 秒
+			caNum, ok := ca.(float64)
+			So(ok, ShouldBeTrue)
+			So(caNum > 0, ShouldBeTrue)
 		})
 	})
 }
-
-// -----------------------------------------------------------------------------
-// #3 修复：content parts 补 input_audio / input_file（responses §3.1 → chat §4）
-// -----------------------------------------------------------------------------
 
 func TestConvertContentArray_InputAudioPart(t *testing.T) {
 	Convey("convertContentArray: responses input_audio part → chat input_audio part", t, func() {
@@ -2523,7 +2801,7 @@ func TestConvertContentArray_InputAudioPart(t *testing.T) {
 				},
 			}
 
-			result := convertContentArray(content, "user")
+			result := convContent(content, "user")
 			parts, ok := result.([]interface{})
 			So(ok, ShouldBeTrue)
 			So(len(parts), ShouldEqual, 1)
@@ -2543,7 +2821,7 @@ func TestConvertContentArray_InputAudioPart(t *testing.T) {
 				},
 			}
 
-			result := convertContentArray(content, "user")
+			result := convContent(content, "user")
 			parts := result.([]interface{})
 			part := parts[0].(map[string]interface{})
 			So(part["type"], ShouldEqual, "input_audio")
@@ -2552,7 +2830,7 @@ func TestConvertContentArray_InputAudioPart(t *testing.T) {
 			So(inner["format"], ShouldEqual, "mp3")
 		})
 
-		Convey("缺 data 或 format → 丢弃，剩余文本仍拼接为字符串", func() {
+		Convey("缺 data 或 format → invalid_source_shape（不再丢弃 part 回退纯文本）", func() {
 			content := []interface{}{
 				map[string]interface{}{
 					"type":   "input_audio",
@@ -2560,9 +2838,8 @@ func TestConvertContentArray_InputAudioPart(t *testing.T) {
 				},
 				map[string]interface{}{"type": "input_text", "text": "hello"},
 			}
-
-			result := convertContentArray(content, "user")
-			So(result, ShouldEqual, "hello")
+			_, err := convertContentArray(content, "user")
+			soPCE(err, relaymodel.CodeInvalidSourceShape)
 		})
 	})
 }
@@ -2578,7 +2855,7 @@ func TestConvertContentArray_InputFilePart(t *testing.T) {
 				},
 			}
 
-			result := convertContentArray(content, "user")
+			result := convContent(content, "user")
 			parts, ok := result.([]interface{})
 			So(ok, ShouldBeTrue)
 			So(len(parts), ShouldEqual, 1)
@@ -2599,7 +2876,7 @@ func TestConvertContentArray_InputFilePart(t *testing.T) {
 				},
 			}
 
-			result := convertContentArray(content, "user")
+			result := convContent(content, "user")
 			parts := result.([]interface{})
 			part := parts[0].(map[string]interface{})
 			So(part["type"], ShouldEqual, "file")
@@ -2608,16 +2885,15 @@ func TestConvertContentArray_InputFilePart(t *testing.T) {
 			So(inner["file_data"], ShouldEqual, "base64")
 		})
 
-		Convey("空 file 对象 → 丢弃，无 media 时结果为默认空串", func() {
+		Convey("空 file 对象 → invalid_source_shape（无 filename/file_data/file_id 载荷拒绝）", func() {
 			content := []interface{}{
 				map[string]interface{}{
 					"type": "input_file",
 					"file": map[string]interface{}{},
 				},
 			}
-
-			result := convertContentArray(content, "user")
-			So(result, ShouldEqual, "")
+			_, err := convertContentArray(content, "user")
+			soPCE(err, relaymodel.CodeInvalidSourceShape)
 		})
 	})
 }
@@ -2639,7 +2915,7 @@ func TestConvertResponsesToChatRequest_InputAudioFileParts(t *testing.T) {
 			]
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		messages := chatReq["messages"].([]interface{})
@@ -2659,7 +2935,7 @@ func TestConvertResponsesToChatRequest_InputAudioFileParts(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestConvertInputItem_KnownUnmappableTypes(t *testing.T) {
-	Convey("convertInputItem: responses §3.8 已知不可映射类型 → 丢弃且不 panic（Info 级，不再 Errorf 误报）", t, func() {
+	Convey("convertInputItem: item_reference 与 §3.8 上下文 item 丢弃该 item 且不报错（保留同一请求其余历史）", t, func() {
 		for _, typ := range []string{
 			"file_search_call", "computer_call", "computer_call_output",
 			"local_shell_call", "local_shell_call_output",
@@ -2671,8 +2947,9 @@ func TestConvertInputItem_KnownUnmappableTypes(t *testing.T) {
 			"compaction", "compaction_trigger", "item_reference",
 			"program", "program_output",
 		} {
-			result := convertInputItem(map[string]interface{}{"type": typ}, nil)
-			So(result, ShouldBeNil)
+			msg, err := convertInputItem(map[string]interface{}{"type": typ}, nil)
+			So(err, ShouldBeNil)
+			So(msg, ShouldBeNil)
 		}
 	})
 }
@@ -2685,16 +2962,16 @@ func TestConvertMessageItem_DeveloperRole(t *testing.T) {
 			"content": "system rules",
 		}
 
-		result := convertInputItem(item, nil)
+		result := convItem(item, nil)
 
 		So(result, ShouldNotBeNil)
 		So(result["role"], ShouldEqual, "developer")
 		So(result["content"], ShouldEqual, "system rules")
 
 		Convey("role 缺失仍默认 user，role=user/system 保持原样", func() {
-			So(convertInputItem(map[string]interface{}{"type": "message", "content": "x"}, nil)["role"], ShouldEqual, "user")
-			So(convertInputItem(map[string]interface{}{"type": "message", "role": "user", "content": "x"}, nil)["role"], ShouldEqual, "user")
-			So(convertInputItem(map[string]interface{}{"type": "message", "role": "system", "content": "x"}, nil)["role"], ShouldEqual, "system")
+			So(convItem(map[string]interface{}{"type": "message", "content": "x"}, nil)["role"], ShouldEqual, "user")
+			So(convItem(map[string]interface{}{"type": "message", "role": "user", "content": "x"}, nil)["role"], ShouldEqual, "user")
+			So(convItem(map[string]interface{}{"type": "message", "role": "system", "content": "x"}, nil)["role"], ShouldEqual, "system")
 		})
 	})
 }
@@ -2704,39 +2981,20 @@ func TestConvertMessageItem_DeveloperRole(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestConvertToolsToOpenAI_WebSearchPreview(t *testing.T) {
-	Convey("convertToolsToOpenAI: web_search_preview（responses §9 预览名）→ function 工具", t, func() {
-		tools := []interface{}{
-			map[string]interface{}{"type": "web_search_preview"},
-		}
-
-		result := convertToolsToOpenAI(tools)
-
-		So(len(result), ShouldEqual, 1)
-		out := result[0].(map[string]interface{})
-		So(out["type"], ShouldEqual, "function")
-		fn := out["function"].(map[string]interface{})
-		So(fn["name"], ShouldEqual, "web_search_preview")
-		So(fn["description"], ShouldEqual, "built-in tool")
+	Convey("convertToolsToOpenAI: web_search_preview（responses §9 预览名）同族丢弃且不报错（DN-6）", t, func() {
+		out, err := convertToolsToOpenAI([]interface{}{map[string]interface{}{"type": "web_search_preview"}})
+		So(err, ShouldBeNil)
+		So(len(out), ShouldEqual, 0)
 	})
 }
 
 func TestConvertToolsToOpenAI_ShellAndComputerFamily(t *testing.T) {
-	Convey("convertToolsToOpenAI: shell / computer / computer_use_preview 与既有内建工具同族扁平化", t, func() {
-		tools := []interface{}{
-			map[string]interface{}{"type": "shell"},
-			map[string]interface{}{"type": "computer"},
-			map[string]interface{}{"type": "computer_use_preview"},
+	Convey("convertToolsToOpenAI: shell / computer / computer_use_preview 丢弃且不报错（DN-6）", t, func() {
+		for _, typ := range []string{"shell", "computer", "computer_use_preview"} {
+			out, err := convertToolsToOpenAI([]interface{}{map[string]interface{}{"type": typ}})
+			So(err, ShouldBeNil)
+			So(len(out), ShouldEqual, 0)
 		}
-
-		result := convertToolsToOpenAI(tools)
-
-		So(len(result), ShouldEqual, 3)
-		names := make([]string, 0, 3)
-		for _, r := range result {
-			fn := r.(map[string]interface{})["function"].(map[string]interface{})
-			names = append(names, fn["name"].(string))
-		}
-		So(names, ShouldResemble, []string{"shell", "computer", "computer_use_preview"})
 	})
 }
 
@@ -2749,7 +3007,7 @@ func TestConvertToolsToOpenAI_ApplyPatchToolType(t *testing.T) {
 			},
 		}
 
-		result := convertToolsToOpenAI(tools)
+		result := convTools(tools)
 
 		So(len(result), ShouldEqual, 6)
 		fn := result[0].(map[string]interface{})["function"].(map[string]interface{})
@@ -2760,26 +3018,22 @@ func TestConvertToolsToOpenAI_ApplyPatchToolType(t *testing.T) {
 	})
 }
 
-func TestConvertToolsToOpenAI_UnmappableTypesDropped(t *testing.T) {
-	Convey("convertToolsToOpenAI: 不可映射工具类型 → Info 丢弃，不 panic", t, func() {
+func TestConvertToolsToOpenAI_UnmappableTypesRejected(t *testing.T) {
+	Convey("convertToolsToOpenAI: file_search/code_interpreter/image_generation/mcp/programmatic_tool_calling/未知类型 → 丢弃且不报错", t, func() {
 		for _, typ := range []string{
 			"file_search", "code_interpreter", "image_generation",
 			"mcp", "programmatic_tool_calling", "future_tool_type",
 		} {
-			result := convertToolsToOpenAI([]interface{}{
-				map[string]interface{}{"type": typ},
-			})
-			So(len(result), ShouldEqual, 0)
+			out, err := convertToolsToOpenAI([]interface{}{map[string]interface{}{"type": typ}})
+			So(err, ShouldBeNil)
+			So(len(out), ShouldEqual, 0)
 		}
 	})
 }
 
-// -----------------------------------------------------------------------------
-// #3 修复：顶层字段直通（responses §2 → chat §2）
-// -----------------------------------------------------------------------------
-
 func TestConvertResponsesToChatRequest_TopLevelPassthrough(t *testing.T) {
 	Convey("ConvertResponsesToChatRequest: 顶层字段直通", t, func() {
+		// previous_response_id / service_tier ultrafast 的丢弃路径见 TestConvertResponsesToChatRequestDropsUnmappableContext
 		reqBody := []byte(`{
 			"model": "gpt-test",
 			"input": "hi",
@@ -2792,11 +3046,10 @@ func TestConvertResponsesToChatRequest_TopLevelPassthrough(t *testing.T) {
 			"modalities": ["text", "audio"],
 			"moderation": {"model": "omni-moderation-latest"},
 			"text": {"verbosity": "high", "format": {"type": "text"}},
-			"previous_response_id": "resp_1",
-			"include": ["file_search_call.results"]
+			"include": []
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		So(chatReq, ShouldNotBeNil)
 		So(chatReq["store"], ShouldEqual, true)
@@ -2810,9 +3063,8 @@ func TestConvertResponsesToChatRequest_TopLevelPassthrough(t *testing.T) {
 		// text.verbosity 提升为 chat 顶层 verbosity，format 同时正常转 response_format
 		So(chatReq["verbosity"], ShouldEqual, "high")
 		So(chatReq["response_format"].(map[string]interface{})["type"], ShouldEqual, "text")
-		// 无 chat 对应的字段不写入
-		_, hasPrev := chatReq["previous_response_id"]
-		So(hasPrev, ShouldBeFalse)
+		// include 空数组为协议缺省形态 → 放行且不写入 chat 请求（非缺省拒绝路径见
+		// TestConvertResponsesToChatRequestRejectsResponsesOnlyTopLevelFields）
 		_, hasInclude := chatReq["include"]
 		So(hasInclude, ShouldBeFalse)
 	})
@@ -2825,7 +3077,7 @@ func TestConvertResponsesToChatRequest_TopLevelPassthrough(t *testing.T) {
 			"metadata": null
 		}`)
 
-		chatReq := parseChatRequest(ConvertResponsesToChatRequest("gpt-test", reqBody, false))
+		chatReq := parseChatRequest(convReqRaw("gpt-test", reqBody, false))
 
 		_, hasStore := chatReq["store"]
 		So(hasStore, ShouldBeFalse)
@@ -2834,12 +3086,8 @@ func TestConvertResponsesToChatRequest_TopLevelPassthrough(t *testing.T) {
 	})
 }
 
-// -----------------------------------------------------------------------------
-// #3 修复：输出方向 annotations / audio（chat §6.1 → responses）
-// -----------------------------------------------------------------------------
-
 func TestConvertChatResponseToResponses_Annotations(t *testing.T) {
-	Convey("ConvertChatResponseToResponses: message.annotations → output_text part.annotations", t, func() {
+	Convey("ConvertChatResponseToResponses: message.annotations → output_text part.annotations（P0-3：annotations/logprobs 恒必含）", t, func() {
 		annotations := []interface{}{
 			map[string]interface{}{
 				"type": "url_citation",
@@ -2852,7 +3100,7 @@ func TestConvertChatResponseToResponses_Annotations(t *testing.T) {
 			},
 		}
 
-		Convey("content 为 string → output_text part 携带 annotations", func() {
+		Convey("content 为 string → output_text part 携带 annotations + logprobs 空数组", func() {
 			chatResp := map[string]interface{}{
 				"id":      "chat_ann",
 				"created": 1700000000,
@@ -2871,7 +3119,7 @@ func TestConvertChatResponseToResponses_Annotations(t *testing.T) {
 			}
 			b, _ := json.Marshal(chatResp)
 
-			output := parseOutputArray(ConvertChatResponseToResponses(b, "gpt-test", false))
+			output := parseOutputArray(convRespRaw(b, "gpt-test", false))
 
 			So(len(output), ShouldEqual, 1)
 			msg := output[0].(map[string]interface{})
@@ -2879,9 +3127,10 @@ func TestConvertChatResponseToResponses_Annotations(t *testing.T) {
 			part := content[0].(map[string]interface{})
 			So(part["type"], ShouldEqual, "output_text")
 			So(part["annotations"], ShouldResemble, annotations)
+			So(part["logprobs"], ShouldResemble, []interface{}{})
 		})
 
-		Convey("content 为数组 → annotations 附加到首个文本 part", func() {
+		Convey("content 为数组 → 每个文本 part 恒有 annotations/logprobs（有 message.annotations 时挂到文本 part）", func() {
 			chatResp := map[string]interface{}{
 				"id":      "chat_ann2",
 				"created": 1700000000,
@@ -2903,19 +3152,20 @@ func TestConvertChatResponseToResponses_Annotations(t *testing.T) {
 			}
 			b, _ := json.Marshal(chatResp)
 
-			output := parseOutputArray(ConvertChatResponseToResponses(b, "gpt-test", false))
+			output := parseOutputArray(convRespRaw(b, "gpt-test", false))
 
 			msg := output[0].(map[string]interface{})
 			content := msg["content"].([]interface{})
 			So(len(content), ShouldEqual, 2)
 			first := content[0].(map[string]interface{})
-			So(first["type"], ShouldEqual, "text")
+			So(first["type"], ShouldEqual, "output_text")
 			So(first["annotations"], ShouldResemble, annotations)
-			_, hasSecond := content[1].(map[string]interface{})["annotations"]
-			So(hasSecond, ShouldBeFalse)
+			second := content[1].(map[string]interface{})
+			So(second["annotations"], ShouldResemble, annotations)
+			So(second["logprobs"], ShouldResemble, []interface{}{})
 		})
 
-		Convey("无 annotations → 行为不变（part 无 annotations 字段）", func() {
+		Convey("无 annotations → part 仍必含空 annotations/logprobs（responses §5）", func() {
 			chatResp := map[string]interface{}{
 				"id":      "chat_ann3",
 				"created": 1700000000,
@@ -2933,11 +3183,11 @@ func TestConvertChatResponseToResponses_Annotations(t *testing.T) {
 			}
 			b, _ := json.Marshal(chatResp)
 
-			output := parseOutputArray(ConvertChatResponseToResponses(b, "gpt-test", false))
+			output := parseOutputArray(convRespRaw(b, "gpt-test", false))
 			msg := output[0].(map[string]interface{})
 			part := msg["content"].([]interface{})[0].(map[string]interface{})
-			_, has := part["annotations"]
-			So(has, ShouldBeFalse)
+			So(part["annotations"], ShouldResemble, []interface{}{})
+			So(part["logprobs"], ShouldResemble, []interface{}{})
 		})
 	})
 }
@@ -2969,7 +3219,7 @@ func TestConvertChatResponseToResponses_Audio(t *testing.T) {
 		}
 		b, _ := json.Marshal(chatResp)
 
-		output := parseOutputArray(ConvertChatResponseToResponses(b, "gpt-test", false))
+		output := parseOutputArray(convRespRaw(b, "gpt-test", false))
 
 		So(len(output), ShouldEqual, 2)
 		So(output[0].(map[string]interface{})["type"], ShouldEqual, "message")
@@ -3002,7 +3252,7 @@ func TestConvertChatResponseToResponses_Audio(t *testing.T) {
 		}
 		b, _ := json.Marshal(chatResp)
 
-		output := parseOutputArray(ConvertChatResponseToResponses(b, "gpt-test", false))
+		output := parseOutputArray(convRespRaw(b, "gpt-test", false))
 
 		So(len(output), ShouldEqual, 2)
 		audioItem := output[1].(map[string]interface{})
@@ -3118,7 +3368,7 @@ func TestParseUsage_InputTokensKeepsCached(t *testing.T) {
 }
 
 func TestConvertChatResponseToResponsesWithContext_BuiltinToolShape(t *testing.T) {
-	Convey("非流式 chat→responses：builtin 工具输出与流式路径对齐（ts_/ws_ 前缀 + arguments 字符串 + execution 仅 tool_search）", t, func() {
+	Convey("非流式 chat→responses：builtin 工具输出与流式路径对齐（ts_/ws_ 前缀 + tool_search 对象 arguments / web_search 字符串 arguments + execution 仅 tool_search）", t, func() {
 		reqBody := []byte(`{
 			"model": "gpt-test",
 			"tools": [
@@ -3151,7 +3401,7 @@ func TestConvertChatResponseToResponsesWithContext_BuiltinToolShape(t *testing.T
 			}]
 		}`
 
-		result := ConvertChatResponseToResponsesWithContext([]byte(chatBody), "gpt-test", false, reqBody)
+		result := convRespCtxRaw([]byte(chatBody), "gpt-test", false, reqBody)
 		output := parseOutputArray(result)
 
 		So(len(output), ShouldEqual, 2)
@@ -3161,7 +3411,7 @@ func TestConvertChatResponseToResponsesWithContext_BuiltinToolShape(t *testing.T
 		So(ts["id"], ShouldEqual, "ts_call_ts_b1")
 		So(ts["call_id"], ShouldEqual, "call_ts_b1")
 		So(ts["name"], ShouldEqual, "tool_search")
-		So(ts["arguments"], ShouldEqual, `{"query":"codex"}`)
+		So(ts["arguments"], ShouldResemble, map[string]interface{}{"query": "codex"})
 		So(ts["execution"], ShouldEqual, "client")
 		So(ts["status"], ShouldEqual, "completed")
 
@@ -3177,7 +3427,147 @@ func TestConvertChatResponseToResponsesWithContext_BuiltinToolShape(t *testing.T
 	})
 }
 
+func TestConvertChatResponseToResponsesWithContext_ToolSearchCallArgumentsShape(t *testing.T) {
+	Convey("非流式 HTTP chat→responses：tool_search_call 的 arguments 是内嵌 JSON 对象，非法 JSON 回落字符串", t, func() {
+		reqBody := []byte(`{
+			"model": "gpt-test",
+			"tools": [
+				{"type": "tool_search", "name": "tool_search"}
+			]
+		}`)
+
+		Convey("arguments 为合法 JSON 对象 → 输出对象且 query 可取值", func() {
+			chatBody := `{
+				"id": "chat_ts_obj_ns",
+				"created": 1700000000,
+				"model": "gpt-test",
+				"choices": [{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						"tool_calls": [
+							{
+								"id": "call_ts_obj_ns",
+								"type": "function",
+								"function": {"name": "tool_search", "arguments": "{\"query\":\"x\"}"}
+							}
+						]
+					},
+					"finish_reason": "tool_calls"
+				}]
+			}`
+
+			result := convRespCtxRaw([]byte(chatBody), "gpt-test", false, reqBody)
+			output := parseOutputArray(result)
+			So(len(output), ShouldEqual, 1)
+			item := output[0].(map[string]interface{})
+			So(item["type"], ShouldEqual, "tool_search_call")
+			So(item["arguments"], ShouldResemble, map[string]interface{}{"query": "x"})
+			// 外层对象必须仍是合法 JSON（内嵌而非破坏）
+			So(gjson.Valid(string(result)), ShouldBeTrue)
+		})
+
+		Convey("arguments 为非 JSON → 回落字符串且外层 JSON 仍可解析", func() {
+			chatBody := `{
+				"id": "chat_ts_raw_ns",
+				"created": 1700000000,
+				"model": "gpt-test",
+				"choices": [{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						"tool_calls": [
+							{
+								"id": "call_ts_raw_ns",
+								"type": "function",
+								"function": {"name": "tool_search", "arguments": "not json"}
+							}
+						]
+					},
+					"finish_reason": "tool_calls"
+				}]
+			}`
+
+			result := convRespCtxRaw([]byte(chatBody), "gpt-test", false, reqBody)
+			output := parseOutputArray(result)
+			So(len(output), ShouldEqual, 1)
+			item := output[0].(map[string]interface{})
+			So(item["type"], ShouldEqual, "tool_search_call")
+			So(item["arguments"], ShouldEqual, "not json")
+			So(gjson.Valid(string(result)), ShouldBeTrue)
+		})
+
+		Convey("arguments 为 null → 回落字符串 \"null\" 而非 JSON null", func() {
+			chatBody := `{
+				"id": "chat_ts_null_ns",
+				"created": 1700000000,
+				"model": "gpt-test",
+				"choices": [{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						"tool_calls": [
+							{
+								"id": "call_ts_null_ns",
+								"type": "function",
+								"function": {"name": "tool_search", "arguments": "null"}
+							}
+						]
+					},
+					"finish_reason": "tool_calls"
+				}]
+			}`
+
+			result := convRespCtxRaw([]byte(chatBody), "gpt-test", false, reqBody)
+			output := parseOutputArray(result)
+			So(len(output), ShouldEqual, 1)
+			item := output[0].(map[string]interface{})
+			So(item["type"], ShouldEqual, "tool_search_call")
+			So(item["arguments"], ShouldEqual, "null")
+			So(gjson.Valid(string(result)), ShouldBeTrue)
+		})
+
+		Convey("arguments 为截断对象前缀 → 回落字符串且外层 JSON 仍可解析", func() {
+			chatBody := `{
+				"id": "chat_ts_trunc_ns",
+				"created": 1700000000,
+				"model": "gpt-test",
+				"choices": [{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						"tool_calls": [
+							{
+								"id": "call_ts_trunc_ns",
+								"type": "function",
+								"function": {"name": "tool_search", "arguments": "{\"query\":\"x"}
+							}
+						]
+					},
+					"finish_reason": "tool_calls"
+				}]
+			}`
+
+			result := convRespCtxRaw([]byte(chatBody), "gpt-test", false, reqBody)
+			output := parseOutputArray(result)
+			So(len(output), ShouldEqual, 1)
+			item := output[0].(map[string]interface{})
+			So(item["type"], ShouldEqual, "tool_search_call")
+			So(item["arguments"], ShouldEqual, `{"query":"x`)
+			So(gjson.Valid(string(result)), ShouldBeTrue)
+		})
+	})
+}
+
 func TestConvertInputToMessages_BuiltinFallbackCallIDPairing(t *testing.T) {
+	conveyCallID := func(msgs []interface{}, i int) string {
+		m := msgs[i].(map[string]interface{})
+		return m["tool_calls"].([]interface{})[0].(map[string]interface{})["id"].(string)
+	}
+	conveyOutID := func(msgs []interface{}, i int) string {
+		return msgs[i].(map[string]interface{})["tool_call_id"].(string)
+	}
+
 	Convey("builtin call/output 均缺 call_id → 确定性配对：连续两组同类两两配对且互不串对", t, func() {
 		input := []interface{}{
 			map[string]interface{}{"type": "tool_search_call", "arguments": `{"query":"q1"}`},
@@ -3189,57 +3579,50 @@ func TestConvertInputToMessages_BuiltinFallbackCallIDPairing(t *testing.T) {
 			map[string]interface{}{"type": "web_search_call", "arguments": `{"query":"q4"}`},
 			map[string]interface{}{"type": "web_search_call_output", "output": "o4"},
 		}
-		msgs := convertInputToMessages(input)
+		msgs, err := convertInputToMessages(input)
+		So(err, ShouldBeNil)
+		// call 与 output 交替，无相邻 call，可全部保持独立消息
 		So(len(msgs), ShouldEqual, 8)
 
-		callID := func(i int) string {
-			m := msgs[i].(map[string]interface{})
-			return m["tool_calls"].([]interface{})[0].(map[string]interface{})["id"].(string)
-		}
-		outID := func(i int) string {
-			return msgs[i].(map[string]interface{})["tool_call_id"].(string)
-		}
-
-		// 每组 call/output 精确配对
-		So(outID(1), ShouldEqual, callID(0))
-		So(outID(3), ShouldEqual, callID(2))
-		So(outID(5), ShouldEqual, callID(4))
-		So(outID(7), ShouldEqual, callID(6))
-		// 同类型两组互不串对
-		So(callID(4), ShouldNotEqual, callID(0))
-		So(callID(6), ShouldNotEqual, callID(2))
-		// 类型前缀隔离（ts_/ws_），跨类型不可能串对
-		So(strings.HasPrefix(callID(0), "ts_"), ShouldBeTrue)
-		So(strings.HasPrefix(callID(2), "ws_"), ShouldBeTrue)
-		So(strings.HasPrefix(outID(1), "ts_"), ShouldBeTrue)
+		So(conveyOutID(msgs, 1), ShouldEqual, conveyCallID(msgs, 0))
+		So(conveyOutID(msgs, 3), ShouldEqual, conveyCallID(msgs, 2))
+		So(conveyOutID(msgs, 5), ShouldEqual, conveyCallID(msgs, 4))
+		So(conveyOutID(msgs, 7), ShouldEqual, conveyCallID(msgs, 6))
+		So(conveyCallID(msgs, 4), ShouldNotEqual, conveyCallID(msgs, 0))
+		So(conveyCallID(msgs, 6), ShouldNotEqual, conveyCallID(msgs, 2))
+		So(strings.HasPrefix(conveyCallID(msgs, 0), "ts_"), ShouldBeTrue)
+		So(strings.HasPrefix(conveyCallID(msgs, 2), "ws_"), ShouldBeTrue)
+		So(strings.HasPrefix(conveyOutID(msgs, 1), "ts_"), ShouldBeTrue)
 	})
 
-	Convey("连续两个 call 后跟两个 output → 与最近一个未配对 call 配对（LIFO）", t, func() {
+	Convey("连续两个 call 后跟两个 output → calls 合并进同一 assistant.tool_calls[]（P1-5），output 仍与最近未配对 call LIFO", t, func() {
 		input := []interface{}{
 			map[string]interface{}{"type": "tool_search_call", "arguments": "{}"},
 			map[string]interface{}{"type": "tool_search_call", "arguments": "{}"},
 			map[string]interface{}{"type": "tool_search_call_output", "output": "a"},
 			map[string]interface{}{"type": "tool_search_call_output", "output": "b"},
 		}
-		msgs := convertInputToMessages(input)
-		So(len(msgs), ShouldEqual, 4)
-		id0 := msgs[0].(map[string]interface{})["tool_calls"].([]interface{})[0].(map[string]interface{})["id"].(string)
-		id1 := msgs[1].(map[string]interface{})["tool_calls"].([]interface{})[0].(map[string]interface{})["id"].(string)
-		id2 := msgs[2].(map[string]interface{})["tool_call_id"].(string)
-		id3 := msgs[3].(map[string]interface{})["tool_call_id"].(string)
-		So(id2, ShouldEqual, id1)
-		So(id3, ShouldEqual, id0)
+		msgs, err := convertInputToMessages(input)
+		So(err, ShouldBeNil)
+		So(len(msgs), ShouldEqual, 3)
+		tcs := msgs[0].(map[string]interface{})["tool_calls"].([]interface{})
+		So(len(tcs), ShouldEqual, 2)
+		id0 := tcs[0].(map[string]interface{})["id"].(string)
+		id1 := tcs[1].(map[string]interface{})["id"].(string)
+		So(id0, ShouldEqual, "ts_fb1")
+		So(id1, ShouldEqual, "ts_fb2")
+		So(msgs[1].(map[string]interface{})["tool_call_id"], ShouldEqual, id1)
+		So(msgs[2].(map[string]interface{})["tool_call_id"], ShouldEqual, id0)
 	})
 
-	Convey("孤立 output（无先行 fallback call）→ 确定性独立 id，不与后续 output 串对", t, func() {
+	Convey("孤立 output（无先行 call）→ 丢弃，不产出悬空 role:tool（P2-2）", t, func() {
 		input := []interface{}{
 			map[string]interface{}{"type": "tool_search_call_output", "output": "a"},
-			map[string]interface{}{"type": "tool_search_call_output", "output": "b"},
+			map[string]interface{}{"type": "web_search_call_output", "output": "b"},
 		}
-		msgs := convertInputToMessages(input)
-		So(len(msgs), ShouldEqual, 2)
-		So(msgs[0].(map[string]interface{})["tool_call_id"], ShouldEqual, "ts_fb1")
-		So(msgs[1].(map[string]interface{})["tool_call_id"], ShouldEqual, "ts_fb2")
+		msgs, err := convertInputToMessages(input)
+		So(err, ShouldBeNil)
+		So(len(msgs), ShouldEqual, 0)
 	})
 
 	Convey("两次独立转换结果逐字节一致 → 状态仅存活于单次转换，无跨请求残留", t, func() {
@@ -3249,8 +3632,10 @@ func TestConvertInputToMessages_BuiltinFallbackCallIDPairing(t *testing.T) {
 			map[string]interface{}{"type": "web_search_call", "arguments": "{}"},
 			map[string]interface{}{"type": "web_search_call_output", "output": "b"},
 		}
-		msgsA := convertInputToMessages(input)
-		msgsB := convertInputToMessages(input)
+		msgsA, errA := convertInputToMessages(input)
+		msgsB, errB := convertInputToMessages(input)
+		So(errA, ShouldBeNil)
+		So(errB, ShouldBeNil)
 		So(msgsA, ShouldResemble, msgsB)
 	})
 }
@@ -3264,8 +3649,8 @@ func TestConvertResponsesToChatRequest_BuiltinFallbackPairingEndToEnd(t *testing
 				map[string]interface{}{"type": "tool_search_call_output", "output": "res"},
 			},
 		})
-		out1 := ConvertResponsesToChatRequest("gpt-test", body, false)
-		out2 := ConvertResponsesToChatRequest("gpt-test", body, false)
+		out1 := convReqRaw("gpt-test", body, false)
+		out2 := convReqRaw("gpt-test", body, false)
 		So(string(out1), ShouldEqual, string(out2))
 
 		chatReq := parseChatRequest(out1)
@@ -3278,25 +3663,41 @@ func TestConvertResponsesToChatRequest_BuiltinFallbackPairingEndToEnd(t *testing
 }
 
 func TestConvertContentArray_UnknownBlockType(t *testing.T) {
-	Convey("未知 content block type → Warn 后跳过，不 panic 不产畸形条目", t, func() {
+	Convey("未知 content block type / role 矩阵违规 → 丢弃违规 part 并放行，保留可保留文本", t, func() {
 		content := []interface{}{
 			map[string]interface{}{"type": "input_text", "text": "hello"},
 			map[string]interface{}{"type": "input_video", "video_url": "https://example.com/v.mp4"},
 		}
-		result := convertContentArray(content, "user")
-		s, ok := result.(string)
-		So(ok, ShouldBeTrue)
-		So(s, ShouldEqual, "hello")
+		out, err := convertContentArray(content, "user")
+		So(err, ShouldBeNil)
+		So(out, ShouldEqual, "hello")
 
-		// 未知 type 与合法媒体共存：数组结果仅含已知合法 part
-		content2 := []interface{}{
-			map[string]interface{}{"type": "mystery_block", "payload": "x"},
+		// assistant 携带 image part 违反 chat §4 矩阵 → 丢弃，无剩余内容
+		content3 := []interface{}{map[string]interface{}{"type": "input_image", "image_url": "http://img"}}
+		out3, err3 := convertContentArray(content3, "assistant")
+		So(err3, ShouldBeNil)
+		So(out3, ShouldEqual, "")
+
+		// 正例：system/developer 允许纯 text part 数组（chat §4 矩阵正例）
+		content5 := []interface{}{map[string]interface{}{"type": "input_text", "text": "rules"}}
+		out5, err5 := convertContentArray(content5, "system")
+		So(err5, ShouldBeNil)
+		So(out5, ShouldEqual, "rules")
+		out6, err6 := convertContentArray(content5, "developer")
+		So(err6, ShouldBeNil)
+		So(out6, ShouldEqual, "rules")
+
+		// 正例：user 合法多模态组合完整保留
+		content4 := []interface{}{
+			map[string]interface{}{"type": "input_text", "text": "look"},
 			map[string]interface{}{"type": "input_image", "image_url": "http://img"},
 		}
-		arr, ok := convertContentArray(content2, "user").([]interface{})
+		out4, err4 := convertContentArray(content4, "user")
+		So(err4, ShouldBeNil)
+		parts, ok := out4.([]interface{})
 		So(ok, ShouldBeTrue)
-		So(len(arr), ShouldEqual, 1)
-		So(arr[0].(map[string]interface{})["type"], ShouldEqual, "image_url")
+		So(len(parts), ShouldEqual, 2)
+		So(parts[1].(map[string]interface{})["type"], ShouldEqual, "image_url")
 	})
 }
 
@@ -3312,7 +3713,8 @@ func TestConvertChatMessageToOutput_CustomToolCallVariant(t *testing.T) {
 				},
 			},
 		}
-		output := convertChatMessageToOutput(message, nil)
+		output, err := convertChatMessageToOutput(message, nil, "resp_test")
+		So(err, ShouldBeNil)
 		So(len(output), ShouldEqual, 1)
 		item := output[0].(map[string]interface{})
 		So(item["type"], ShouldEqual, "custom_tool_call")
@@ -3323,16 +3725,763 @@ func TestConvertChatMessageToOutput_CustomToolCallVariant(t *testing.T) {
 		So(item["status"], ShouldEqual, "completed")
 	})
 
-	Convey("畸形 custom（缺 name/input 或整段缺失）与无 function/custom 载荷 → 显式丢弃不 panic", t, func() {
-		message := map[string]interface{}{
-			"role": "assistant",
-			"tool_calls": []interface{}{
-				map[string]interface{}{"id": "call_bad1", "type": "custom", "custom": map[string]interface{}{"name": "only_name"}},
-				map[string]interface{}{"id": "call_bad2", "type": "custom"},
-				map[string]interface{}{"id": "call_bad3", "type": "mystery"},
-			},
+	Convey("P0-3: 畸形 custom（缺 name/input）与无 function/custom 载荷 → malformed_tool_call（不再静默丢弃）", t, func() {
+		badCases := []interface{}{
+			map[string]interface{}{"id": "call_bad1", "type": "custom", "custom": map[string]interface{}{"name": "only_name"}},
+			map[string]interface{}{"id": "call_bad2", "type": "custom"},
+			map[string]interface{}{"id": "call_bad3", "type": "mystery"},
 		}
-		output := convertChatMessageToOutput(message, nil)
-		So(output, ShouldHaveLength, 0)
+		for _, bad := range badCases {
+			message := map[string]interface{}{
+				"role":       "assistant",
+				"tool_calls": []interface{}{bad},
+			}
+			out, err := convertChatMessageToOutput(message, nil, "resp_test")
+			So(out, ShouldBeNil)
+			soPCE(err, relaymodel.CodeMalformedToolCall)
+		}
+	})
+}
+
+// =============================================================================
+// T6 契约测试（fix-plan-protocol-20260909.md Task T6 Test Contract）
+// =============================================================================
+
+// chatReqToolCall / chatReqMessage / chatReqWire 是转换产物（Chat 请求）的严格 wire 形状，
+// 配合 strictDecode（DisallowUnknownFields）锁定输出不含协议外字段（如已弃用 max_tokens）。
+type chatReqToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type chatReqMessage struct {
+	Role             string            `json:"role"`
+	Content          interface{}       `json:"content"`
+	ReasoningContent interface{}       `json:"reasoning_content"`
+	ToolCalls        []chatReqToolCall `json:"tool_calls"`
+	ToolCallID       string            `json:"tool_call_id"`
+}
+
+type chatReqWire struct {
+	Model               string           `json:"model"`
+	Messages            []chatReqMessage `json:"messages"`
+	Stream              bool             `json:"stream"`
+	MaxCompletionTokens int              `json:"max_completion_tokens"`
+	MaxTokens           *int             `json:"max_tokens"`
+	Temperature         *float64         `json:"temperature"`
+	TopP                *float64         `json:"top_p"`
+	User                string           `json:"user"`
+	Tools               []interface{}    `json:"tools"`
+	ToolChoice          interface{}      `json:"tool_choice"`
+	ParallelToolCalls   *bool            `json:"parallel_tool_calls"`
+	ReasoningEffort     string           `json:"reasoning_effort"`
+	ResponseFormat      interface{}      `json:"response_format"`
+	Verbosity           string           `json:"verbosity"`
+	Store               interface{}      `json:"store"`
+	Metadata            interface{}      `json:"metadata"`
+	Modalities          interface{}      `json:"modalities"`
+	ServiceTier         string           `json:"service_tier"`
+	Moderation          interface{}      `json:"moderation"`
+	PromptCacheKey      string           `json:"prompt_cache_key"`
+	PromptCacheOptions  interface{}      `json:"prompt_cache_options"`
+	SafetyIdentifier    string           `json:"safety_identifier"`
+	StreamOptions       interface{}      `json:"stream_options"`
+}
+
+func TestConvertResponsesToChatRequestCanonicalHistory(t *testing.T) {
+	Convey("G: 合法 instructions/developer/user multimodal/连续 function/custom call+output 请求 | W: ConvertResponsesToChatRequest | T: role 矩阵合法、并行 calls 合并、custom arguments 匹配 schema、max_completion_tokens", t, func() {
+		reqBody := []byte(`{
+			"model": "gpt-test",
+			"instructions": "be terse",
+			"max_output_tokens": 4096,
+			"temperature": 0.3,
+			"input": [
+				{"type": "message", "role": "developer", "content": "coding rules"},
+				{"type": "message", "role": "user", "content": [
+					{"type": "input_text", "text": "look"},
+					{"type": "input_image", "image_url": {"url": "http://x/i.png"}}
+				]},
+				{"type": "message", "role": "assistant", "content": "sure"},
+				{"type": "function_call", "call_id": "fc1", "name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
+				{"type": "function_call", "call_id": "fc2", "name": "lookup", "arguments": "{\"q\":\"x\"}"},
+				{"type": "function_call_output", "call_id": "fc1", "output": "sunny"},
+				{"type": "function_call_output", "call_id": "fc2", "output": "ok"},
+				{"type": "custom_tool_call", "call_id": "ct1", "name": "my_grammar", "input": "raw text"},
+				{"type": "custom_tool_call_output", "call_id": "ct1", "output": "applied"}
+			],
+			"tools": [
+				{"type": "function", "name": "get_weather", "description": "weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}},
+				{"type": "custom", "name": "my_grammar", "description": "grammar"},
+				{"type": "apply_patch", "description": "patch files"}
+			],
+			"parallel_tool_calls": true
+		}`)
+
+		out, err := ConvertResponsesToChatRequest("gpt-test", reqBody, false)
+		So(err, ShouldBeNil)
+
+		var wire chatReqWire
+		So(strictDecode(string(out), &wire), ShouldBeNil)
+
+		// P2-1：max_output_tokens → max_completion_tokens，不写已弃用 max_tokens
+		So(wire.MaxCompletionTokens, ShouldEqual, 4096)
+		So(wire.MaxTokens, ShouldBeNil)
+		So(wire.Stream, ShouldBeFalse)
+		So(wire.Model, ShouldEqual, "gpt-test")
+		So(*wire.ParallelToolCalls, ShouldBeTrue)
+
+		// role 矩阵：instructions→system；developer 保持 developer（§1.2 保护项）
+		So(len(wire.Messages), ShouldEqual, 9)
+		So(wire.Messages[0].Role, ShouldEqual, "system")
+		So(wire.Messages[0].Content, ShouldEqual, "be terse")
+		So(wire.Messages[1].Role, ShouldEqual, "developer")
+		So(wire.Messages[1].Content, ShouldEqual, "coding rules")
+		// user 多模态 → chat content parts 数组（text + image_url）
+		userParts, ok := wire.Messages[2].Content.([]interface{})
+		So(ok, ShouldBeTrue)
+		So(len(userParts), ShouldEqual, 2)
+		So(userParts[0].(map[string]interface{})["type"], ShouldEqual, "text")
+		So(userParts[1].(map[string]interface{})["type"], ShouldEqual, "image_url")
+		// assistant 文本
+		So(wire.Messages[3].Role, ShouldEqual, "assistant")
+		So(wire.Messages[3].Content, ShouldEqual, "sure")
+
+		// P1-5：连续 function_call 合并为同一 assistant message 的 tool_calls[]（顺序与 call_id 保持）
+		So(wire.Messages[4].Role, ShouldEqual, "assistant")
+		So(len(wire.Messages[4].ToolCalls), ShouldEqual, 2)
+		So(wire.Messages[4].ToolCalls[0].ID, ShouldEqual, "fc1")
+		So(wire.Messages[4].ToolCalls[0].Function.Name, ShouldEqual, "get_weather")
+		So(wire.Messages[4].ToolCalls[0].Function.Arguments, ShouldEqual, "{\"city\":\"SF\"}")
+		So(wire.Messages[4].ToolCalls[1].ID, ShouldEqual, "fc2")
+		// tool 输出边界后不再合并
+		So(wire.Messages[5].Role, ShouldEqual, "tool")
+		So(wire.Messages[5].ToolCallID, ShouldEqual, "fc1")
+		So(wire.Messages[6].Role, ShouldEqual, "tool")
+		So(wire.Messages[6].ToolCallID, ShouldEqual, "fc2")
+		// custom call 单独成条（前一条被 tool 边界隔开）
+		So(len(wire.Messages[7].ToolCalls), ShouldEqual, 1)
+		customArgs := wire.Messages[7].ToolCalls[0].Function.Arguments
+		So(wire.Messages[8].Role, ShouldEqual, "tool")
+		So(wire.Messages[8].ToolCallID, ShouldEqual, "ct1")
+
+		// P0-2：custom 历史 arguments 与声明的 {input:string} schema 可用同一校验通过
+		toolsByName := map[string]map[string]interface{}{}
+		for _, raw := range wire.Tools {
+			tm := raw.(map[string]interface{})
+			fn := tm["function"].(map[string]interface{})
+			toolsByName[fn["name"].(string)] = fn
+		}
+		grammarFn, has := toolsByName["my_grammar"]
+		So(has, ShouldBeTrue)
+		grammarParams := grammarFn["parameters"].(map[string]interface{})
+		So(grammarParams["type"], ShouldEqual, "object")
+		So(grammarParams["properties"].(map[string]interface{})["input"].(map[string]interface{})["type"], ShouldEqual, "string")
+		So(grammarParams["required"], ShouldResemble, []interface{}{"input"})
+		assertCustomArgumentsMatchInputSchema(customArgs, "raw text")
+		// apply_patch 类（DN-6 白名单）：主工具 + 5 代理子工具
+		for _, name := range []string{"apply_patch", "apply_patch_add_file", "apply_patch_delete_file", "apply_patch_update_file", "apply_patch_replace_file", "apply_patch_batch"} {
+			_, has := toolsByName[name]
+			So(has, ShouldBeTrue)
+		}
+	})
+}
+
+func TestConvertResponsesToChatRequestDropsUnmappableContext(t *testing.T) {
+	Convey("能力性不可映射上下文：字段/item/工具丢弃后仍完成转换；仅空 messages 维持 400", t, func() {
+
+		Convey("previous_response_id 非空 → 丢弃该字段，转换成功且输出不含该字段", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model":"gpt-test","input":"hi","previous_response_id":"resp_prev"}`), false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+			_, has := parseChatRequest(out)["previous_response_id"]
+			So(has, ShouldBeFalse)
+		})
+
+		Convey("service_tier ultrafast（DN-7）→ 丢弃该字段，转换成功且输出不含 service_tier", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model":"gpt-test","input":"hi","service_tier":"ultrafast"}`), false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+			_, has := parseChatRequest(out)["service_tier"]
+			So(has, ShouldBeFalse)
+		})
+
+		Convey("DN-6 白名单外 builtin 工具 → 丢弃工具，转换成功且输出无 tools", func() {
+			for _, body := range []string{
+				`{"model":"gpt-test","input":"hi","tools":[{"type":"web_search"}]}`,
+				`{"model":"gpt-test","input":"hi","tools":[{"type":"computer_use","display_width":1024}]}`,
+				`{"model":"gpt-test","input":"hi","tools":[{"type":"shell"}]}`,
+				`{"model":"gpt-test","input":"hi","tools":[{"type":"local_shell"}]}`,
+				`{"model":"gpt-test","input":"hi","tools":[{"type":"code_interpreter"}]}`,
+				`{"model":"gpt-test","input":"hi","tools":[{"type":"file_search","vector_store_ids":["vs_1"]}]}`,
+			} {
+				out, err := ConvertResponsesToChatRequest("gpt-test", []byte(body), false)
+				So(err, ShouldBeNil)
+				So(out, ShouldNotBeNil)
+				_, has := parseChatRequest(out)["tools"]
+				So(has, ShouldBeFalse)
+			}
+		})
+
+		Convey("item_reference / shell_call / computer_call 历史 item 丢弃；无其余上下文时 messages 为空仍 400", func() {
+			emptyCases := []string{
+				`{"model":"gpt-test","input":{"type":"item_reference","id":"itm_1"}}`,
+				`{"model":"gpt-test","input":[{"type":"item_reference","id":"itm_2"}]}`,
+				`{"model":"gpt-test","input":[{"type":"shell_call","call_id":"sh1","action":{"commands":["ls"]}}]}`,
+				`{"model":"gpt-test","input":[{"type":"computer_call","call_id":"cc1","action":{"type":"click"},"pending_safety_checks":[]}]}`,
+			}
+			for _, body := range emptyCases {
+				out, err := ConvertResponsesToChatRequest("gpt-test", []byte(body), false)
+				// 不是能力性拒绝，而是转换后无任何可发送消息（空 messages 无法执行）
+				So(out, ShouldBeNil)
+				soPCE(err, relaymodel.CodeUnsupportedMapping)
+			}
+		})
+
+		Convey("item_reference 与合法消息混排 → 仅丢弃引用 item，转换成功且合法消息保留", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model":"gpt-test","input":[{"type":"message","role":"user","content":"hi"},{"type":"item_reference","id":"itm_2"}]}`), false)
+			So(err, ShouldBeNil)
+			messages := parseChatRequest(out)["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			So(messages[0].(map[string]interface{})["content"], ShouldEqual, "hi")
+		})
+
+		Convey("DN-7 其余交集枚举原样透传", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model":"gpt-test","input":"hi","service_tier":"priority"}`), false)
+			So(err, ShouldBeNil)
+			So(parseChatRequest(out)["service_tier"], ShouldEqual, "priority")
+		})
+
+		Convey("invalid_source_json：请求体非合法 JSON", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model": `), false)
+			So(out, ShouldBeNil)
+			soPCE(err, relaymodel.CodeInvalidSourceJSON)
+		})
+	})
+
+	Convey("降级保留路径（DN-5）：reasoning content block 数组进 assistant.reasoning_content；phase 丢标记留文本", t, func() {
+		Convey("reasoning content block 数组读出文本进 reasoning_content（修复 content 数组读不出即整项丢弃 bug）", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "message", "role": "user", "content": "continue"},
+					{"type": "reasoning", "summary": [], "content": [
+						{"type": "reasoning_text", "text": "step one"},
+						{"type": "reasoning_text", "text": "step two"}
+					]}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", reqBody, false)
+			So(err, ShouldBeNil)
+			messages := parseChatRequest(out)["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 2)
+			reasoningMsg := messages[1].(map[string]interface{})
+			So(reasoningMsg["role"], ShouldEqual, "assistant")
+			So(reasoningMsg["reasoning_content"], ShouldEqual, "step one\nstep two")
+			_, hasContent := reasoningMsg["content"]
+			So(hasContent, ShouldBeFalse)
+		})
+
+		Convey("summary 与 content 同时存在 → 两者完整读取按序拼接", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "reasoning",
+					 "summary": [{"type":"summary_text","text":"sum line"}],
+					 "content": [{"type":"reasoning_text","text":"body line"}]}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", reqBody, false)
+			So(err, ShouldBeNil)
+			messages := parseChatRequest(out)["messages"].([]interface{})
+			So(messages[0].(map[string]interface{})["reasoning_content"], ShouldEqual, "sum line\nbody line")
+		})
+
+		Convey("assistant message phase → 丢标记保留文本，不拒绝请求", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "message", "role": "assistant", "content": [{"type":"output_text","text":"interim note"}], "phase": "commentary"}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", reqBody, false)
+			So(err, ShouldBeNil)
+			messages := parseChatRequest(out)["messages"].([]interface{})
+			msg := messages[0].(map[string]interface{})
+			So(msg["role"], ShouldEqual, "assistant")
+			So(msg["content"], ShouldEqual, "interim note")
+			_, hasPhase := msg["phase"]
+			So(hasPhase, ShouldBeFalse)
+		})
+
+		Convey("agent_message phase → 同样丢标记留文本", func() {
+			reqBody := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "agent_message", "id": "am_9", "phase": "finalAnswer", "content": [{"type":"text","text":"final answer text"}]}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", reqBody, false)
+			So(err, ShouldBeNil)
+			messages := parseChatRequest(out)["messages"].([]interface{})
+			msg := messages[0].(map[string]interface{})
+			So(msg["content"], ShouldEqual, "final answer text")
+			_, hasPhase := msg["phase"]
+			So(hasPhase, ShouldBeFalse)
+		})
+	})
+}
+
+func TestConvertChatResponseToResponsesProducesCompleteResponseAndItems(t *testing.T) {
+	Convey("G: 合法 Chat response 含 text/refusal/reasoning/tool 和 usage | W: converter | T: Response object、message/reasoning required fields、output_text arrays 全完整且 SDK-shape 可解码", t, func() {
+		originalReq := []byte(`{
+			"model": "gpt-test",
+			"instructions": "be terse",
+			"temperature": 0.5,
+			"store": false,
+			"modalities": ["text"],
+			"text": {"format": {"type": "text"}},
+			"user": "u-1",
+			"service_tier": "default",
+			"max_output_tokens": 512,
+			"parallel_tool_calls": true,
+			"tool_choice": "auto",
+			"reasoning": {"effort": "low"},
+			"tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+		}`)
+		chatResp := `{
+			"id": "chatcmpl_t6",
+			"object": "chat.completion",
+			"created": 1700000000,
+			"model": "gpt-test-x",
+			"choices": [{
+				"index": 0,
+				"message": {
+					"role": "assistant",
+					"content": "hello",
+					"refusal": "not that",
+					"reasoning_content": "deep thought",
+					"tool_calls": [
+						{"id": "call_t6", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"}}
+					]
+				},
+				"finish_reason": "tool_calls",
+				"logprobs": null
+			}],
+			"usage": {
+				"prompt_tokens": 11,
+				"completion_tokens": 7,
+				"total_tokens": 18,
+				"prompt_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 2},
+				"completion_tokens_details": {"reasoning_tokens": 4}
+			}
+		}`
+
+		out, err := ConvertChatResponseToResponsesWithContext([]byte(chatResp), "gpt-test", false, originalReq)
+		So(err, ShouldBeNil)
+
+		// 顶层对象必须能按 Responses §4 wire model 严格解码（无协议外键），object 恒为 response
+		var wire relaymodel.ResponsesResponse
+		So(strictDecode(string(out), &wire), ShouldBeNil)
+		So(wire.Object, ShouldEqual, "response")
+		So(wire.ID, ShouldEqual, "chatcmpl_t6")
+		So(wire.Created, ShouldEqual, int64(1700000000))
+		So(wire.Status, ShouldEqual, "completed")
+		So(wire.Error, ShouldBeNil)
+		So(wire.IncompleteDetails, ShouldBeNil)
+		// model 优先使用调用方传入模型（既有口径）
+		So(wire.Model, ShouldEqual, "gpt-test")
+		// 回显原请求字段
+		So(wire.Instructions, ShouldEqual, "be terse")
+		So(wire.ServiceTier, ShouldEqual, "default")
+		So(wire.User, ShouldEqual, "u-1")
+		So(wire.MaxOutputTokens != nil && *wire.MaxOutputTokens == 512, ShouldBeTrue)
+		So(wire.ParallelToolCalls, ShouldBeTrue)
+		So(wire.PreviousID == nil, ShouldBeTrue)
+
+		// usage details 必填恒存在（§6，§1.2 已确认映射）
+		So(wire.Usage.InputTokens, ShouldEqual, 11)
+		So(wire.Usage.OutputTokens, ShouldEqual, 7)
+		So(wire.Usage.TotalTokens, ShouldEqual, 18)
+		So(wire.Usage.InputTokensDetails != nil && wire.Usage.InputTokensDetails.CachedTokens == 3, ShouldBeTrue)
+		So(wire.Usage.InputTokensDetails.CacheWriteTokens == 2, ShouldBeTrue)
+		So(wire.Usage.OutputTokensDetails != nil && wire.Usage.OutputTokensDetails.ReasoningTokens == 4, ShouldBeTrue)
+
+		var top map[string]interface{}
+		So(json.Unmarshal(out, &top), ShouldBeNil)
+		_, hasErr := top["error"]
+		So(hasErr, ShouldBeTrue)
+		_, hasIncomplete := top["incomplete_details"]
+		So(hasIncomplete, ShouldBeTrue)
+
+		output := top["output"].([]interface{})
+		// 顺序：reasoning → message → function_call（既有顺序保护）
+		So(len(output), ShouldEqual, 3)
+		reasoning := output[0].(map[string]interface{})
+		So(reasoning["type"], ShouldEqual, "reasoning")
+		So(reasoning["id"], ShouldEqual, "rs_chatcmpl_t6_0")
+		So(reasoning["status"], ShouldEqual, "completed")
+		summary := reasoning["summary"].([]interface{})
+		So(summary[0].(map[string]interface{})["type"], ShouldEqual, "summary_text")
+		So(summary[0].(map[string]interface{})["text"], ShouldEqual, "deep thought")
+
+		msg := output[1].(map[string]interface{})
+		So(msg["type"], ShouldEqual, "message")
+		So(msg["id"], ShouldEqual, "msg_chatcmpl_t6_1")
+		So(msg["role"], ShouldEqual, "assistant")
+		So(msg["status"], ShouldEqual, "completed")
+		parts := msg["content"].([]interface{})
+		So(len(parts), ShouldEqual, 2)
+		textPart := parts[0].(map[string]interface{})
+		So(textPart["type"], ShouldEqual, "output_text")
+		So(textPart["text"], ShouldEqual, "hello")
+		// P0-3：output_text 必含 annotations 与 logprobs 数组
+		So(textPart["annotations"], ShouldResemble, []interface{}{})
+		So(textPart["logprobs"], ShouldResemble, []interface{}{})
+		refusalPart := parts[1].(map[string]interface{})
+		So(refusalPart["type"], ShouldEqual, "refusal")
+		So(refusalPart["refusal"], ShouldEqual, "not that")
+
+		fc := output[2].(map[string]interface{})
+		So(fc["type"], ShouldEqual, "function_call")
+		So(fc["id"], ShouldEqual, "fc_call_t6")
+		So(fc["call_id"], ShouldEqual, "call_t6")
+		So(fc["name"], ShouldEqual, "get_weather")
+		So(fc["arguments"], ShouldEqual, "{\"city\":\"SF\"}")
+		So(fc["status"], ShouldEqual, "completed")
+	})
+}
+
+func TestConvertChatResponseToResponsesRejectsMalformedJSONAndToolCall(t *testing.T) {
+	Convey("G: 畸形 JSON 或缺 id/name 的 tool call | W: converter | T: 返回 error，不返回源载荷或畸形 output_item", t, func() {
+		Convey("非法 JSON → invalid_source_json，不原样返回源载荷", func() {
+			out, err := ConvertChatResponseToResponses([]byte(`{"id": `), "gpt-test", false)
+			So(out, ShouldBeNil)
+			soPCE(err, relaymodel.CodeInvalidSourceJSON)
+		})
+
+		Convey("顶层 JSON 非 object（数组）→ invalid_source_json", func() {
+			out, err := ConvertChatResponseToResponses([]byte(`["chat"]`), "gpt-test", false)
+			So(out, ShouldBeNil)
+			soPCE(err, relaymodel.CodeInvalidSourceJSON)
+		})
+
+		malformed := []struct {
+			name string
+			call map[string]interface{}
+		}{
+			{"missing id", map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "f", "arguments": "{}"}}},
+			{"missing name", map[string]interface{}{"id": "c1", "type": "function", "function": map[string]interface{}{"arguments": "{}"}}},
+			{"missing arguments", map[string]interface{}{"id": "c1", "type": "function", "function": map[string]interface{}{"name": "f"}}},
+			{"empty-string arguments", map[string]interface{}{"id": "c1", "type": "function", "function": map[string]interface{}{"name": "f", "arguments": ""}}},
+			{"custom missing input", map[string]interface{}{"id": "c1", "type": "custom", "custom": map[string]interface{}{"name": "n"}}},
+			{"no function/custom payload", map[string]interface{}{"id": "c1", "type": "mystery"}},
+		}
+		for _, m := range malformed {
+			Convey("tool call "+m.name+" → malformed_tool_call", func() {
+				chatResp := map[string]interface{}{
+					"id":      "chat_bad",
+					"created": 1700000000,
+					"model":   "gpt-test",
+					"choices": []interface{}{
+						map[string]interface{}{
+							"index": 0,
+							"message": map[string]interface{}{
+								"role":       "assistant",
+								"tool_calls": []interface{}{m.call},
+							},
+							"finish_reason": "tool_calls",
+						},
+					},
+				}
+				body, _ := json.Marshal(chatResp)
+				out, err := ConvertChatResponseToResponses(body, "gpt-test", false)
+				// 不得返回源载荷，也不得产出畸形 output_item
+				So(out, ShouldBeNil)
+				soPCE(err, relaymodel.CodeMalformedToolCall)
+			})
+		}
+	})
+}
+
+// TestConvertResponsesToChatRequestDropsResponsesOnlyTopLevelFields 锁定能力性丢弃策略：
+// responses §2 合法专有顶层字段（include/background/max_tool_calls/prompt/truncation/
+// conversation/context_management）在本网关 Chat 上游无表达 —— 非缺省出现时丢弃该字段并记
+// warn 日志，请求继续完成转换（不再 unsupported_mapping 400）。
+func TestConvertResponsesToChatRequestDropsResponsesOnlyTopLevelFields(t *testing.T) {
+	Convey("7 个 Responses 专有顶层字段非缺省 → 逐字段丢弃且转换成功，输出不含该字段", t, func() {
+		dropCases := []struct {
+			name  string
+			key   string
+			value string
+		}{
+			{"include 返回内容策略", "include", `["file_search_call.results"]`},
+			{"background true（启用后台执行）", "background", "true"},
+			{"background object 配置", "background", `{"mode":"async"}`},
+			{"max_tool_calls 正数", "max_tool_calls", "5"},
+			{"max_tool_calls 0（显式配置意图）", "max_tool_calls", "0"},
+			{"prompt", "prompt", `"sys prompt"`},
+			{"truncation disabled（偏离默认 auto）", "truncation", `"disabled"`},
+			{"truncation object 配置", "truncation", `{"max_tokens":100}`},
+			{"conversation 会话上下文组装", "conversation", `{"id":"conv_1"}`},
+			{"context_management", "context_management", `{"strategy":"compact"}`},
+		}
+		for _, tc := range dropCases {
+			Convey(tc.name, func() {
+				body := `{"model":"gpt-test","input":"hi","` + tc.key + `":` + tc.value + `}`
+				out, err := ConvertResponsesToChatRequest("gpt-test", []byte(body), false)
+				So(err, ShouldBeNil)
+				So(out, ShouldNotBeNil)
+				chatReq := parseChatRequest(out)
+				_, has := chatReq[tc.key]
+				So(has, ShouldBeFalse)
+				// 其余请求内容不受影响
+				So(chatReq["model"], ShouldEqual, "gpt-test")
+			})
+		}
+	})
+
+	Convey("缺省/协议默认形态放行（不误杀未携带字段）", t, func() {
+		Convey("完全未携带 7 字段", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model":"gpt-test","input":"hi"}`), false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+		})
+
+		Convey("显式协议默认值与 null：truncation=auto（§2 默认截断策略）、background=false（默认前台执行）、空 include/prompt、其余 null", func() {
+			out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model":"gpt-test","input":"hi",
+				"truncation":"auto","background":false,"include":[],"prompt":"",
+				"conversation":null,"context_management":null,"max_tool_calls":null}`), false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+		})
+	})
+}
+
+// TestConvertResponsesToChatRequest_CodexIncludeEncryptedContent 锁定线上事故回归：
+// codex CLI 每个 /v1/responses 请求恒带 include=["reasoning.encrypted_content"]，路由到 chat 型
+// 上游时必须丢弃 include 并成功产出合法 chat 请求，不得 400。
+func TestConvertResponsesToChatRequest_CodexIncludeEncryptedContent(t *testing.T) {
+	Convey("真实 codex CLI 形态：include=[reasoning.encrypted_content] → 丢弃 include，转换成功且产出合法 chat 请求", t, func() {
+		body := []byte(`{
+			"model": "gpt-test",
+			"stream": true,
+			"include": ["reasoning.encrypted_content"],
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+			],
+			"tools": [{"type": "function", "name": "shell", "description": "run shell", "parameters": {"type": "object", "properties": {}}}],
+			"tool_choice": "auto"
+		}`)
+		out, err := ConvertResponsesToChatRequest("gpt-test", body, true)
+		So(err, ShouldBeNil)
+		So(out, ShouldNotBeNil)
+
+		chatReq := parseChatRequest(out)
+		_, hasInclude := chatReq["include"]
+		So(hasInclude, ShouldBeFalse)
+		So(chatReq["model"], ShouldEqual, "gpt-test")
+		So(chatReq["stream"], ShouldEqual, true)
+		messages := chatReq["messages"].([]interface{})
+		So(len(messages), ShouldEqual, 1)
+		So(messages[0].(map[string]interface{})["role"], ShouldEqual, "user")
+		tools := chatReq["tools"].([]interface{})
+		So(len(tools), ShouldEqual, 1)
+		So(chatReq["tool_choice"], ShouldEqual, "auto")
+	})
+}
+
+// assertNoOrphanToolMessages 跨链路断言（chat §3.1/§6.1.1 配对约束）：
+// 产物中每个 role:tool 消息的 tool_call_id 都必须能在某条 assistant.tool_calls[].id 中找到，
+// 否则即为丢弃 call item 后遗留的悬空引用。
+func assertNoOrphanToolMessages(chatReq map[string]interface{}) {
+	emitted := map[string]bool{}
+	messages, _ := chatReq["messages"].([]interface{})
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "assistant" {
+			continue
+		}
+		tcs, _ := msg["tool_calls"].([]interface{})
+		for _, rawTC := range tcs {
+			tc, ok := rawTC.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if id, _ := tc["id"].(string); id != "" {
+				emitted[id] = true
+			}
+		}
+	}
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "tool" {
+			continue
+		}
+		id, _ := msg["tool_call_id"].(string)
+		So(emitted[id], ShouldBeTrue)
+	}
+}
+
+// TestConvertResponsesToChatRequest_DroppedCallPairingIntegrity 锁定 P1-1/P2-2：
+// call item 因结构性缺失被丢弃后，其配对 output 不得产出无 assistant.tool_calls 配对的 role:tool。
+func TestConvertResponsesToChatRequest_DroppedCallPairingIntegrity(t *testing.T) {
+	Convey("P1-1: 丢弃 call item 后不得遗留悬空 role:tool 消息", t, func() {
+		Convey("坏 function_call（缺 call_id）被丢弃 → 其 function_call_output 一并丢弃", func() {
+			body := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "message", "role": "user", "content": "hi"},
+					{"type": "function_call", "name": "get_weather", "arguments": "{}"},
+					{"type": "function_call_output", "call_id": "fc_bad", "output": "sunny"}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", body, false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+			chatReq := parseChatRequest(out)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			So(messages[0].(map[string]interface{})["role"], ShouldEqual, "user")
+			assertNoOrphanToolMessages(chatReq)
+		})
+
+		Convey("仅 function_call_output（call 从未产出）→ 丢弃，无孤儿 tool 消息", func() {
+			body := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "message", "role": "user", "content": "hi"},
+					{"type": "function_call_output", "call_id": "fc_orphan", "output": "sunny"}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", body, false)
+			So(err, ShouldBeNil)
+			chatReq := parseChatRequest(out)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			assertNoOrphanToolMessages(chatReq)
+		})
+
+		Convey("坏 custom_tool_call（缺 name）被丢弃 → 其 custom_tool_call_output 一并丢弃", func() {
+			body := []byte(`{
+				"model": "gpt-test",
+				"input": [
+					{"type": "message", "role": "user", "content": "hi"},
+					{"type": "custom_tool_call", "call_id": "cc_bad", "input": "raw"},
+					{"type": "custom_tool_call_output", "call_id": "cc_bad", "output": "applied"}
+				]
+			}`)
+			out, err := ConvertResponsesToChatRequest("gpt-test", body, false)
+			So(err, ShouldBeNil)
+			chatReq := parseChatRequest(out)
+			messages := chatReq["messages"].([]interface{})
+			So(len(messages), ShouldEqual, 1)
+			assertNoOrphanToolMessages(chatReq)
+		})
+	})
+
+	Convey("P2-2: 孤立 builtin output（无先行 call）→ 丢弃，无孤儿 tool 消息", t, func() {
+		body := []byte(`{
+			"model": "gpt-test",
+			"input": [
+				{"type": "message", "role": "user", "content": "hi"},
+				{"type": "web_search_output", "call_id": "ws_orphan", "output": {"results": []}}
+			]
+		}`)
+		out, err := ConvertResponsesToChatRequest("gpt-test", body, false)
+		So(err, ShouldBeNil)
+		So(out, ShouldNotBeNil)
+		chatReq := parseChatRequest(out)
+		messages := chatReq["messages"].([]interface{})
+		So(len(messages), ShouldEqual, 1)
+		So(messages[0].(map[string]interface{})["role"], ShouldEqual, "user")
+		assertNoOrphanToolMessages(chatReq)
+	})
+}
+
+// TestConvertResponsesToChatRequest_ToolFieldsWithoutSurvivingTools 锁定 P1-2/P2-1：
+// tools 声明存在但转换后存活集为空（如 DN-6 白名单外工具全被丢弃）时，依赖工具集的
+// tool_choice / parallel_tool_calls 不得写入，auto/none 等效缺省可保留。
+func TestConvertResponsesToChatRequest_ToolFieldsWithoutSurvivingTools(t *testing.T) {
+	allToolsDroppedBody := func(extra map[string]interface{}) []byte {
+		req := map[string]interface{}{
+			"model": "gpt-test",
+			"input": "go",
+			"tools": []interface{}{map[string]interface{}{"type": "web_search"}},
+		}
+		for k, v := range extra {
+			req[k] = v
+		}
+		b, _ := json.Marshal(req)
+		return b
+	}
+
+	Convey("P1-2: 工具全被丢弃 → 依赖工具集的 tool_choice 形态丢弃，不写入", t, func() {
+		for _, tc := range []interface{}{
+			"required",
+			map[string]interface{}{"type": "custom", "custom": map[string]interface{}{"name": "x"}},
+			map[string]interface{}{"type": "allowed_tools", "mode": "auto", "tools": []interface{}{}},
+		} {
+			out, err := ConvertResponsesToChatRequest("gpt-test", allToolsDroppedBody(map[string]interface{}{"tool_choice": tc}), false)
+			So(err, ShouldBeNil)
+			So(out, ShouldNotBeNil)
+			chatReq := parseChatRequest(out)
+			_, hasTools := chatReq["tools"]
+			So(hasTools, ShouldBeFalse)
+			_, hasChoice := chatReq["tool_choice"]
+			So(hasChoice, ShouldBeFalse)
+		}
+	})
+
+	Convey("P1-2: 工具全被丢弃 → auto 等效上游缺省，保留写出", t, func() {
+		out, err := ConvertResponsesToChatRequest("gpt-test", allToolsDroppedBody(map[string]interface{}{"tool_choice": "auto"}), false)
+		So(err, ShouldBeNil)
+		chatReq := parseChatRequest(out)
+		_, hasTools := chatReq["tools"]
+		So(hasTools, ShouldBeFalse)
+		So(chatReq["tool_choice"], ShouldEqual, "auto")
+	})
+
+	Convey("P1-2: 无 tools 声明时沿用既有门槛，tool_choice 不写入", t, func() {
+		out, err := ConvertResponsesToChatRequest("gpt-test", []byte(`{"model":"gpt-test","input":"go","tool_choice":"auto"}`), false)
+		So(err, ShouldBeNil)
+		_, has := parseChatRequest(out)["tool_choice"]
+		So(has, ShouldBeFalse)
+	})
+
+	Convey("P2-1: 工具全被丢弃 → parallel_tool_calls 不写入", t, func() {
+		for _, v := range []bool{true, false} {
+			out, err := ConvertResponsesToChatRequest("gpt-test", allToolsDroppedBody(map[string]interface{}{"parallel_tool_calls": v}), false)
+			So(err, ShouldBeNil)
+			chatReq := parseChatRequest(out)
+			_, hasTools := chatReq["tools"]
+			So(hasTools, ShouldBeFalse)
+			_, hasPTC := chatReq["parallel_tool_calls"]
+			So(hasPTC, ShouldBeFalse)
+		}
+	})
+
+	Convey("正常路径回归：工具存活时 tool_choice/parallel_tool_calls 照旧写入", t, func() {
+		body := []byte(`{
+			"model": "gpt-test",
+			"input": "go",
+			"tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}],
+			"tool_choice": "required",
+			"parallel_tool_calls": true
+		}`)
+		out, err := ConvertResponsesToChatRequest("gpt-test", body, false)
+		So(err, ShouldBeNil)
+		chatReq := parseChatRequest(out)
+		So(chatReq["tool_choice"], ShouldEqual, "required")
+		So(chatReq["parallel_tool_calls"], ShouldEqual, true)
 	})
 }

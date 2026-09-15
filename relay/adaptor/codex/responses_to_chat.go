@@ -2,16 +2,68 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/pai801/myapi/common/logger"
+	relaymodel "github.com/pai801/myapi/relay/model"
 )
 
-func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream bool) []byte {
+// errRequest/errResponse 构造共享协议错误（契约 §1.3）：请求侧方向 responses_request_to_chat，
+// 响应侧方向 chat_response_to_responses；Code 只取稳定机器码。
+func errRequest(code, path, message string) *relaymodel.ProtocolConversionError {
+	var cause error
+	if message != "" {
+		cause = errors.New(message)
+	}
+	return &relaymodel.ProtocolConversionError{Code: code, Direction: relaymodel.DirectionResponsesRequestToChat, Path: path, Cause: cause}
+}
+
+func errResponse(code, path string, cause error) *relaymodel.ProtocolConversionError {
+	return &relaymodel.ProtocolConversionError{Code: code, Direction: relaymodel.DirectionChatResponseToResponses, Path: path, Cause: cause}
+}
+
+// warnDropped 记录 responses→chat 转换中"能力性不可映射"字段/item 的丢弃。
+// 策略：确实无法映射的字段/item 丢弃并继续转换，不再以 unsupported_mapping 400 拒绝整个请求。
+func warnDropped(path, reason string) {
+	logger.Log.Warnf("[responses→chat dropped] path=%s reason=%s", path, reason)
+}
+
+// infoDropped 记录良性降级字段的丢弃日志，格式与 warnDropped 一致但走 Info 级。
+// 仅用于丢弃后不产生模型行为偏移的字段（如 include：只影响上游多回传字段），
+// 避免 codex CLI 每请求恒带的 include=["reasoning.encrypted_content"] 刷屏；真隐患字段仍 warnDropped。
+func infoDropped(path, reason string) {
+	logger.Log.Infof("[responses→chat dropped] path=%s reason=%s", path, reason)
+}
+
+// withRequestPath 在 convertInputToMessages 已知数组下标时把泛化路径 "input" 细化为 "input[i]"。
+func withRequestPath(err error, path string) error {
+	pce, ok := err.(*relaymodel.ProtocolConversionError)
+	if !ok {
+		return err
+	}
+	if pce.Path == "" || pce.Path == "input" {
+		return &relaymodel.ProtocolConversionError{Code: pce.Code, Direction: pce.Direction, Path: path, Cause: pce.Cause}
+	}
+	return err
+}
+
+// ConvertResponsesToChatRequest 把 Responses 请求转换为 Chat Completions 请求。
+// 能力性不可映射的字段/item（responses 专有顶层字段、未知/上下文 item、仅 encrypted_content 的
+// reasoning item、role×part 矩阵违规、DN-6 白名单外内置工具、DN-7 ultrafast 档位等）一律丢弃
+// 对应字段/item 并记 warn 日志后继续转换，不再 unsupported_mapping 400 —— 目标是让
+// responses→chat 转换完成，确实转不了的字段接受丢弃。
+// 仅三类结构性/不可执行情形维持错误：非法 JSON（invalid_source_json）、source shape 非法
+// （invalid_source_shape）、转换后 messages 为空（无法执行，仍 unsupported_mapping 400）。
+func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	var req map[string]interface{}
 	if err := json.Unmarshal(inputRawJSON, &req); err != nil {
-		return inputRawJSON
+		return nil, errRequest(relaymodel.CodeInvalidSourceJSON, "", "responses request body is not valid JSON")
+	}
+	if req == nil {
+		return nil, errRequest(relaymodel.CodeInvalidSourceShape, "", "responses request body must be a JSON object")
 	}
 
 	chatReq := map[string]interface{}{
@@ -26,8 +78,9 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 		}
 	}
 
+	// P2-1：max_output_tokens → max_completion_tokens（chat §2.1 推荐字段），不再写已弃用的 max_tokens
 	if v, ok := req["max_output_tokens"].(float64); ok {
-		chatReq["max_tokens"] = int(v)
+		chatReq["max_completion_tokens"] = int(v)
 	}
 	if v, ok := req["temperature"].(float64); ok {
 		chatReq["temperature"] = v
@@ -39,34 +92,118 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 		chatReq["user"] = v
 	}
 
-	if instructions, ok := req["instructions"].(string); ok && instructions != "" {
-		messages := chatReq["messages"].([]interface{})
-		messages = append(messages, map[string]interface{}{
-			"role":    "system",
-			"content": instructions,
-		})
-		chatReq["messages"] = messages
+	// DN-7：responses §2 service_tier 含 ultrafast 而 chat §2.2 枚举不含，且该档位在本网关 Chat 上游
+	// 无落地路径 —— 丢弃该字段并告警（不再 400），其余交集枚举原样透传。
+	droppedUltrafastTier := false
+	if tier, ok := req["service_tier"].(string); ok && tier == "ultrafast" {
+		warnDropped("service_tier", `service_tier "ultrafast" is not supported by this gateway's Chat upstream; field dropped`)
+		droppedUltrafastTier = true
+	}
+
+	// previous_response_id 指向网关侧不可解析的历史 response 上下文：无法映射到 chat，丢弃并告警
+	//（不再拒绝整个请求）。
+	if prev, ok := req["previous_response_id"].(string); ok && prev != "" {
+		warnDropped("previous_response_id", "previous_response_id context cannot be resolved by this gateway; field dropped")
+	}
+
+	// include/background/max_tool_calls/prompt/truncation/conversation/context_management 均为
+	// responses §2 合法专有字段，但本网关 Chat 上游无对应表达 —— 非缺省出现一律丢弃并告警，
+	// 缺省/未携带不告警（无信息丢失）。字段本身不在下方透传白名单内，故"丢弃"即不写入 chat 请求。
+	for _, key := range []string{
+		"include", "background", "max_tool_calls", "prompt",
+		"truncation", "conversation", "context_management",
+	} {
+		if v, ok := req[key]; ok && !responsesOnlyFieldIsDefault(key, v) {
+			reason := fmt.Sprintf("responses field %q is not at its protocol default and cannot be expressed on this gateway's Chat upstream; field dropped", key)
+			if key == "include" {
+				// 日志降噪：include 只影响上游多回传字段，丢弃无模型行为偏移，按良性降级记 Info。
+				infoDropped(key, reason)
+				continue
+			}
+			warnDropped(key, reason)
+		}
+	}
+
+	if raw, ok := req["instructions"]; ok {
+		instructions, ok2 := raw.(string)
+		if !ok2 {
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, "instructions", "instructions must be a string")
+		}
+		if instructions != "" {
+			messages := chatReq["messages"].([]interface{})
+			messages = append(messages, map[string]interface{}{
+				"role":    "system",
+				"content": instructions,
+			})
+			chatReq["messages"] = messages
+		}
 	}
 
 	if input, ok := req["input"]; ok {
 		messages := chatReq["messages"].([]interface{})
-		inputMessages := convertInputToMessages(input)
+		inputMessages, err := convertInputToMessages(input)
+		if err != nil {
+			return nil, err
+		}
 		chatReq["messages"] = append(messages, inputMessages...)
 	}
 
+	// chat §2 要求 messages ≥1：解析不出任何消息（input 为空或全部无信息）时不得继续发送空上下文请求。
+	// 注意：这不是能力性字段丢弃，而是请求根本无法执行（无任何可发送的对话上下文），故仍显式拒绝。
+	if msgs, _ := chatReq["messages"].([]interface{}); len(msgs) == 0 {
+		return nil, errRequest(relaymodel.CodeUnsupportedMapping, "input", "responses request resolves to an empty chat messages list")
+	}
+
 	mergedTools := mergeResponseTools(req)
+	var survivingToolNames map[string]struct{}
+	survivingToolsNonEmpty := false
 	if len(mergedTools) > 0 {
-		chatReq["tools"] = convertToolsToOpenAI(mergedTools)
+		tools, err := convertToolsToOpenAI(mergedTools)
+		if err != nil {
+			return nil, err
+		}
+		// 即使全部工具被丢弃也记录（空集合）：tool_choice 不得指向已不存在的工具。
+		survivingToolNames = collectChatToolNames(tools)
+		if len(tools) > 0 {
+			chatReq["tools"] = tools
+			survivingToolsNonEmpty = true
+		}
 	}
 
 	if v, ok := req["tool_choice"]; ok {
-		if len(mergedTools) > 0 {
-			chatReq["tool_choice"] = convertToolChoice(v)
+		switch {
+		case survivingToolsNonEmpty:
+			tc, err := convertToolChoice(v, survivingToolNames)
+			if err != nil {
+				return nil, err
+			}
+			// tc == nil 表示 tool_choice 形态在 chat 不可表达或其目标工具已被丢弃：
+			// 丢弃整个 tool_choice（等效上游缺省 auto），不写入 chat 请求。
+			if tc != nil {
+				chatReq["tool_choice"] = tc
+			}
+		case len(mergedTools) > 0:
+			// P1-2：声明了工具但转换后全部被丢弃（存活集为空）时，required/custom/allowed_tools
+			// 必须绑定工具集，写入即悬空引用 —— 丢弃并告警；auto/none 等效上游缺省，可保留写出。
+			// 未声明任何工具（mergedTools 为空）时沿用既有门槛：不写 tool_choice。
+			if toolChoiceRequiresTools(v) {
+				warnDropped("tool_choice", "no surviving tools to bind tool_choice; tool_choice dropped")
+			} else {
+				tc, err := convertToolChoice(v, survivingToolNames)
+				if err != nil {
+					return nil, err
+				}
+				if tc != nil {
+					chatReq["tool_choice"] = tc
+				}
+			}
 		}
 	}
 
 	if v, ok := req["parallel_tool_calls"].(bool); ok {
-		if len(mergedTools) > 0 {
+		// P2-1：parallel_tool_calls 仅在有存活工具时有语义；存活集为空时不写入，
+		// 避免与缺失的 tools 形成悬空声明。
+		if survivingToolsNonEmpty {
 			chatReq["parallel_tool_calls"] = v
 		}
 	}
@@ -128,65 +265,176 @@ func ConvertResponsesToChatRequest(modelName string, inputRawJSON []byte, stream
 
 	// 顶层字段直通（responses §2 → chat §2 同名字段，保持请求原值）：
 	// store/metadata/modalities/service_tier/moderation 见 chat §2.2；prompt_cache_key/prompt_cache_options/safety_identifier 见 chat §2.4。
-	// service_tier 枚举差异：responses §2 含 ultrafast 而 chat §2.2 枚举不含，仍原值直通（是否支持由上游裁决，不臆造映射）。
+	// service_tier：ultrafast 已在上方按 DN-7 丢弃，其余交集枚举透传。
 	// moderation 结构两份文档均未展开，原值直通（结构不兼容时上游会显式报错，优于静默丢弃）。
-	// 无 chat 对应、维持丢弃的字段：previous_response_id/include/background/max_tool_calls/prompt/truncation/conversation/context_management。
+	// previous_response_id 与 include/background/max_tool_calls/prompt/truncation/conversation/
+	// context_management 无 chat 对应：非缺省值已在上方按丢弃策略告警，字段本体不写入。
 	for _, key := range []string{
 		"store", "metadata", "modalities", "service_tier", "moderation",
 		"prompt_cache_key", "prompt_cache_options", "safety_identifier",
 	} {
+		if key == "service_tier" && droppedUltrafastTier {
+			continue
+		}
 		if v, ok := req[key]; ok && v != nil {
 			chatReq[key] = v
 		}
 	}
 
-	result, _ := json.Marshal(chatReq)
-	return result
+	result, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, errRequest(relaymodel.CodeInvalidSourceShape, "", "marshal converted chat request failed")
+	}
+	return result, nil
+}
+
+// responsesOnlyFieldIsDefault 判定 Responses §2 专有顶层字段（本网关 Chat 上游无表达）的取值
+// 是否等同协议缺省；缺省形态无信息丢失、不告警，非缺省形态由调用方告警丢弃：
+//   - truncation：§2 上下文截断配置，协议默认 "auto"（自动截断保窗口）。显式 "auto" 等同缺省；
+//     其余形态（如 "disabled" 或对象配置）改变截断策略 → 非缺省。
+//   - background：§2 后台处理配置，协议默认 false（前台执行）。显式 false 不改变执行模型，
+//     按缺省处理；true/对象形态启用后台执行 → 非缺省。
+//   - include/prompt：空数组/空串等同未携带（include 无额外返回字段、prompt 无提示词引用）。
+//   - max_tool_calls/conversation/context_management：null 等同未携带；任何非 null 值
+//     （含 max_tool_calls=0 的显式配置意图）均为非缺省。
+func responsesOnlyFieldIsDefault(key string, v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	switch key {
+	case "truncation":
+		s, ok := v.(string)
+		return ok && s == "auto"
+	case "background":
+		b, ok := v.(bool)
+		return ok && !b
+	case "include":
+		arr, ok := v.([]interface{})
+		return ok && len(arr) == 0
+	case "prompt":
+		str, ok := v.(string)
+		return ok && str == ""
+	default: // max_tool_calls/conversation/context_management：非 nil 即显式配置
+		return false
+	}
 }
 
 // convertToolChoice 把 responses 协议 tool_choice 转成 chat 协议形状（responses §2 → chat §5.2）：
 // "auto"/"none"/"required" 字符串两协议同形，直通；
 // responses 的 {"type":"function","name":"xxx"} 需嵌套为 {"type":"function","function":{"name":"xxx"}}；
-// "指定 tool id" 字符串形态（responses §2）：function:<name> 可映射为 chat function 强制调用形状，
-// 其余字符串（指向 custom/mcp/web_search 等工具）chat §5.2 无对应表达 → 显式降级 auto + Warn（与本文件
-// reasoning_effort 未识别值兜底同一处置模式），禁止静默透传上游必然 400 的非法形状；
-// 其他对象形式（custom/allowed_tools 等）默认已是 chat 形状，原样直通。
-func convertToolChoice(v interface{}) interface{} {
+// 已是 chat 嵌套形状的 {type:function, function:{name}} 原样直通（幂等）；
+// 形态在 chat §5.2 不可表达（tool id 字符串、未知对象 type、function 缺 name），或目标 function
+// 工具已被 DN-6 丢弃时返回 (nil, nil) 表示丢弃整个 tool_choice（等效上游缺省 auto）并记 warn 日志。
+// survivingToolNames 为已转换成功的 chat function 名集合；nil 表示不校验目标存在性。
+// 仅 tool_choice 既非字符串也非对象时返回 invalid_source_shape。
+func convertToolChoice(v interface{}, survivingToolNames map[string]struct{}) (interface{}, error) {
 	if s, ok := v.(string); ok {
 		switch s {
 		case "auto", "none", "required":
-			return v
+			return v, nil
 		}
 		if name := strings.TrimPrefix(s, "function:"); name != s && name != "" {
+			if !toolNameSurvives(survivingToolNames, name) {
+				warnDropped("tool_choice", fmt.Sprintf("tool_choice targets dropped tool %q; tool_choice dropped", name))
+				return nil, nil
+			}
 			return map[string]interface{}{
 				"type": "function",
 				"function": map[string]interface{}{
 					"name": name,
 				},
-			}
+			}, nil
 		}
-		logger.Log.Warnf("downgrade responses tool_choice string with no chat tool_choice equivalent to auto: %q", s)
-		return "auto"
+		warnDropped("tool_choice", fmt.Sprintf("tool_choice %q (tool id reference) has no chat §5.2 equivalent; tool_choice dropped", s))
+		return nil, nil
 	}
 	if m, ok := v.(map[string]interface{}); ok {
-		if t, _ := m["type"].(string); t == "function" {
+		t, _ := m["type"].(string)
+		switch t {
+		case "function":
 			if name, ok := m["name"].(string); ok && name != "" {
+				if !toolNameSurvives(survivingToolNames, name) {
+					warnDropped("tool_choice", fmt.Sprintf("tool_choice targets dropped tool %q; tool_choice dropped", name))
+					return nil, nil
+				}
 				return map[string]interface{}{
 					"type": "function",
 					"function": map[string]interface{}{
 						"name": name,
 					},
+				}, nil
+			}
+			if fn, ok := m["function"].(map[string]interface{}); ok {
+				if name, ok := fn["name"].(string); ok && name != "" {
+					if !toolNameSurvives(survivingToolNames, name) {
+						warnDropped("tool_choice", fmt.Sprintf("tool_choice targets dropped tool %q; tool_choice dropped", name))
+						return nil, nil
+					}
+					// 已是 chat 嵌套形状，原样直通
+					return v, nil
 				}
 			}
+			warnDropped("tool_choice", "function tool_choice missing required name; tool_choice dropped")
+			return nil, nil
+		case "custom", "allowed_tools":
+			// chat §5.2 同形变体，直通
+			return v, nil
+		default:
+			warnDropped("tool_choice", fmt.Sprintf("tool_choice type %q has no chat §5.2 equivalent; tool_choice dropped", t))
+			return nil, nil
 		}
 	}
-	return v
+	return nil, errRequest(relaymodel.CodeInvalidSourceShape, "tool_choice", "tool_choice must be a string or an object")
 }
 
-func convertInputToMessages(input interface{}) []interface{} {
+// toolChoiceRequiresTools 判定 tool_choice 形态是否必须绑定现存工具集才可写入 chat 请求：
+// "required"（强制调用某工具）与 custom/allowed_tools 对象都指向工具集合，无存活工具时为悬空引用。
+// auto/none 及 function 目标形态不在此列：auto/none 等同上游缺省，function 目标由 convertToolChoice
+// 按存活工具名集合校验并丢弃。
+func toolChoiceRequiresTools(v interface{}) bool {
+	if s, ok := v.(string); ok {
+		return s == "required"
+	}
+	if m, ok := v.(map[string]interface{}); ok {
+		t, _ := m["type"].(string)
+		return t == "custom" || t == "allowed_tools"
+	}
+	return false
+}
+
+// toolNameSurvives 判定 tool_choice 指向的 function 名是否仍存在于已转换的 chat tools；
+// survivingToolNames 为 nil 表示不校验（直接调用/无 tools 场景）。
+func toolNameSurvives(survivingToolNames map[string]struct{}, name string) bool {
+	if survivingToolNames == nil {
+		return true
+	}
+	_, ok := survivingToolNames[name]
+	return ok
+}
+
+// collectChatToolNames 收集 chat tools 的 function 名，供 tool_choice 目标存在性校验。
+func collectChatToolNames(tools []interface{}) map[string]struct{} {
+	names := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		toolMap, ok := tool.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := toolMap["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := fn["name"].(string); name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
+}
+
+func convertInputToMessages(input interface{}) ([]interface{}, error) {
 	var messages []interface{}
-	// 本次转换（= 单次请求）内的 builtin 工具 fallback call_id 配对状态，见 builtinFallbackCallIDPairer 注释
-	pairer := newBuiltinFallbackCallIDPairer()
+	// 本次转换（= 单次请求）内的 call_id 配对状态，见 inputConversionState 注释
+	state := newInputConversionState()
 
 	switch v := input.(type) {
 	case string:
@@ -195,19 +443,81 @@ func convertInputToMessages(input interface{}) []interface{} {
 			"content": v,
 		})
 	case []interface{}:
-		for _, item := range v {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				if msg := convertInputItem(itemMap, pairer); msg != nil {
-					messages = append(messages, msg)
+		for i, item := range v {
+			itemMap, ok := item.(map[string]interface{})
+			if !ok {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, fmt.Sprintf("input[%d]", i), "input item must be a JSON object")
+			}
+			msg, err := convertInputItem(itemMap, state)
+			if err != nil {
+				return nil, withRequestPath(err, fmt.Sprintf("input[%d]", i))
+			}
+			if msg != nil {
+				messages = append(messages, msg)
+			}
+		}
+	default:
+		// 顶层 input 为 object（ItemReference，responses §2/§3.8）等非 string/array 形态时，
+		// 网关无法解析其引用的历史上下文 —— 丢弃并告警，不再拒绝整个请求。
+		warnDropped("input", "top-level input object/ItemReference cannot be resolved by this gateway; input dropped")
+	}
+
+	// P1-5：同一阶段连续的 function call items 合并为一个 assistant message 的 tool_calls[]
+	return mergeAdjacentFunctionCalls(messages)
+}
+
+// mergeAdjacentFunctionCalls 把相邻的纯函数调用 assistant 消息合并（responses §3.2 → chat §3.1/§6.1.1）：
+// chat 协议要求同一输出阶段的并行调用落在同一 assistant message 的 tool_calls[] 内，保持顺序与 call_id；
+// 一旦遇到 tool 输出消息、普通内容消息或 reasoning 消息即视为阶段边界，之后的 call 开新消息。
+func mergeAdjacentFunctionCalls(messages []interface{}) ([]interface{}, error) {
+	out := make([]interface{}, 0, len(messages))
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]interface{})
+		if !ok {
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "converted message must be a JSON object")
+		}
+		tcs, isCall := pureToolCallContent(msg)
+		if !isCall {
+			out = append(out, msg)
+			continue
+		}
+		if len(out) > 0 {
+			if prev, ok := out[len(out)-1].(map[string]interface{}); ok {
+				if prevTcs, prevIsCall := pureToolCallContent(prev); prevIsCall {
+					prev["tool_calls"] = append(prevTcs, tcs...)
+					continue
 				}
 			}
 		}
+		merged := make([]interface{}, len(tcs))
+		copy(merged, tcs)
+		out = append(out, map[string]interface{}{
+			"role":       "assistant",
+			"tool_calls": merged,
+		})
 	}
-
-	return messages
+	return out, nil
 }
 
-func convertInputItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
+// pureToolCallContent 判定纯函数调用 assistant 消息（仅 role+tool_calls，无 content/reasoning_content）。
+func pureToolCallContent(msg map[string]interface{}) ([]interface{}, bool) {
+	if role, _ := msg["role"].(string); role != "assistant" {
+		return nil, false
+	}
+	if _, hasContent := msg["content"]; hasContent {
+		return nil, false
+	}
+	if _, hasReasoning := msg["reasoning_content"]; hasReasoning {
+		return nil, false
+	}
+	tcs, ok := msg["tool_calls"].([]interface{})
+	if !ok || len(tcs) == 0 {
+		return nil, false
+	}
+	return tcs, true
+}
+
+func convertInputItem(item map[string]interface{}, state *inputConversionState) (map[string]interface{}, error) {
 	itemType, _ := item["type"].(string)
 	if itemType == "" {
 		if _, hasRole := item["role"]; hasRole {
@@ -219,96 +529,187 @@ func convertInputItem(item map[string]interface{}, pairer *builtinFallbackCallID
 	case "message":
 		return convertMessageItem(item)
 	case "function_call":
-		return convertFunctionCallItem(item)
+		msg, err := convertFunctionCallItem(item)
+		if err != nil {
+			return nil, err
+		}
+		state.markToolCallsEmitted(msg)
+		return msg, nil
 	case "function_call_output":
-		return convertFunctionCallOutputItem(item)
+		return convertFunctionCallOutputItem(item, state)
 	case "custom_tool_call":
-		return convertCustomToolCallItem(item)
+		msg, err := convertCustomToolCallItem(item)
+		if err != nil {
+			return nil, err
+		}
+		state.markToolCallsEmitted(msg)
+		return msg, nil
 	case "custom_tool_call_output":
-		return convertCustomToolCallOutputItem(item)
+		return convertCustomToolCallOutputItem(item, state)
 	case "agent_message":
 		return convertAgentMessageItem(item)
 	case "reasoning":
 		return convertReasoningItem(item)
 	case "tool_search_call":
-		return convertToolSearchCallItem(item, pairer)
+		msg := convertToolSearchCallItem(item, state.pairerOrNew())
+		state.markToolCallsEmitted(msg)
+		return msg, nil
 	case "tool_search_call_output", "tool_search_output":
-		return convertToolSearchCallOutputItem(item, pairer)
+		return convertToolSearchCallOutputItem(item, state), nil
 	case "web_search_call":
-		return convertWebSearchCallItem(item, pairer)
+		msg := convertWebSearchCallItem(item, state.pairerOrNew())
+		state.markToolCallsEmitted(msg)
+		return msg, nil
 	case "web_search_call_output", "web_search_output":
-		return convertWebSearchCallOutputItem(item, pairer)
-	case "file_search_call", "computer_call", "computer_call_output",
-		"local_shell_call", "local_shell_call_output",
-		"shell_call", "shell_call_output",
-		"apply_patch_call", "apply_patch_call_output",
-		"code_interpreter_call", "image_generation_call",
-		"mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "mcp_call",
-		"additional_tools", "configuration_update",
-		"compaction", "compaction_trigger", "item_reference",
-		"program", "program_output":
-		// responses §3.8 已知但不可映射的 item 类型：chat 协议 §3 消息仅
-		// system/developer/user/assistant/tool/function 六种角色，调用型/会话管理型/MCP 链路 item 均无对应表达。
-		// 已知不可映射 → Info 记录后丢弃，不 Errorf 误报（codex 历史上下文带回这些 item 属正常情况）。
-		logger.Log.Infof("drop known unmappable codex input item type (no chat message equivalent): %q", itemType)
-		return nil
+		return convertWebSearchCallOutputItem(item, state), nil
 	default:
-		logger.Log.Errorf("unknown codex input item type: %q", itemType)
-		return nil
+		// item_reference、§3.8 其余内置调用型 item 及未知类型均无 chat 表达：丢弃该 item 并告警，
+		// 保留同一请求中其余可转换历史，不再拒绝整个请求。
+		warnDropped(itemType, "input item type has no chat representation; item dropped")
+		return nil, nil
 	}
 }
 
-func convertReasoningItem(item map[string]interface{}) map[string]interface{} {
-	summary, _ := item["summary"].([]interface{})
+// convertReasoningItem 转换 reasoning item（responses §3.4）。
+// P1-2/DN-5：summary 与 content 都是 block 数组，两者必须完整读取；推理文本经 Chat 扩展字段
+// assistant.reasoning_content 继续传递（显式降级策略，非静默 —— 由契约测试锁定为预期行为）。
+func convertReasoningItem(item map[string]interface{}) (map[string]interface{}, error) {
 	var parts []string
-	for _, raw := range summary {
-		part, ok := raw.(map[string]interface{})
+
+	if raw, ok := item["summary"]; ok && raw != nil {
+		blocks, ok := raw.([]interface{})
 		if !ok {
-			continue
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "reasoning.summary must be a content block array (responses §3.4)")
 		}
-		if partType, _ := part["type"].(string); partType != "summary_text" {
-			continue
-		}
-		if text, ok := part["text"].(string); ok && text != "" {
-			parts = append(parts, text)
+		for _, b := range blocks {
+			bm, ok := b.(map[string]interface{})
+			if !ok {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "reasoning summary block must be a JSON object")
+			}
+			bt, _ := bm["type"].(string)
+			if bt != "summary_text" {
+				warnDropped("reasoning", fmt.Sprintf("reasoning summary block type %q is not summary_text (responses §3.4); block dropped", bt))
+				continue
+			}
+			text, ok := bm["text"].(string)
+			if !ok {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "reasoning summary_text block missing string field text")
+			}
+			if text != "" {
+				parts = append(parts, text)
+			}
 		}
 	}
+
+	if raw, ok := item["content"]; ok && raw != nil {
+		switch v := raw.(type) {
+		case string:
+			// 兼容 codex 客户端把 content 作为原始字符串的既有形态（回归锁定），协议标准形态为 block 数组
+			if v != "" {
+				parts = append(parts, v)
+			}
+		case []interface{}:
+			for _, b := range v {
+				bm, ok := b.(map[string]interface{})
+				if !ok {
+					return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "reasoning content block must be a JSON object")
+				}
+				bt, _ := bm["type"].(string)
+				if bt != "reasoning_text" {
+					warnDropped("reasoning", fmt.Sprintf("reasoning content block type %q is not reasoning_text (responses §3.4); block dropped", bt))
+					continue
+				}
+				text, ok := bm["text"].(string)
+				if !ok {
+					return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "reasoning_text block missing string field text")
+				}
+				if text != "" {
+					parts = append(parts, text)
+				}
+			}
+		default:
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "reasoning.content must be a content block array (responses §3.4)")
+		}
+	}
+
 	if len(parts) == 0 {
-		if content, ok := item["content"].(string); ok && content != "" {
-			parts = append(parts, content)
+		// 仅剩 encrypted_content 的 reasoning item 在 Chat 协议无任何表达 —— 丢弃该 item 并告警
+		//（保留同一请求其余历史），不再拒绝整个请求。
+		if enc, ok := item["encrypted_content"].(string); ok && enc != "" {
+			warnDropped("reasoning", "encrypted reasoning item (encrypted_content only) cannot be expressed on the Chat side; item dropped")
+			return nil, nil
 		}
+		// summary/content 均无文本的空 reasoning：无信息可丢失，跳过不产出空 assistant 消息
+		return nil, nil
 	}
-	if len(parts) == 0 {
-		return nil
-	}
+
 	return map[string]interface{}{
 		"role":              "assistant",
 		"reasoning_content": strings.Join(parts, "\n"),
-	}
+	}, nil
 }
 
-func convertAgentMessageItem(item map[string]interface{}) map[string]interface{} {
-	content, _ := item["content"].([]interface{})
+// convertAgentMessageItem 转换 codex 扩展 agent_message（responses §3.9）：语义固定 assistant 撰写，
+// 文本块接受 text/input_text/output_text（真实 codex CLI 流量块类型为 input_text，接受口径与
+// convertMessageItem 的 message 转换对齐）；另外 encrypted_content 块在多 agent 派发链路上承载
+// NEW_TASK/FINAL_ANSWER 的明文载荷（表头在 input_text 块、正文在此块），对其 encrypted_content
+// 字符串字段按文本保留，否则子 agent 只剩 Payload: 空表头、看不到任务正文。其余未知类型块丢弃。
+// phase/memory_citation/delivery/questions 在 chat 无表达 —— DN-5 决议：丢弃标记、保留文本，
+// 不得拒绝整个请求（显式降级由测试锁定）。
+func convertAgentMessageItem(item map[string]interface{}) (map[string]interface{}, error) {
 	var parts []string
-	for _, raw := range content {
-		block, ok := raw.(map[string]interface{})
+	if raw, ok := item["content"]; ok && raw != nil {
+		blocks, ok := raw.([]interface{})
 		if !ok {
-			continue
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "agent_message.content must be a text block array (responses §3.9)")
 		}
-		if blockType, _ := block["type"].(string); blockType != "text" {
-			continue
-		}
-		if text, ok := block["text"].(string); ok && text != "" {
-			parts = append(parts, text)
+		for _, b := range blocks {
+			bm, ok := b.(map[string]interface{})
+			if !ok {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "agent_message content block must be a JSON object")
+			}
+			bt, _ := bm["type"].(string)
+			if bt == "" {
+				// 无 type 的块若携带非空 string encrypted_content，说明是裸载荷形态（真实链路存在），
+				// 直接按 encrypted_content 保留；否则归一为 input_text，维持既有归一/丢弃/硬失败路径。
+				if text, ok := bm["encrypted_content"].(string); ok && text != "" {
+					parts = append(parts, text)
+					continue
+				}
+				bt = "input_text"
+			}
+			if bt == "encrypted_content" {
+				// 真实 codex CLI 多 agent 派发把任务正文明文放在该字段（见函数注释）；缺失/非字符串/空串
+				// 时无信息可保留，维持丢弃口径。
+				text, ok := bm["encrypted_content"].(string)
+				if !ok || text == "" {
+					warnDropped("agent_message", "agent_message encrypted_content block missing non-empty string field encrypted_content; block dropped")
+					continue
+				}
+				parts = append(parts, text)
+				continue
+			}
+			if bt != "text" && bt != "input_text" && bt != "output_text" {
+				warnDropped("agent_message", fmt.Sprintf("agent_message content block type %q is not a text block (responses §3.9); block dropped", bt))
+				continue
+			}
+			text, ok := bm["text"].(string)
+			if !ok {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "agent_message text block missing string field text")
+			}
+			if text != "" {
+				parts = append(parts, text)
+			}
 		}
 	}
 	if len(parts) == 0 {
-		return nil
+		// 无文本的 agent_message 不携带信息，跳过（既有回归锁定：空 content 丢弃且不报错）
+		return nil, nil
 	}
 	return map[string]interface{}{
 		"role":    "assistant",
 		"content": strings.Join(parts, "\n"),
-	}
+	}, nil
 }
 
 // builtinFallbackCallIDPairer 为缺 call_id 的 builtin 工具 call/output item（tool_search/web_search）
@@ -336,7 +737,8 @@ func (p *builtinFallbackCallIDPairer) nextCallID(idPrefix string) string {
 	return id
 }
 
-// standaloneCallID 只生成确定性 id、不登记配对：孤立 output 用之，避免被后续 output 错配。
+// standaloneCallID 只生成确定性递增 id、不登记配对：供 nextCallID 构造 fallback id，
+// 孤立 output 不再使用（无配对即丢弃，见 inputConversionState）。
 func (p *builtinFallbackCallIDPairer) standaloneCallID(idPrefix string) string {
 	p.counters[idPrefix]++
 	return idPrefix + "fb" + fmt.Sprintf("%d", p.counters[idPrefix])
@@ -358,27 +760,92 @@ func (p *builtinFallbackCallIDPairer) takePending(idPrefix string) (string, bool
 	return id, true
 }
 
+// inputConversionState 承载单次 convertInputToMessages 调用的配对状态（单请求转换，禁止跨请求残留）：
+//   - pairer：缺 call_id 的 builtin 工具 call/output 的确定性 fallback 配对；
+//   - emittedCallIDs：本次转换已成功产出为 assistant.tool_calls[].id 的 call_id 全集。
+//
+// emittedCallIDs 用于消除悬空引用（P1-1/P2-2）：chat §3.1/§6.1.1 要求 role:tool 消息的 tool_call_id
+// 必须紧跟对应 assistant.tool_calls[].id；call item 因缺 call_id/name 等被丢弃后，若其配对的
+// *_call_output 仍产出 role:tool，转换产物即为非法 chat 请求。故所有 output item 写入前校验
+// call_id 已被登记，未登记则丢弃并告警。
+type inputConversionState struct {
+	pairer         *builtinFallbackCallIDPairer
+	emittedCallIDs map[string]struct{}
+}
+
+func newInputConversionState() *inputConversionState {
+	return &inputConversionState{
+		pairer:         newBuiltinFallbackCallIDPairer(),
+		emittedCallIDs: make(map[string]struct{}),
+	}
+}
+
+// pairerOrNew 返回 builtin fallback 配对器；state 为 nil（防御直接调用/独立单测）时临时新建。
+func (s *inputConversionState) pairerOrNew() *builtinFallbackCallIDPairer {
+	if s == nil || s.pairer == nil {
+		return newBuiltinFallbackCallIDPairer()
+	}
+	return s.pairer
+}
+
+// markToolCallsEmitted 登记 call item 产出的 assistant.tool_calls[].id（msg 为 nil 时不动作）。
+func (s *inputConversionState) markToolCallsEmitted(msg map[string]interface{}) {
+	if s == nil || msg == nil {
+		return
+	}
+	tcs, ok := msg["tool_calls"].([]interface{})
+	if !ok {
+		return
+	}
+	if s.emittedCallIDs == nil {
+		s.emittedCallIDs = make(map[string]struct{})
+	}
+	for _, raw := range tcs {
+		tc, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if id, _ := tc["id"].(string); id != "" {
+			s.emittedCallIDs[id] = struct{}{}
+		}
+	}
+}
+
+// callEmitted 判定 call_id 是否已在本次转换中作为 assistant.tool_calls[].id 产出。
+// state 为 nil（防御直接调用/独立单测）时视为不校验，返回 true。
+func (s *inputConversionState) callEmitted(callID string) bool {
+	if s == nil {
+		return true
+	}
+	_, ok := s.emittedCallIDs[callID]
+	return ok
+}
+
 func convertToolSearchCallItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
 	return convertBuiltinToolCallItem(item, "tool_search", "ts_", pairer)
 }
 
-func convertToolSearchCallOutputItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
-	return convertBuiltinToolCallOutputItem(item, "ts_", pairer)
+func convertToolSearchCallOutputItem(item map[string]interface{}, state *inputConversionState) map[string]interface{} {
+	return convertBuiltinToolCallOutputItem(item, "ts_", state)
 }
 
 func convertWebSearchCallItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
 	return convertBuiltinToolCallItem(item, "web_search", "ws_", pairer)
 }
 
-func convertWebSearchCallOutputItem(item map[string]interface{}, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
-	return convertBuiltinToolCallOutputItem(item, "ws_", pairer)
+func convertWebSearchCallOutputItem(item map[string]interface{}, state *inputConversionState) map[string]interface{} {
+	return convertBuiltinToolCallOutputItem(item, "ws_", state)
 }
 
 // convertBuiltinToolCallItem 转换 builtin 工具 call item。
-// 契约：pairer 由 convertInputToMessages 构造并沿调用链透传，必须非 nil——call/output 共享同一实例才能配对。
+// 契约：pairer 由 convertInputToMessages 构造并沿调用链透传；缺 call_id 且 pairer 为 nil 时
+// 兜底新建（局部配对，不 panic），仅防御直接调用。
 func convertBuiltinToolCallItem(item map[string]interface{}, name, idPrefix string, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
 	callID, _ := item["call_id"].(string)
 	if callID == "" {
+		if pairer == nil {
+			pairer = newBuiltinFallbackCallIDPairer()
+		}
 		callID = pairer.nextCallID(idPrefix)
 	}
 	args := getStringOrJSONRaw(item["arguments"])
@@ -402,17 +869,21 @@ func convertBuiltinToolCallItem(item map[string]interface{}, name, idPrefix stri
 }
 
 // convertBuiltinToolCallOutputItem 转换 builtin 工具 output item。
-// 契约：pairer 非 nil（与 convertBuiltinToolCallItem 同一实例，见其注释）。
-func convertBuiltinToolCallOutputItem(item map[string]interface{}, idPrefix string, pairer *builtinFallbackCallIDPairer) map[string]interface{} {
+// 契约：state 与 convertBuiltinToolCallItem 共享同一实例才能配对；nil 时兜底新建（防御直接调用）。
+// P2-2：call_id 未在本次转换中登记（无先行 call，或 call 侧被丢弃）时产出 role:tool 即悬空引用，
+// 丢弃该 item 并告警，不再生成孤立 standalone id。
+func convertBuiltinToolCallOutputItem(item map[string]interface{}, idPrefix string, state *inputConversionState) map[string]interface{} {
 	callID, _ := item["call_id"].(string)
 	if callID == "" {
-		if pending, ok := pairer.takePending(idPrefix); ok {
+		if pending, ok := state.pairerOrNew().takePending(idPrefix); ok {
 			callID = pending
 		} else {
-			// 孤立 output：无先行未配对 fallback call 可复用，生成独立确定性 id 并显式告警
-			callID = pairer.standaloneCallID(idPrefix)
-			logger.Log.Warnf("builtin tool output has no preceding fallback call to pair with, emitted unpaired id: %q", callID)
+			warnDropped("input", "tool call output has no emitted call to pair with; item dropped")
+			return nil
 		}
+	} else if !state.callEmitted(callID) {
+		warnDropped("input", "tool call output has no emitted call to pair with; item dropped")
+		return nil
 	}
 	content := getStringOrJSONRaw(item["output"])
 	if content == "" {
@@ -441,15 +912,24 @@ func getBuiltinToolOutputPayload(item map[string]interface{}) string {
 	return getStringOrJSONRaw(payload)
 }
 
-func convertMessageItem(item map[string]interface{}) map[string]interface{} {
+// convertMessageItem 转换 message item，role 先过 chat §3 六种请求角色白名单（tool/function 角色
+// 不经由 message item 产生），phase 按 DN-5 丢标记保留文本。
+// role 无法映射时丢弃整个 item 并告警；content 数组内全部 part 因能力性不可映射被丢弃（转换结果
+// 为空）时同样丢弃该 item，不再拒绝整个请求。
+func convertMessageItem(item map[string]interface{}) (map[string]interface{}, error) {
 	role, _ := item["role"].(string)
 	if role == "" {
 		role = "user"
 	}
+	switch role {
+	case "user", "system", "developer", "assistant":
+	default:
+		warnDropped("message", fmt.Sprintf("message role %q has no chat request message equivalent (chat §3); item dropped", role))
+		return nil, nil
+	}
 
 	// chat §3.1 消息联合已含 developer 类型（system/developer/user/assistant/tool/function），
 	// responses §3.1 message.role 的 developer 原样直通，不再降级为 system（内容保真）。
-	// 个别旧上游模型不识别 developer role 属上游能力差异，由上游裁决，转换层不预判。
 
 	message := map[string]interface{}{
 		"role":    role,
@@ -461,109 +941,156 @@ func convertMessageItem(item map[string]interface{}) map[string]interface{} {
 		case string:
 			message["content"] = v
 		case []interface{}:
-			// role 传入供 refusal part 按 chat §4 消息×部件矩阵校验（refusal 仅 assistant）
-			message["content"] = convertContentArray(v, role)
+			cc, err := convertContentArray(v, role)
+			if err != nil {
+				return nil, err
+			}
+			if isEmptyConvertedContent(cc) {
+				warnDropped("message", fmt.Sprintf("message role %q content resolved to empty after dropping unmappable parts; item dropped", role))
+				return nil, nil
+			}
+			message["content"] = cc
+		default:
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "message content must be a string or a content part array")
 		}
 	}
 
-	return message
+	return message, nil
 }
 
-func convertContentArray(content []interface{}, role string) interface{} {
+// isEmptyConvertedContent 判定 convertContentArray 结果是否为空（无任何可发送 part）。
+func isEmptyConvertedContent(cc interface{}) bool {
+	switch v := cc.(type) {
+	case string:
+		return v == ""
+	case []interface{}:
+		return len(v) == 0
+	case nil:
+		return true
+	default:
+		return false
+	}
+}
+
+// convertContentArray 按 chat §4 消息×部件矩阵转换 content parts（P1-3）：
+// system/developer 仅 text；user 可 text/image/audio/file；assistant 仅 text 或恰一个 refusal。
+// 能力性不可映射的违规 part（角色不允许的媒体/refusal、与 text/media 互斥的 refusal、多余 refusal、
+// 未知 block 类型）一律丢弃并记 warn 日志，保留可保留的文本/媒体 —— 不再拒绝整个请求；
+// 整条消息 part 全丢完时由 convertMessageItem 丢弃该 item。
+// 仅结构性非法（block 非对象、文本/媒体必填字段缺失或载荷不全）仍返回 invalid_source_shape。
+func convertContentArray(content []interface{}, role string) (interface{}, error) {
 	var textParts []string
-	var hasMedia bool
-	var hasRefusal bool
+	var refusalPart map[string]interface{}
+	hasMedia := false
 	chatContent := []interface{}{}
 
 	for _, block := range content {
-		if blockMap, ok := block.(map[string]interface{}); ok {
-			blockType, _ := blockMap["type"].(string)
-			if blockType == "" {
-				blockType = "input_text"
-			}
+		blockMap, ok := block.(map[string]interface{})
+		if !ok {
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "message content part must be a JSON object")
+		}
+		blockType, _ := blockMap["type"].(string)
+		if blockType == "" {
+			blockType = "input_text"
+		}
 
-			switch blockType {
-			case "input_text", "output_text", "text":
-				if hasRefusal {
-					// refusal 已先行（[refusal, text] 乱序），chat §4 互斥：丢弃后到的 text
-					logger.Log.Infof("drop text part after refusal part in assistant message (chat §4 mutual exclusion)")
-					continue
-				}
-				if text, ok := blockMap["text"].(string); ok && text != "" {
-					textParts = append(textParts, text)
-					chatContent = append(chatContent, map[string]interface{}{
-						"type": "text",
-						"text": text,
-					})
-				}
-			case "input_image", "image_url":
-				if hasRefusal {
-					// refusal 已先行（[refusal, media] 乱序），chat §4 互斥：丢弃后到的 image
-					logger.Log.Infof("drop image part after refusal part in assistant message (chat §4 mutual exclusion)")
-					continue
-				}
-				if imgBlock := convertImageBlock(blockMap); imgBlock != nil {
-					chatContent = append(chatContent, imgBlock)
-					hasMedia = true
-				}
-			case "input_audio":
-				if hasRefusal {
-					// refusal 已先行（[refusal, media] 乱序），chat §4 互斥：丢弃后到的 audio
-					logger.Log.Infof("drop audio part after refusal part in assistant message (chat §4 mutual exclusion)")
-					continue
-				}
-				if audioBlock := convertInputAudioBlock(blockMap); audioBlock != nil {
-					chatContent = append(chatContent, audioBlock)
-					hasMedia = true
-				}
-			case "input_file":
-				if hasRefusal {
-					// refusal 已先行（[refusal, media] 乱序），chat §4 互斥：丢弃后到的 file
-					logger.Log.Infof("drop file part after refusal part in assistant message (chat §4 mutual exclusion)")
-					continue
-				}
-				if fileBlock := convertInputFileBlock(blockMap); fileBlock != nil {
-					chatContent = append(chatContent, fileBlock)
-					hasMedia = true
-				}
-			case "refusal":
-				// responses §5 refusal part → chat content part。chat §4 矩阵：refusal 仅 assistant 消息可用，
-				// 且与 text 互斥（恰一个）。
-				refusalText, ok := blockMap["refusal"].(string)
-				if !ok || refusalText == "" {
-					continue
-				}
-				if role != "assistant" {
-					logger.Log.Infof("drop refusal part for non-assistant message role: %q", role)
-					continue
-				}
-				// assistant 消息已含 text 等 part 时按互斥规则取舍：保留 refusal 丢弃已收集的
-				// text/media（refusal 是该消息的语义终态），不把两者同时放入（chat §4 矩阵）。
-				if len(chatContent) > 0 {
-					logger.Log.Infof("drop coexisting text/media parts in assistant message with refusal part (chat §4 mutual exclusion)")
-					chatContent = []interface{}{}
-					textParts = nil
-					hasMedia = false
-				}
-				hasRefusal = true
-				chatContent = append(chatContent, map[string]interface{}{
-					"type":    "refusal",
-					"refusal": refusalText,
-				})
-			default:
-				// 未知 content block type 无 chat §4 部件对应：Warn 后跳过，静默丢弃改显式说明
-				logger.Log.Warnf("drop unknown codex content block type (no chat content part equivalent): %q", blockType)
+		switch blockType {
+		case "input_text", "output_text", "text":
+			text, ok := blockMap["text"].(string)
+			if !ok {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "text content part missing string field text")
 			}
+			if text == "" {
+				// 空文本 part 无信息量，跳过不产出
+				continue
+			}
+			textParts = append(textParts, text)
+			chatContent = append(chatContent, map[string]interface{}{
+				"type": "text",
+				"text": text,
+			})
+		case "input_image", "image_url":
+			if role != "user" {
+				warnDropped("input", fmt.Sprintf("image content part is only allowed on user messages (chat §4), got role %q; part dropped", role))
+				continue
+			}
+			imgBlock := convertImageBlock(blockMap)
+			if imgBlock == nil {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "input_image part has no usable image_url/source payload (chat §4 image_url.url required)")
+			}
+			chatContent = append(chatContent, imgBlock)
+			hasMedia = true
+		case "input_audio":
+			if role != "user" {
+				warnDropped("input", fmt.Sprintf("input_audio part is only allowed on user messages (chat §4), got role %q; part dropped", role))
+				continue
+			}
+			audioBlock := convertInputAudioBlock(blockMap)
+			if audioBlock == nil {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "input_audio part missing required data/format (chat §4)")
+			}
+			chatContent = append(chatContent, audioBlock)
+			hasMedia = true
+		case "input_file":
+			if role != "user" {
+				warnDropped("input", fmt.Sprintf("input_file part is only allowed on user messages (chat §4), got role %q; part dropped", role))
+				continue
+			}
+			fileBlock := convertInputFileBlock(blockMap)
+			if fileBlock == nil {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "input_file part has no filename/file_data/file_id payload (chat §4)")
+			}
+			chatContent = append(chatContent, fileBlock)
+			hasMedia = true
+		case "refusal":
+			// responses §5 refusal part → chat content part。chat §4 矩阵：refusal 仅 assistant，
+			// 与 text/media 互斥且恰一个；违规时丢弃该 refusal part，保留可保留的文本/媒体。
+			if role != "assistant" {
+				warnDropped("input", fmt.Sprintf("refusal part is only allowed on assistant messages (chat §4), got role %q; part dropped", role))
+				continue
+			}
+			refusalText, ok := blockMap["refusal"].(string)
+			if !ok {
+				return nil, errRequest(relaymodel.CodeInvalidSourceShape, "input", "refusal part missing string field refusal")
+			}
+			if refusalText == "" {
+				// 空 refusal 无信息量，跳过（既有回归锁定），不构成与 text 的并存冲突
+				continue
+			}
+			if refusalPart != nil {
+				warnDropped("input", "assistant message must contain exactly one refusal part (chat §4); extra refusal dropped")
+				continue
+			}
+			if len(textParts) > 0 || hasMedia {
+				warnDropped("input", "assistant message mixes text/media parts with refusal, which are mutually exclusive (chat §4); refusal dropped")
+				continue
+			}
+			refusalPart = map[string]interface{}{
+				"type":    "refusal",
+				"refusal": refusalText,
+			}
+		default:
+			// 未知 content block type 无 chat §4 部件对应：丢弃该 part 并告警
+			warnDropped("input", fmt.Sprintf("content part type %q has no chat §4 content part equivalent; part dropped", blockType))
+			continue
 		}
 	}
 
-	if hasMedia || hasRefusal {
-		return chatContent
+	// refusal 先于 text/media 出现的乱序形态：此时拒绝保留 refusal，保留文本/媒体（互斥时文本优先）
+	if refusalPart != nil && (len(textParts) > 0 || hasMedia) {
+		warnDropped("input", "assistant message mixes text/media parts with refusal, which are mutually exclusive (chat §4); refusal dropped")
+		refusalPart = nil
+	}
+	if refusalPart != nil {
+		return []interface{}{refusalPart}, nil
+	}
+	if hasMedia {
+		return chatContent, nil
 	}
 	if len(textParts) > 0 {
-		return strings.Join(textParts, "\n")
+		return strings.Join(textParts, "\n"), nil
 	}
-	return ""
+	return "", nil
 }
 
 func convertImageBlock(block map[string]interface{}) interface{} {
@@ -623,9 +1150,7 @@ func convertImageBlock(block map[string]interface{}) interface{} {
 }
 
 // convertInputAudioBlock 把 responses input_audio part（responses §3.1）转为 chat input_audio part（chat §4）：
-// input_audio 子对象形状（data/format）直通；顶层 data/format 形状组装为子对象；缺 data 或 format 则丢弃。
-// 流式差异：chat 协议文档（§4 部件矩阵按消息角色约束）未对流式请求限制 input_audio，
-// 转换层不做流式/非流式区分；流式不支持属上游模型执行层限制。
+// input_audio 子对象形状（data/format）直通；顶层 data/format 形状组装为子对象；载荷不全返回 nil 由调用方报错。
 func convertInputAudioBlock(block map[string]interface{}) interface{} {
 	if inner, ok := block["input_audio"].(map[string]interface{}); ok {
 		data, _ := inner["data"].(string)
@@ -653,7 +1178,7 @@ func convertInputAudioBlock(block map[string]interface{}) interface{} {
 }
 
 // convertInputFileBlock 把 responses input_file part（responses §3.1）转为 chat file part（chat §4）：
-// file 子对象形状直通；顶层 filename/file_data/file_id 形状组装为 file 子对象（三选一）；无有效载荷则丢弃。
+// file 子对象形状直通；顶层 filename/file_data/file_id 形状组装为 file 子对象（三选一）；无有效载荷返回 nil 由调用方报错。
 func convertInputFileBlock(block map[string]interface{}) interface{} {
 	if inner, ok := block["file"].(map[string]interface{}); ok && hasFilePayload(inner) {
 		return map[string]interface{}{
@@ -686,11 +1211,22 @@ func hasFilePayload(inner map[string]interface{}) bool {
 	return false
 }
 
-func convertFunctionCallItem(item map[string]interface{}) map[string]interface{} {
+// convertFunctionCallItem 转换 function_call 历史 item（responses §3.2 → chat §3.1/§6.1.1）。
+// call_id/name 是 chat tool_calls[].id / function.name 必填项，缺失即无法配对/无法执行 ——
+// 丢弃该 item 并告警（不再拒绝整个请求）。
+func convertFunctionCallItem(item map[string]interface{}) (map[string]interface{}, error) {
 	callID, _ := item["call_id"].(string)
+	if callID == "" {
+		warnDropped("function_call", "function_call item missing call_id: chat tool_calls[].id pairing cannot be established; item dropped")
+		return nil, nil
+	}
 	name, _ := item["name"].(string)
 	if namespace, ok := item["namespace"].(string); ok && namespace != "" {
 		name = flattenNamespaceToolName(namespace, name)
+	}
+	if name == "" {
+		warnDropped("function_call", "function_call item missing required name; item dropped")
+		return nil, nil
 	}
 	args := getStringOrJSONRaw(item["arguments"])
 	if args == "" {
@@ -709,28 +1245,55 @@ func convertFunctionCallItem(item map[string]interface{}) map[string]interface{}
 				},
 			},
 		},
-	}
+	}, nil
 }
 
-func convertFunctionCallOutputItem(item map[string]interface{}) map[string]interface{} {
+func convertFunctionCallOutputItem(item map[string]interface{}, state *inputConversionState) (map[string]interface{}, error) {
 	callID, _ := item["call_id"].(string)
+	if callID == "" {
+		warnDropped("function_call_output", "function_call_output item missing call_id: chat tool_call_id is required (chat §3.1); item dropped")
+		return nil, nil
+	}
+	// P1-1：配对的 function_call 因缺 call_id/name 被丢弃（或本请求从未产出该 call）时，
+	// 产出 role:tool 即悬空引用，丢弃并告警。
+	if !state.callEmitted(callID) {
+		warnDropped("input", "tool call output has no emitted call to pair with; item dropped")
+		return nil, nil
+	}
 	output := getStringOrJSONRaw(item["output"])
 
 	return map[string]interface{}{
 		"role":         "tool",
 		"tool_call_id": callID,
 		"content":      output,
-	}
+	}, nil
 }
 
 // convertCustomToolCallItem 把 custom_tool_call 转成 chat 协议的 tool_calls 元素。
-// 与 convertFunctionCallItem 对称：返回 assistant message + 单元素 tool_calls 数组。
-// arguments 采用方案 A：直接透传 item["input"] 原始字符串（apply_patch 文本或其他 custom 工具的 raw input）。
-// 真正的格式还原在响应侧由 reconstructCustomToolCallInput 负责（#4 已修）。
-func convertCustomToolCallItem(item map[string]interface{}) map[string]interface{} {
+// P0-2：custom 工具声明为 {input:string} function 后，历史 raw input 必须按同一 schema 编码为
+// {"input":"raw"} 的 arguments JSON 字符串，否则声明与调用形态漂移、上游拒绝。
+// 响应侧由 reconstructCustomToolCallInput 反向还原（#4 已修）。
+func convertCustomToolCallItem(item map[string]interface{}) (map[string]interface{}, error) {
 	callID, _ := item["call_id"].(string)
+	if callID == "" {
+		warnDropped("custom_tool_call", "custom_tool_call item missing call_id: chat tool_calls[].id pairing cannot be established; item dropped")
+		return nil, nil
+	}
 	name, _ := item["name"].(string)
-	input := getStringOrJSONRaw(item["input"])
+	if name == "" {
+		warnDropped("custom_tool_call", "custom_tool_call item missing required name; item dropped")
+		return nil, nil
+	}
+	if item["input"] == nil {
+		warnDropped("custom_tool_call", "custom_tool_call item missing required input (responses §3.5); item dropped")
+		return nil, nil
+	}
+	raw := getStringOrJSONRaw(item["input"])
+	wrapped, err := json.Marshal(map[string]interface{}{"input": raw})
+	if err != nil {
+		warnDropped("custom_tool_call", `custom_tool_call input cannot be encoded as {"input":...} arguments; item dropped`)
+		return nil, nil
+	}
 
 	return map[string]interface{}{
 		"role": "assistant",
@@ -740,11 +1303,11 @@ func convertCustomToolCallItem(item map[string]interface{}) map[string]interface
 				"type": "function",
 				"function": map[string]interface{}{
 					"name":      name,
-					"arguments": input,
+					"arguments": string(wrapped),
 				},
 			},
 		},
-	}
+	}, nil
 }
 
 func getStringOrJSONRaw(v interface{}) string {
@@ -768,15 +1331,24 @@ func getStringOrJSONRaw(v interface{}) string {
 
 // convertCustomToolCallOutputItem 把 custom_tool_call_output 转成 role:tool 消息。
 // output 字段归一化由 normalizeCustomToolOutput 处理。
-func convertCustomToolCallOutputItem(item map[string]interface{}) map[string]interface{} {
+// P1-1：配对的 custom_tool_call 被丢弃（或从未产出）时 role:tool 为悬空引用，丢弃并告警。
+func convertCustomToolCallOutputItem(item map[string]interface{}, state *inputConversionState) (map[string]interface{}, error) {
 	callID, _ := item["call_id"].(string)
+	if callID == "" {
+		warnDropped("custom_tool_call_output", "custom_tool_call_output item missing call_id: chat tool_call_id is required (chat §3.1); item dropped")
+		return nil, nil
+	}
+	if !state.callEmitted(callID) {
+		warnDropped("input", "tool call output has no emitted call to pair with; item dropped")
+		return nil, nil
+	}
 	content := normalizeCustomToolOutput(item["output"])
 
 	return map[string]interface{}{
 		"role":         "tool",
 		"tool_call_id": callID,
 		"content":      content,
-	}
+	}, nil
 }
 
 // normalizeCustomToolOutput 把 custom_tool_call_output.output 归一化为字符串。
@@ -795,29 +1367,48 @@ func normalizeCustomToolOutput(v interface{}) string {
 	}
 }
 
-func convertToolsToOpenAI(tools []interface{}) []interface{} {
+// convertToolsToOpenAI 转换工具声明（responses §9 → chat §5.1）。
+// DN-6 决议：默认拒绝 + 白名单。白名单以现有通过转换回归的类别为事实边界：
+//   - function（含 "" 兼容形态）：chat §5.1 原生同族
+//   - custom / apply_patch（apply_patch 类）：{input:string} function 代理 + 子工具，执行闭环在网关+codex 客户端
+//   - namespace 展平路径
+//   - tool_search：客户端代理执行（execution=client），call/output 配对回归完整
+//
+// 白名单外（web_search/web_search_preview/computer/computer_use/computer_use_preview/shell/local_shell/
+// file_search/code_interpreter/image_generation/mcp/programmatic_tool_calling 及未知类型）丢弃该 tool
+// 并记 warn 日志，保留同一请求其余可转换工具，不再 400（P1-7/Advisory-1 拒绝策略已按能力性丢弃调整）。
+func convertToolsToOpenAI(tools []interface{}) ([]interface{}, error) {
 	var result []interface{}
 	seen := make(map[string]struct{})
 
-	for _, tool := range tools {
+	for i, tool := range tools {
 		toolMap, ok := tool.(map[string]interface{})
 		if !ok {
-			continue
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, fmt.Sprintf("tools[%d]", i), "tool entry must be a JSON object")
 		}
+		path := fmt.Sprintf("tools[%d]", i)
 		toolType, _ := toolMap["type"].(string)
 		switch toolType {
 		case "function", "":
-			if fn := buildFunctionTool(toolMap); fn != nil && appendUniqueChatTool(&result, seen, fn) {
+			fn := buildFunctionTool(toolMap)
+			if fn == nil {
+				warnDropped(path, "function tool missing required name; tool dropped")
+				continue
 			}
+			appendUniqueChatTool(&result, seen, fn)
 		case "custom":
-			appendUniqueChatTools(&result, seen, flattenCustomTool(toolMap))
+			flat := flattenCustomTool(toolMap)
+			if len(flat) == 0 {
+				warnDropped(path, "custom tool missing required name; tool dropped")
+				continue
+			}
+			appendUniqueChatTools(&result, seen, flat)
 		case "namespace":
-			appendUniqueChatTools(&result, seen, flattenNamespaceTool(toolMap))
-		case "web_search", "web_search_preview", "local_shell", "shell",
-			"computer", "computer_use", "computer_use_preview", "tool_search":
-			// responses §9 内建工具族：web_search_preview/computer_use_preview 为对应工具预览名，
-			// shell 为 codex 函数 shell，均与既有 web_search/computer_use/local_shell 同族，统一扁平化为 function。
-			appendUniqueChatTools(&result, seen, flattenBuiltinTool(toolType, toolMap))
+			flat, err := flattenNamespaceTool(toolMap, path)
+			if err != nil {
+				return nil, err
+			}
+			appendUniqueChatTools(&result, seen, flat)
 		case "apply_patch":
 			// responses §9 apply_patch 独立工具类型（codex 文件编辑）与 type:custom name:apply_patch 等价：
 			// 统一按 custom 扁平化（主工具 + 5 个代理子工具），name 缺失时回退 "apply_patch"。
@@ -831,14 +1422,15 @@ func convertToolsToOpenAI(tools []interface{}) []interface{} {
 				"description": getStringValue(toolMap, "description"),
 			}
 			appendUniqueChatTools(&result, seen, flattenCustomTool(apTool))
+		case "tool_search":
+			appendUniqueChatTools(&result, seen, flattenToolSearchTool(toolMap))
 		default:
-			// responses §9 其余工具（file_search/code_interpreter/image_generation/mcp/programmatic_tool_calling 等）
-			// 在 chat §5.1 仅 function 类型、无对应表达：Info 记录后丢弃（不 Errorf 避免噪音，静默丢弃改显式说明）。
-			logger.Log.Infof("drop unmappable codex tool type (no chat tool equivalent): %q", toolType)
+			warnDropped(path, fmt.Sprintf("tool type %q has no execution closed loop on this gateway's Chat upstream (DN-6 whitelist: function/custom/apply_patch/namespace/tool_search); tool dropped", toolType))
+			continue
 		}
 	}
 
-	return result
+	return result, nil
 }
 
 func appendUniqueChatTools(dst *[]interface{}, seen map[string]struct{}, tools []interface{}) {
@@ -898,7 +1490,7 @@ func collectDiscoveredTools(input interface{}) []interface{} {
 	return tools
 }
 
-// buildFunctionTool 构造单个标准 function tool，兼容 flat 与嵌套 function 结构。
+// buildFunctionTool 构造单个标准 function tool，兼容 flat 与嵌套 function 结构；缺 name 返回 nil 由调用方报错。
 func buildFunctionTool(toolMap map[string]interface{}) interface{} {
 	name := getStringValue(toolMap, "name")
 	description := getStringValue(toolMap, "description")
@@ -928,6 +1520,7 @@ func buildFunctionTool(toolMap map[string]interface{}) interface{} {
 }
 
 // customToolInputParameters 返回 custom 工具的通用 parameters 模式（input 字符串透传）。
+// 请求侧 convertCustomToolCallItem 的历史 arguments 必须与该 schema 一致（P0-2）。
 func customToolInputParameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
@@ -1070,21 +1663,33 @@ func applyPatchProxyTools(baseName string) []interface{} {
 	return out
 }
 
-// flattenNamespaceTool 把 type:namespace 工具的 child function 全部扁平化为顶层 function 工具。
-func flattenNamespaceTool(tool map[string]interface{}) []interface{} {
+// flattenNamespaceTool 把 type:namespace 工具的 child function 全部扁平化为顶层 function 工具（DN-6 白名单路径）。
+// namespace 缺 name 丢弃整个工具、child 非 function 或缺 name 丢弃该 child，均记 warn 日志；
+// 仅 namespace.tools 缺失/元素非对象等结构性非法返回 invalid_source_shape。
+func flattenNamespaceTool(tool map[string]interface{}, path string) ([]interface{}, error) {
 	namespace := getStringValue(tool, "name")
-	children, _ := tool["tools"].([]interface{})
+	if namespace == "" {
+		warnDropped(path, "namespace tool missing required name; tool dropped")
+		return nil, nil
+	}
+	children, ok := tool["tools"].([]interface{})
+	if !ok {
+		return nil, errRequest(relaymodel.CodeInvalidSourceShape, path, "namespace tool missing tools array")
+	}
 	var out []interface{}
-	for _, raw := range children {
+	for i, raw := range children {
+		childPath := fmt.Sprintf("%s.tools[%d]", path, i)
 		child, ok := raw.(map[string]interface{})
 		if !ok {
-			continue
+			return nil, errRequest(relaymodel.CodeInvalidSourceShape, childPath, "namespace child tool must be a JSON object")
 		}
 		if childType, _ := child["type"].(string); childType != "function" {
+			warnDropped(childPath, fmt.Sprintf("namespace child type %q is not function; child dropped", childType))
 			continue
 		}
 		childName := getStringValue(child, "name")
 		if childName == "" {
+			warnDropped(childPath, "namespace child function missing required name; child dropped")
 			continue
 		}
 		flatName := flattenNamespaceToolName(namespace, childName)
@@ -1107,34 +1712,7 @@ func flattenNamespaceTool(tool map[string]interface{}) []interface{} {
 			},
 		})
 	}
-	return out
-}
-
-// flattenBuiltinTool 把 web_search / local_shell / computer_use 统一扁平化为 function 工具。
-func flattenBuiltinTool(toolType string, tool map[string]interface{}) []interface{} {
-	if toolType == "tool_search" {
-		return flattenToolSearchTool(tool)
-	}
-	name := getStringValue(tool, "name")
-	if name == "" {
-		name = toolType
-	}
-	return []interface{}{
-		map[string]interface{}{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        name,
-				"description": "built-in tool",
-				"parameters": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"input": map[string]interface{}{"type": "string"},
-					},
-					"required": []interface{}{"input"},
-				},
-			},
-		},
-	}
+	return out, nil
 }
 
 func flattenToolSearchTool(tool map[string]interface{}) []interface{} {
@@ -1188,26 +1766,33 @@ func flattenToolSearchTool(tool map[string]interface{}) []interface{} {
 
 // ConvertChatResponseToResponses 把上游 chat 响应转回 codex Responses 格式。
 // 保留为 3 参数旧入口，等价于 ConvertChatResponseToResponsesWithContext(..., nil)。
-func ConvertChatResponseToResponses(chatResponseBody []byte, model string, fallbackReasoningToMessage bool) []byte {
+func ConvertChatResponseToResponses(chatResponseBody []byte, model string, fallbackReasoningToMessage bool) ([]byte, error) {
 	return ConvertChatResponseToResponsesWithContext(chatResponseBody, model, fallbackReasoningToMessage, nil)
 }
 
-// ConvertChatResponseToResponsesWithContext 把上游 chat 响应转回 codex Responses 格式。
+// ConvertChatResponseToResponsesWithContext 把上游 Chat 非流式响应转回 Responses Response 对象。
+// P0-1：chatResponseBody 非法 JSON 返回 invalid_source_json（绝不原样透传 chat.completion）。
+// P0-3：顶层对象与 message/reasoning item 输出 Responses §4/§5 全部必填字段，output_text part
+// 恒含 annotations/logprobs；回显原请求可回显字段。
 // 当 originalRequestRawJSON 非 nil 时，从原始 Responses 请求里解析 CodexToolContext，
 // 用于在 tool_calls 还原时识别 namespace 字段与 custom_tool_call 类型。
-// 当 originalRequestRawJSON 为 nil 时，退化到旧 3 参数行为（保持 100% 向后兼容）。
-func ConvertChatResponseToResponsesWithContext(chatResponseBody []byte, model string, fallbackReasoningToMessage bool, originalRequestRawJSON []byte) []byte {
+func ConvertChatResponseToResponsesWithContext(chatResponseBody []byte, model string, fallbackReasoningToMessage bool, originalRequestRawJSON []byte) ([]byte, error) {
 	var chatResp map[string]interface{}
 	if err := json.Unmarshal(chatResponseBody, &chatResp); err != nil {
-		return chatResponseBody
+		return nil, errResponse(relaymodel.CodeInvalidSourceJSON, "", fmt.Errorf("upstream chat response is not valid JSON: %w", err))
 	}
+	if chatResp == nil {
+		return nil, errResponse(relaymodel.CodeInvalidSourceJSON, "", errors.New("upstream chat response must be a JSON object"))
+	}
+
+	choices, _ := chatResp["choices"].([]interface{})
 
 	// status 按首个 choice 的 finish_reason 推导（chat §6.2 → responses §4）：
 	// length → incomplete + reason=max_output_tokens；content_filter → incomplete + reason=content_filter；
 	// 其余（stop/tool_calls 等）保持 completed。与流式路径（chat_to_responses.go）对称。
 	status := "completed"
 	var incompleteDetails map[string]interface{}
-	if choices, ok := chatResp["choices"].([]interface{}); ok && len(choices) > 0 {
+	if len(choices) > 0 {
 		if choiceMap, ok := choices[0].(map[string]interface{}); ok {
 			if fr, ok := choiceMap["finish_reason"].(string); ok {
 				switch fr {
@@ -1222,96 +1807,214 @@ func ConvertChatResponseToResponsesWithContext(chatResponseBody []byte, model st
 		}
 	}
 
-	responsesResp := map[string]interface{}{
-		"output": []interface{}{},
-		"status": status,
+	// 顶层必填字段恒存在（responses §4）：id/created_at 缺失时由网关兜底生成，不伪装上游值缺失
+	responseID := getStringValue(chatResp, "id")
+	if responseID == "" {
+		responseID = fmt.Sprintf("resp_%d", time.Now().UnixNano())
 	}
-	if incompleteDetails != nil {
-		responsesResp["incomplete_details"] = incompleteDetails
-		// 与流式路径对齐（chat_to_responses.go）：incomplete 终态同时标记 truncated（responses §4）
-		responsesResp["truncated"] = true
-	}
-
-	if id, ok := chatResp["id"].(string); ok {
-		responsesResp["id"] = id
-	}
+	createdAt := time.Now().Unix()
 	if created, ok := chatResp["created"].(float64); ok {
 		// responses 协议 §4 主对象字段名为 created_at（与流式路径 response.created_at 保持一致），
 		// chat 的 created（Unix 秒）直接映射，不做单位换算。
-		responsesResp["created_at"] = int64(created)
+		createdAt = int64(created)
 	}
-	if model != "" {
-		responsesResp["model"] = model
-	} else if m, ok := chatResp["model"].(string); ok {
-		responsesResp["model"] = m
+	resolvedModel := model
+	if resolvedModel == "" {
+		resolvedModel = getStringValue(chatResp, "model")
 	}
 
-	// 构建 CodexCtx：仅当调用方提供原始请求时才构建；nil 时走旧行为
+	responsesResp := map[string]interface{}{
+		"id":         responseID,
+		"object":     "response",
+		"created_at": createdAt,
+		"status":     status,
+		"error":      nil,
+		"model":      resolvedModel,
+		"output":     []interface{}{},
+		"usage":      parseUsage(getObjectMap(chatResp, "usage")),
+		"user":       nil,
+		"truncated":  incompleteDetails != nil,
+	}
+	// incomplete_details 恒输出（null 字段按 responses §4 输出，与流式终态快照对齐）
+	responsesResp["incomplete_details"] = incompleteDetails
+	if _, has := responsesResp["usage"]; !has {
+		responsesResp["usage"] = parseUsage(map[string]interface{}{})
+	}
+
+	// 回显原 Responses 请求可回显字段（responses §4）；非法原请求 JSON 显式拒绝，不静默降级
+	if originalRequestRawJSON != nil {
+		var req map[string]interface{}
+		if err := json.Unmarshal(originalRequestRawJSON, &req); err != nil {
+			return nil, errResponse(relaymodel.CodeInvalidSourceJSON, "original_request", fmt.Errorf("original responses request is not valid JSON: %w", err))
+		}
+		for _, key := range []string{
+			"instructions", "max_output_tokens", "parallel_tool_calls", "reasoning",
+			"temperature", "tool_choice", "tools", "top_p", "metadata", "text",
+			"modalities", "store", "service_tier", "previous_response_id",
+		} {
+			if v, ok := req[key]; ok {
+				responsesResp[key] = v
+			}
+		}
+		if v, ok := req["user"]; ok && v != nil {
+			responsesResp["user"] = v
+		}
+		if pr, ok := req["previous_response_id"].(string); ok && pr != "" {
+			// 请求侧已按 P1-1 拒绝该字段；直接调用转换器时仍如实回显，不吞
+			responsesResp["previous_response_id"] = pr
+		}
+	}
+	if _, has := responsesResp["previous_response_id"]; !has {
+		responsesResp["previous_response_id"] = nil
+	}
+
+	// 构建 CodexCtx：仅当调用方提供原始请求时才构建；nil 时走 3 参数旧退化行为
 	var codexCtx *CodexToolContext
 	if originalRequestRawJSON != nil {
 		ctx := buildCodexToolContextFromRequest(originalRequestRawJSON)
 		codexCtx = &ctx
 	}
 
-	if choices, ok := chatResp["choices"].([]interface{}); ok {
-		for _, choice := range choices {
-			if choiceMap, ok := choice.(map[string]interface{}); ok {
-				if message, ok := choiceMap["message"].(map[string]interface{}); ok {
-					output := convertChatMessageToOutput(message, codexCtx)
-					if outputs, ok := responsesResp["output"].([]interface{}); ok {
-						responsesResp["output"] = append(outputs, output...)
-					}
-				}
-			}
+	output := responsesResp["output"].([]interface{})
+	for ci, choice := range choices {
+		choiceMap, ok := choice.(map[string]interface{})
+		if !ok {
+			continue
 		}
+		message, ok := choiceMap["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// 多 choice 时以 choice 后缀复合 responseID，保证 item id 在本 response 内唯一
+		respIDForChoice := responseID
+		if len(choices) > 1 {
+			respIDForChoice = fmt.Sprintf("%s_c%d", responseID, ci)
+		}
+		choiceOutput, err := convertChatMessageToOutput(message, codexCtx, respIDForChoice)
+		if err != nil {
+			return nil, err
+		}
+		output = append(output, choiceOutput...)
 	}
+	responsesResp["output"] = output
 
-	// 兜底：output 中无 message item，但有 reasoning 时，复制第一个 reasoning 的 summary 文本为 message
+	// 兜底：output 中无 message item，但有 reasoning 时，复制第一个 reasoning 的 summary 文本为 message。
+	// fallback message item 与常规 message item 同等完整（id/status/annotations/logprobs 必填，P0-3）。
 	if fallbackReasoningToMessage {
-		if outputs, ok := responsesResp["output"].([]interface{}); ok {
-			hasMessage := false
-			var firstReasoningText string
-			for _, o := range outputs {
-				if om, ok := o.(map[string]interface{}); ok {
-					if t, _ := om["type"].(string); t == "message" {
-						hasMessage = true
-						break
-					} else if t == "reasoning" && firstReasoningText == "" {
-						if summary, ok := om["summary"].([]interface{}); ok && len(summary) > 0 {
-							if s, ok := summary[0].(map[string]interface{}); ok {
-								firstReasoningText, _ = s["text"].(string)
-							}
+		outputs, _ := responsesResp["output"].([]interface{})
+		hasMessage := false
+		firstReasoningText := ""
+		ordinal := 0
+		for _, o := range outputs {
+			om, ok := o.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch t, _ := om["type"].(string); t {
+			case "message":
+				hasMessage = true
+				ordinal++
+			case "reasoning":
+				ordinal++
+				if firstReasoningText == "" {
+					if summary, ok := om["summary"].([]interface{}); ok && len(summary) > 0 {
+						if s, ok := summary[0].(map[string]interface{}); ok {
+							firstReasoningText, _ = s["text"].(string)
 						}
 					}
 				}
 			}
-			if !hasMessage && firstReasoningText != "" {
-				responsesResp["output"] = append(outputs, map[string]interface{}{
-					"type":    "message",
-					"role":    "assistant",
-					"content": []interface{}{map[string]interface{}{"type": "output_text", "text": firstReasoningText}},
-				})
-			}
+		}
+		if !hasMessage && firstReasoningText != "" {
+			parts := []interface{}{buildResponsesOutputTextPart(firstReasoningText, nil)}
+			outputs = append(outputs, buildResponsesMessageItem(responseID, ordinal, parts))
+			responsesResp["output"] = outputs
 		}
 	}
 
-	if usage, ok := chatResp["usage"].(map[string]interface{}); ok {
-		responsesResp["usage"] = parseUsage(usage)
+	result, err := json.Marshal(responsesResp)
+	if err != nil {
+		return nil, errResponse(relaymodel.CodeInvalidSourceShape, "", fmt.Errorf("marshal responses output failed: %w", err))
 	}
-
-	result, _ := json.Marshal(responsesResp)
-	return result
+	return result, nil
 }
 
-func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexToolContext) []interface{} {
-	var output []interface{}
+// getObjectMap 安全提取 map 字段，缺失/类型不符返回空 map（usage 兜底 parseUsage 零值用）。
+func getObjectMap(m map[string]interface{}, key string) map[string]interface{} {
+	if v, ok := m[key].(map[string]interface{}); ok {
+		return v
+	}
+	return map[string]interface{}{}
+}
 
-	// 处理 reasoning_content
+// buildResponsesMessageItem 构造 Responses §5 message item（id*/role*/content*/status* 必填）。
+// item id 形如 msg_<responseID>_<ordinal>，与流式路径命名规则一致，保证本 response 内唯一。
+func buildResponsesMessageItem(responseID string, ordinal int, parts []interface{}) map[string]interface{} {
+	if parts == nil {
+		parts = []interface{}{}
+	}
+	return map[string]interface{}{
+		"id":      fmt.Sprintf("msg_%s_%d", responseID, ordinal),
+		"type":    "message",
+		"role":    "assistant",
+		"content": parts,
+		"status":  "completed",
+	}
+}
+
+// buildResponsesReasoningItem 构造 Responses §5 reasoning item（id*/summary*/status* 必填）。
+// content 为可选的 reasoning_text block 数组，仅在非空时输出。
+func buildResponsesReasoningItem(responseID string, ordinal int, summary []interface{}, content []interface{}) map[string]interface{} {
+	if summary == nil {
+		summary = []interface{}{}
+	}
+	item := map[string]interface{}{
+		"id":      fmt.Sprintf("rs_%s_%d", responseID, ordinal),
+		"type":    "reasoning",
+		"summary": summary,
+		"status":  "completed",
+	}
+	if len(content) > 0 {
+		item["content"] = content
+	}
+	return item
+}
+
+// buildResponsesOutputTextPart 构造 output_text part：annotations/logprobs 协议必填（P0-3），
+// 上游 message.annotations 存在时挂载到每个文本 part，否则恒输出空数组。
+func buildResponsesOutputTextPart(text string, annotations []interface{}) map[string]interface{} {
+	anns := annotations
+	if anns == nil {
+		anns = []interface{}{}
+	}
+	return map[string]interface{}{
+		"type":        "output_text",
+		"text":        text,
+		"annotations": anns,
+		"logprobs":    []interface{}{},
+	}
+}
+
+func buildResponsesRefusalPart(refusal string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":    "refusal",
+		"refusal": refusal,
+	}
+}
+
+// convertChatMessageToOutput 把 Chat 响应 message 转为 Responses output items。
+// responseID 用于生成 item 唯一 id（多 choice 时由调用方复合 choice 后缀保证全 response 唯一）。
+// P0-3：message/reasoning item 补 id/status；output_text part 补 annotations/logprobs。
+// 上游 tool call 缺 id/name/arguments 返回 malformed_tool_call，绝不产出空 id item。
+func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexToolContext, responseID string) ([]interface{}, error) {
+	var output []interface{}
+	ordinal := 0
+
+	// 处理 reasoning_content（上游扩展推理文本 → summary 承载的 reasoning item）
 	if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" {
-		output = append(output, map[string]interface{}{
-			"type":    "reasoning",
-			"summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": reasoning}},
-		})
+		output = append(output, buildResponsesReasoningItem(responseID, ordinal,
+			[]interface{}{map[string]interface{}{"type": "summary_text", "text": reasoning}}, nil))
+		ordinal++
 	}
 
 	// 处理 refusal（chat §3.1/§6.1 message.refusal → responses §5 refusal content part）。
@@ -1319,19 +2022,17 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 	refusalText, _ := message["refusal"].(string)
 
 	// annotations（chat §6.1.3 message.annotations → responses §5 output_text part.annotations）：
-	// 引用标注（url_citation 等）附加到文本 part；无文本 part 可附着时随消息丢弃（与缺失时行为一致）。
+	// 引用标注附加到文本 part；无文本 part 时随消息丢弃（与缺失时行为一致）。
 	annotations, _ := message["annotations"].([]interface{})
-	hasAnnotations := len(annotations) > 0
 
 	// 处理 content，同时提取  thinking 标签
 	if content, ok := message["content"]; ok && content != nil {
 		// 先尝试提取 thinking 内容
 		thinking, remainingContent := extractThinkingFromContent(content)
 		if thinking != "" {
-			output = append(output, map[string]interface{}{
-				"type":    "reasoning",
-				"summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": thinking}},
-			})
+			output = append(output, buildResponsesReasoningItem(responseID, ordinal,
+				[]interface{}{map[string]interface{}{"type": "summary_text", "text": thinking}}, nil))
+			ordinal++
 		}
 
 		// 处理剩余的文本内容
@@ -1341,85 +2042,59 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 				if v != "" || refusalText != "" {
 					parts := []interface{}{}
 					if v != "" {
-						textPart := map[string]interface{}{
-							"type": "output_text",
-							"text": v,
-						}
-						if hasAnnotations {
-							textPart["annotations"] = annotations
-						}
-						parts = append(parts, textPart)
+						parts = append(parts, buildResponsesOutputTextPart(v, annotations))
 					}
 					if refusalText != "" {
-						parts = append(parts, map[string]interface{}{
-							"type":    "refusal",
-							"refusal": refusalText,
-						})
+						parts = append(parts, buildResponsesRefusalPart(refusalText))
 						refusalText = ""
 					}
-					output = append(output, map[string]interface{}{
-						"type":    "message",
-						"role":    "assistant",
-						"content": parts,
-					})
+					output = append(output, buildResponsesMessageItem(responseID, ordinal, parts))
+					ordinal++
 				}
 			case []interface{}:
-				// 如果是数组，检查是否有实际内容
-				hasContent := false
+				parts := []interface{}{}
 				for _, block := range v {
-					if blockMap, ok := block.(map[string]interface{}); ok {
-						blockType, _ := blockMap["type"].(string)
-						if (blockType == "text" || blockType == "output_text") &&
-							getStringValue(blockMap, "text") != "" {
-							hasContent = true
-							break
+					bm, ok := block.(map[string]interface{})
+					if !ok {
+						return nil, errResponse(relaymodel.CodeInvalidSourceShape, "message.content", errors.New("upstream content block must be a JSON object"))
+					}
+					blockType, _ := bm["type"].(string)
+					switch blockType {
+					case "text", "output_text":
+						text := getStringValue(bm, "text")
+						if text == "" {
+							// 空文本 block 无信息量，跳过
+							continue
 						}
+						parts = append(parts, buildResponsesOutputTextPart(text, annotations))
+					case "refusal":
+						r := getStringValue(bm, "refusal")
+						if r == "" {
+							continue
+						}
+						parts = append(parts, buildResponsesRefusalPart(r))
+					default:
+						return nil, errResponse(relaymodel.CodeUnsupportedOutputItem, "message.content", fmt.Errorf("upstream content part type %q cannot be represented as a Responses output part", blockType))
 					}
 				}
-				if hasContent || refusalText != "" {
-					parts := v
-					// annotations 附加到首个文本 part（已有 annotations 字段时不覆盖）
-					if hasAnnotations {
-						for _, block := range parts {
-							if bm, ok := block.(map[string]interface{}); ok {
-								if bt, _ := bm["type"].(string); (bt == "text" || bt == "output_text") && getStringValue(bm, "text") != "" {
-									if _, exists := bm["annotations"]; !exists {
-										bm["annotations"] = annotations
-									}
-									break
-								}
-							}
-						}
-					}
-					if refusalText != "" {
-						parts = append(parts, map[string]interface{}{
-							"type":    "refusal",
-							"refusal": refusalText,
-						})
-						refusalText = ""
-					}
-					output = append(output, map[string]interface{}{
-						"type":    "message",
-						"role":    "assistant",
-						"content": parts,
-					})
+				if refusalText != "" {
+					parts = append(parts, buildResponsesRefusalPart(refusalText))
+					refusalText = ""
 				}
+				if len(parts) > 0 {
+					output = append(output, buildResponsesMessageItem(responseID, ordinal, parts))
+					ordinal++
+				}
+			default:
+				return nil, errResponse(relaymodel.CodeInvalidSourceShape, "message.content", errors.New("upstream message.content must be a string or an array of content parts (chat §6.1)"))
 			}
 		}
 	}
 
-	// 无 content 时的纯 refusal message item
+	// 无 content 时的纯 refusal message item（同样具备 id/status 必填字段，P0-3）
 	if refusalText != "" {
-		output = append(output, map[string]interface{}{
-			"type": "message",
-			"role": "assistant",
-			"content": []interface{}{
-				map[string]interface{}{
-					"type":    "refusal",
-					"refusal": refusalText,
-				},
-			},
-		})
+		output = append(output, buildResponsesMessageItem(responseID, ordinal, []interface{}{buildResponsesRefusalPart(refusalText)}))
+		ordinal++
 	}
 
 	// audio（chat §6.1.2 message.audio → responses output_audio item）：
@@ -1438,102 +2113,107 @@ func convertChatMessageToOutput(message map[string]interface{}, codexCtx *CodexT
 
 	// 处理 tool_calls
 	if toolCalls, ok := message["tool_calls"].([]interface{}); ok {
-		for _, tc := range toolCalls {
-			if tcMap, ok := tc.(map[string]interface{}); ok {
-				fnVal := getObjectValue(tcMap, "function")
-				fnMap, ok := fnVal.(map[string]interface{})
-				if !ok {
-					// chat §6.1.1 除 function 外还定义 type:"custom" 变体（custom:{name*,input*}，
-					// 字段形状以 openai-go ChatCompletionMessageCustomToolCall 为准），与 responses §5
-					// custom_tool_call（id*,call_id*,name*,input*,status）字段一一对应，可无损映射；
-					// 必填子键缺失视为上游畸形，Warn 后跳过，不产出畸形 item。
-					if tcType, _ := tcMap["type"].(string); tcType == "custom" {
-						customMap, _ := getObjectValue(tcMap, "custom").(map[string]interface{})
-						customCallID := getStringValue(tcMap, "id")
-						customName := getStringValue(customMap, "name")
-						customInput, hasCustomInput := customMap["input"].(string)
-						if customCallID == "" || customName == "" || !hasCustomInput {
-							logger.Log.Warnf("drop malformed chat custom tool call in responses output (missing id/name/input)")
-						} else {
-							output = append(output, map[string]interface{}{
-								"type":    "custom_tool_call",
-								"id":      "ctc_" + customCallID,
-								"call_id": customCallID,
-								"name":    customName,
-								"input":   customInput,
-								"status":  "completed",
-							})
-						}
-						continue
+		for j, tc := range toolCalls {
+			tcMap, ok := tc.(map[string]interface{})
+			if !ok {
+				return nil, errResponse(relaymodel.CodeInvalidSourceShape, fmt.Sprintf("message.tool_calls[%d]", j), errors.New("tool call entry must be a JSON object"))
+			}
+			callID := getStringValue(tcMap, "id")
+			fnVal := getObjectValue(tcMap, "function")
+			fnMap, fnOK := fnVal.(map[string]interface{})
+			if !fnOK {
+				// chat §6.1.1 除 function 外还定义 type:"custom" 变体（ChatCompletionMessageCustomToolCall：
+				// id*, custom:{name*,input*}），与 responses §5 custom_tool_call（id*,call_id*,name*,input*）
+				// 字段一一对应，可无损映射；必填子键缺失视为上游畸形 —— 显式 502，不再 Warn 后跳过。
+				if tcType, _ := tcMap["type"].(string); tcType == "custom" {
+					customMap, _ := getObjectValue(tcMap, "custom").(map[string]interface{})
+					customName := getStringValue(customMap, "name")
+					customInput, hasCustomInput := customMap["input"].(string)
+					if callID == "" || customName == "" || !hasCustomInput {
+						return nil, errResponse(relaymodel.CodeMalformedToolCall, fmt.Sprintf("message.tool_calls[%d]", j), errors.New("chat custom tool call missing id/name/input (chat §6.1.1)"))
 					}
-					logger.Log.Warnf("drop chat tool call with no function/custom payload in responses output (chat §6.1.1): %q", getStringValue(tcMap, "type"))
-					continue
-				}
-				rawName := getStringValue(fnMap, "name")
-				callID := getStringValue(tcMap, "id")
-				rawArgs := getStringValue(fnMap, "arguments")
-
-				// CodexCtx 路径：识别 custom proxy 还原 custom_tool_call，其他还原 namespace 字段
-				if codexCtx != nil && codexCtx.IsCustomToolProxy(rawName) {
-					customInput := reconstructCustomToolCallInput(*codexCtx, rawName, rawArgs)
-					originalName := codexCtx.OriginalCustomToolName(rawName)
 					output = append(output, map[string]interface{}{
 						"type":    "custom_tool_call",
 						"id":      "ctc_" + callID,
 						"call_id": callID,
-						"name":    originalName,
+						"name":    customName,
 						"input":   customInput,
 						"status":  "completed",
 					})
 					continue
 				}
-
-				item := map[string]interface{}{
-					"type":      "function_call",
-					"call_id":   callID,
-					"arguments": rawArgs,
-				}
-				if codexCtx != nil {
-					if codexCtx.IsBuiltinTool(rawName, "tool_search") || rawName == "tool_search" {
-						// execution:"client"：本中转为客户端侧代理执行，与流式路径输出对齐（docs §3.7）
-						output = append(output, map[string]interface{}{
-							"type":      "tool_search_call",
-							"id":        "ts_" + callID,
-							"call_id":   callID,
-							"name":      rawName,
-							"arguments": rawArgs,
-							"execution": "client",
-							"status":    "completed",
-						})
-						continue
-					}
-					if codexCtx.IsBuiltinTool(rawName, "web_search") || rawName == "web_search" {
-						output = append(output, map[string]interface{}{
-							"type":      "web_search_call",
-							"id":        "ws_" + callID,
-							"call_id":   callID,
-							"name":      rawName,
-							"arguments": rawArgs,
-							"status":    "completed",
-						})
-						continue
-					}
-					displayName, namespace := codexCtx.OpenAINameForFunctionTool(rawName)
-					item["name"] = displayName
-					if namespace != "" {
-						item["namespace"] = namespace
-					}
-					item["id"] = "fc_" + callID
-					item["status"] = "completed"
-				} else {
-					item["name"] = rawName
-				}
-				output = append(output, item)
+				return nil, errResponse(relaymodel.CodeMalformedToolCall, fmt.Sprintf("message.tool_calls[%d]", j), errors.New("chat tool call has neither function nor custom payload (chat §6.1.1)"))
 			}
+			rawName := getStringValue(fnMap, "name")
+			rawArgs, argsOK := fnMap["arguments"].(string)
+			// chat §6.1.1 function 变体 id/name/arguments 必填；缺失即上游畸形（P0-3），
+			// 不能生成空 id / 空 name item。
+			if callID == "" || rawName == "" || !argsOK || rawArgs == "" {
+				return nil, errResponse(relaymodel.CodeMalformedToolCall, fmt.Sprintf("message.tool_calls[%d]", j), errors.New("chat function tool call missing id/name/arguments (chat §6.1.1)"))
+			}
+
+			// CodexCtx 路径：识别 custom proxy 还原 custom_tool_call，其他还原 namespace 字段
+			if codexCtx != nil && codexCtx.IsCustomToolProxy(rawName) {
+				customInput := reconstructCustomToolCallInput(*codexCtx, rawName, rawArgs)
+				originalName := codexCtx.OriginalCustomToolName(rawName)
+				output = append(output, map[string]interface{}{
+					"type":    "custom_tool_call",
+					"id":      "ctc_" + callID,
+					"call_id": callID,
+					"name":    originalName,
+					"input":   customInput,
+					"status":  "completed",
+				})
+				continue
+			}
+
+			item := map[string]interface{}{
+				"type":      "function_call",
+				"call_id":   callID,
+				"arguments": rawArgs,
+			}
+			if codexCtx != nil {
+				if codexCtx.IsBuiltinTool(rawName, "tool_search") || rawName == "tool_search" {
+					// execution:"client"：本中转为客户端侧代理执行，与流式路径输出对齐（docs §3.7）
+					// tool_search_call 的 arguments 是内嵌 JSON 对象，与 function_call.arguments 字符串口径不同；
+					// 取值口径见 toolSearchArgumentsValue（统一 helper，三条输出路径结构一致）。
+					output = append(output, map[string]interface{}{
+						"type":      "tool_search_call",
+						"id":        "ts_" + callID,
+						"call_id":   callID,
+						"name":      rawName,
+						"arguments": toolSearchArgumentsValue(rawArgs),
+						"execution": "client",
+						"status":    "completed",
+					})
+					continue
+				}
+				if codexCtx.IsBuiltinTool(rawName, "web_search") || rawName == "web_search" {
+					output = append(output, map[string]interface{}{
+						"type":      "web_search_call",
+						"id":        "ws_" + callID,
+						"call_id":   callID,
+						"name":      rawName,
+						"arguments": rawArgs,
+						"status":    "completed",
+					})
+					continue
+				}
+				displayName, namespace := codexCtx.OpenAINameForFunctionTool(rawName)
+				item["name"] = displayName
+				if namespace != "" {
+					item["namespace"] = namespace
+				}
+				item["id"] = "fc_" + callID
+				item["status"] = "completed"
+			} else {
+				item["name"] = rawName
+			}
+			output = append(output, item)
 		}
 	}
 
-	return output
+	return output, nil
 }
 
 // parseUsage 解析 usage 字段，支持多种格式（OpenAI、Claude、Gemini）

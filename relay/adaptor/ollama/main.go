@@ -36,7 +36,16 @@ func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {
 		Stream: request.Stream,
 	}
 	for _, message := range request.Messages {
-		openaiContent := message.ParseContent()
+		openaiContent, pcErr := message.ParseContent()
+		if pcErr != nil {
+			// ParseContent 已改为防御性 error 签名；本 adaptor 无 error 返回通道，
+			// 显式记错并退回 string content 聚合，保持原转换行为等价，不 swallow
+			logger.Log.Errorf("ollama: parse content failed for role %s: %v", message.Role, pcErr)
+			openaiContent = nil
+			if s := message.StringContent(); s != "" {
+				openaiContent = []model.MessageContent{{Type: model.ContentTypeText, Text: s}}
+			}
+		}
 		var imageUrls []string
 		var contentText string
 		for _, part := range openaiContent {

@@ -207,7 +207,10 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	var req map[string]interface{}
 	if err := json.Unmarshal(requestBody, &req); err != nil {
 		logger.Log.Errorf("[%s] %+v", "invalid request body", err)
-		return openai.ErrorWrapper(err, "invalid request body", http.StatusBadRequest)
+		return &model.ErrorWithStatusCode{
+			Error:      model.Error{Message: err.Error(), Type: "invalid_request_error", Code: model.CodeInvalidSourceJSON},
+			StatusCode: http.StatusBadRequest,
+		}
 	}
 
 	modelName := ctxMeta.ActualModelName
@@ -230,7 +233,13 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 		fallbackReasoning = true
 	}
 
-	chatRequest := codex.ConvertResponsesToChatRequest(modelName, requestBody, stream)
+	// 请求转换错误（invalid_source_json / unsupported_mapping）必须在创建 chatRequestReader、
+	// 查询/减少额度与 DoRequest 之前消费（Error Propagation Contract），原 Responses body 不得发往上游。
+	chatRequest, convErr := codex.ConvertResponsesToChatRequest(modelName, requestBody, stream)
+	if convErr != nil {
+		logger.Log.Errorf("[responses-converted] request conversion failed: %+v", convErr)
+		return responsesConversionClientError(convErr)
+	}
 
 	chatRequestReader := bytes.NewBuffer(chatRequest)
 
@@ -311,8 +320,15 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 		common.SetEventStreamHeaders(c)
 		c.Writer.WriteHeader(http.StatusOK)
 		var converterState any
-		streamResult, _ := forwardChatResponsesStream(c, resp.Body, requestBody, &converterState, fallbackReasoning)
-		if streamResult.FailureError != nil || streamResult.FailedTerminal {
+		streamResult, streamErr := forwardChatResponsesStream(c, resp.Body, requestBody, &converterState, fallbackReasoning)
+		if streamErr != nil {
+			logger.Log.Errorf("[responses-converted] stream terminated with error: %v", streamErr)
+		}
+		// 转换错误/失败终态（契约 §1.3）：SSE header 已提交，错误只能经事件终态表达——
+		// forwarder 已保证写出唯一 failed/error 事件且不附加 JSON error body；
+		// 此处消费状态、回滚预扣费并回传 502 失败错误：不得进入 post-consume，
+		// 由 relay.go 依据 Written() 抑制重试与 JSON 渲染，同时保留渠道失败记账。
+		if streamResult.FailureError != nil || streamResult.FailedTerminal || streamErr != nil {
 			rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 			if streamResult.FailureError != nil {
 				logger.Log.Errorf("[%s] %+v", "scan response failed", streamResult.FailureError)
@@ -323,7 +339,7 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 			if err := resp.Body.Close(); err != nil {
 				logger.Log.Warnf("failed to close response body: %v", err)
 			}
-			return nil
+			return responsesStreamFailureError(streamResult, streamErr)
 		}
 
 		// 从流状态中提取 usage 和完整的响应体用于日志记录
@@ -362,34 +378,13 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 			logger.Log.Warnf("failed to close response body: %v", err)
 		}
 
-		ctx = context.WithValue(ctx, CtxKeyResponseBody, string(respBody))
-
-		responsesResponse := codex.ConvertChatResponseToResponsesWithContext(respBody, modelName, fallbackReasoning, requestBody)
-		c.JSON(http.StatusOK, json.RawMessage(responsesResponse))
-
-		// 解析 usage
-		var chatResponse map[string]interface{}
-		if err := json.Unmarshal(respBody, &chatResponse); err == nil {
-			if usage, ok := chatResponse["usage"].(map[string]interface{}); ok {
-				if pt, ok := usage["prompt_tokens"].(float64); ok {
-					finalUsage.PromptTokens = int(pt)
-				}
-				if ct, ok := usage["completion_tokens"].(float64); ok {
-					finalUsage.CompletionTokens = int(ct)
-				}
-				if tt, ok := usage["total_tokens"].(float64); ok {
-					finalUsage.TotalTokens = int(tt)
-				}
-				// 解析 prompt_tokens_details.cached_tokens
-				if promptTokensDetails, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
-					if cachedTokens, ok := promptTokensDetails["cached_tokens"].(float64); ok && int(cachedTokens) > 0 {
-						finalUsage.PromptTokensDetails = &model.PromptTokensDetails{
-							CachedTokens: int(cachedTokens),
-						}
-					}
-				}
-			}
+		convertedBody, usage, relayErr := convertAndWriteResponsesNonStream(c, ctx, ctxMeta, respBody, modelName, fallbackReasoning, requestBody)
+		if relayErr != nil {
+			// 转换失败已在 helper 内回滚预扣费；502 时未写 200、未设置成功 body、未透传 chat.completion
+			return relayErr
 		}
+		*finalUsage = *usage
+		ctx = context.WithValue(ctx, CtxKeyResponseBody, string(convertedBody))
 	}
 
 	// 后消费逻辑 - 在 goroutine 外提取需要从 ctx 读取的值
@@ -413,18 +408,101 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	return nil
 }
 
+// responsesStreamFailureError 把已提交 SSE 后的流失败终态映射为 HTTP 502 upstream_error（契约 §1.3）。
+// forwarder 已把错误经 failed/error 事件写回客户端，这里只回传渠道失败记账所需的错误对象；
+// 复用 forwarder 已归类的 FailureError（含稳定机器码），仅在其缺失时按 streamErr/通用信息兜底。
+func responsesStreamFailureError(result chatResponsesStreamResult, streamErr error) *model.ErrorWithStatusCode {
+	errInfo := model.Error{}
+	if result.FailureError != nil {
+		errInfo = *result.FailureError
+	}
+	if errInfo.Message == "" {
+		if streamErr != nil {
+			errInfo.Message = streamErr.Error()
+		} else {
+			errInfo.Message = "responses stream failed after SSE headers committed"
+		}
+	}
+	if errInfo.Type == "" {
+		errInfo.Type = "upstream_error"
+	}
+	if errInfo.Code == nil || errInfo.Code == "" {
+		errInfo.Code = "invalid_upstream_response"
+	}
+	return &model.ErrorWithStatusCode{Error: errInfo, StatusCode: http.StatusBadGateway}
+}
+
+// responsesConversionClientError 将请求侧协议转换错误映射为客户端错误（契约 §1.3 / T6）：
+// HTTP 400 invalid_request_error，Code 保留稳定机器码（unsupported_mapping / invalid_source_json 等），
+// 不再走仅 logger 的降级路径。
+func responsesConversionClientError(err error) *model.ErrorWithStatusCode {
+	code := model.CodeUnsupportedMapping
+	var pce *model.ProtocolConversionError
+	if errors.As(err, &pce) {
+		code = pce.Code
+	}
+	return &model.ErrorWithStatusCode{
+		Error:      model.Error{Message: err.Error(), Type: "invalid_request_error", Code: code},
+		StatusCode: http.StatusBadRequest,
+	}
+}
+
+// convertAndWriteResponsesNonStream 把上游 Chat 非流式响应转换为 Responses 协议并写回客户端。
+// 转换失败：回滚预扣费并返回 HTTP 502 upstream_error/invalid_upstream_response ——
+// 不得把 chat.completion 原样发给 Responses 客户端，也不得在转换前写 200/设置成功 body（报告一 P0-1）。
+// 成功：返回转换后的 body 与从上游 usage 提取的内部 Usage（口径与既有实现一致）。
+func convertAndWriteResponsesNonStream(c *gin.Context, ctx context.Context, ctxMeta *metaPkg.Meta, respBody []byte, modelName string, fallbackReasoning bool, requestBody []byte) ([]byte, *model.Usage, *model.ErrorWithStatusCode) {
+	responsesResponse, convErr := codex.ConvertChatResponseToResponsesWithContext(respBody, modelName, fallbackReasoning, requestBody)
+	if convErr != nil {
+		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
+		logger.Log.Errorf("[responses-converted] upstream chat response rejected by converter: %+v", convErr)
+		return nil, nil, &model.ErrorWithStatusCode{
+			Error:      model.Error{Message: convErr.Error(), Type: "upstream_error", Code: "invalid_upstream_response"},
+			StatusCode: http.StatusBadGateway,
+		}
+	}
+
+	c.JSON(http.StatusOK, json.RawMessage(responsesResponse))
+
+	// 解析 usage
+	finalUsage := &model.Usage{}
+	var chatResponse map[string]interface{}
+	if err := json.Unmarshal(respBody, &chatResponse); err == nil {
+		if usage, ok := chatResponse["usage"].(map[string]interface{}); ok {
+			if pt, ok := usage["prompt_tokens"].(float64); ok {
+				finalUsage.PromptTokens = int(pt)
+			}
+			if ct, ok := usage["completion_tokens"].(float64); ok {
+				finalUsage.CompletionTokens = int(ct)
+			}
+			if tt, ok := usage["total_tokens"].(float64); ok {
+				finalUsage.TotalTokens = int(tt)
+			}
+			// 解析 prompt_tokens_details.cached_tokens
+			if promptTokensDetails, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
+				if cachedTokens, ok := promptTokensDetails["cached_tokens"].(float64); ok && int(cachedTokens) > 0 {
+					finalUsage.PromptTokensDetails = &model.PromptTokensDetails{
+						CachedTokens: int(cachedTokens),
+					}
+				}
+			}
+		}
+	}
+	return responsesResponse, finalUsage, nil
+}
+
 // responsesUsage 解析 responses 协议的 usage 字段（DeepSeek 原生透传用）。
 // responses 协议 token 字段为 input_tokens/output_tokens，与 chat 协议（prompt_tokens/completion_tokens）不同。
 type responsesUsage struct {
-	InputTokens        int `json:"input_tokens"`
-	OutputTokens       int `json:"output_tokens"`
-	TotalTokens        int `json:"total_tokens"`
-	InputTokensDetails *struct {
-		CachedTokens int `json:"cached_tokens"`
-	} `json:"input_tokens_details"`
+	InputTokens         int                        `json:"input_tokens"`
+	OutputTokens        int                        `json:"output_tokens"`
+	TotalTokens         int                        `json:"total_tokens"`
+	InputTokensDetails  *model.InputTokensDetails  `json:"input_tokens_details"`
+	OutputTokensDetails *model.OutputTokensDetails `json:"output_tokens_details"`
 }
 
 // toModelUsage 把 responses usage 映射到网关内部 Usage（用于扣费与日志）。
+// 计费只看总数与 cached_tokens；cache_write/reasoning 等 details 仅进入内部 detail 承载，不改 quota 公式。
 func (u *responsesUsage) toModelUsage() *model.Usage {
 	if u == nil {
 		return nil
@@ -434,8 +512,20 @@ func (u *responsesUsage) toModelUsage() *model.Usage {
 		CompletionTokens: u.OutputTokens,
 		TotalTokens:      u.TotalTokens,
 	}
-	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0 {
-		usage.PromptTokensDetails = &model.PromptTokensDetails{CachedTokens: u.InputTokensDetails.CachedTokens}
+	if d := u.InputTokensDetails; d != nil && (d.CachedTokens != 0 || d.CacheWriteTokens != 0) {
+		usage.PromptTokensDetails = &model.PromptTokensDetails{
+			CachedTokens:     d.CachedTokens,
+			CacheWriteTokens: d.CacheWriteTokens,
+		}
+	}
+	if d := u.OutputTokensDetails; d != nil && (d.ReasoningTokens != 0 || d.AcceptedPredictionTokens != 0 || d.RejectedPredictionTokens != 0 || d.AudioTokens != 0 || d.TextTokens != 0) {
+		usage.CompletionTokensDetails = &model.CompletionTokensDetails{
+			ReasoningTokens:          d.ReasoningTokens,
+			AcceptedPredictionTokens: d.AcceptedPredictionTokens,
+			RejectedPredictionTokens: d.RejectedPredictionTokens,
+			AudioTokens:              d.AudioTokens,
+			TextTokens:               d.TextTokens,
+		}
 	}
 	return usage
 }
@@ -819,8 +909,9 @@ func forwardChatResponsesStream(c *gin.Context, body io.Reader, requestBody []by
 		if err != nil {
 			if err == io.EOF {
 				// 如果转换器已累积状态但未生成终态事件，合成 [DONE] 触发 response.completed
+				// （存在转换错误时转换器只会产出 failed 终态，绝不合成 completed，P0-1）
 				if !result.SuccessTerminal && !result.FailedTerminal && converterState != nil && *converterState != nil {
-					synthEvents := codex.ConvertOpenAIChatToResponsesWithContext(
+					synthEvents, synthErr := codex.ConvertOpenAIChatToResponsesWithContext(
 						requestBody, nil, []byte("data: [DONE]"), converterState, fallbackReasoning)
 					eventResult := inspectConvertedResponsesEvents(c, synthEvents)
 					if eventResult.SuccessTerminal {
@@ -831,6 +922,25 @@ func forwardChatResponsesStream(c *gin.Context, body io.Reader, requestBody []by
 					}
 					if eventResult.TerminalSeen {
 						result.TerminalSeen = true
+					}
+					if eventResult.FailedTerminal {
+						result.StreamErrored = true
+						result.FailedTerminal = true
+						if result.FailureError == nil {
+							result.FailureError = eventResult.FailureError
+						}
+					}
+					if synthErr != nil {
+						// EOF 合成阶段暴露的转换错误（畸形工具 close / 已记录 ConversionError）：
+						// 停止并上抛，错误不得 swallow；failed 终态已随 events 写出。
+						result.StreamErrored = true
+						result.FailedTerminal = true
+						if result.FailureError == nil {
+							result.FailureError = &model.Error{Message: synthErr.Error(), Type: "upstream_error", Code: "invalid_upstream_response"}
+						}
+						logger.Log.Errorf("[responses-converted] chat→responses EOF synth conversion failed: %v", synthErr)
+						c.Writer.Flush()
+						return result, synthErr
 					}
 					c.Writer.Flush()
 				}
@@ -845,12 +955,14 @@ func forwardChatResponsesStream(c *gin.Context, body io.Reader, requestBody []by
 			}
 			return result, err
 		}
-		if event.Event == "" && event.Data == "" {
+		// 无 data 载荷的事件帧不构成 Chat chunk（chat §7.1 每 chunk 必为 data + JSON object），
+		// 不得送入转换器触发初始化或 invalid_stream_event
+		if event.Data == "" {
 			continue
 		}
 
 		rawLine := "data: " + event.Data
-		convertedEvents := codex.ConvertOpenAIChatToResponsesWithContext(requestBody, nil, []byte(rawLine), converterState, fallbackReasoning)
+		convertedEvents, convErr := codex.ConvertOpenAIChatToResponsesWithContext(requestBody, nil, []byte(rawLine), converterState, fallbackReasoning)
 		eventResult := inspectConvertedResponsesEvents(c, convertedEvents)
 		if eventResult.SuccessTerminal {
 			result.SuccessTerminal = true
@@ -865,6 +977,20 @@ func forwardChatResponsesStream(c *gin.Context, body io.Reader, requestBody []by
 			result.StreamErrored = true
 			result.FailedTerminal = true
 			result.FailureError = eventResult.FailureError
+		}
+		// 转换错误边界（契约 §1.3 / T7）：转换器已随 events 产出唯一 response.failed 终态
+		// （SSE header 已提交，禁止再附加 JSON error body）；这里兜底补齐状态位并停止读流，
+		// error 上抛供 controller 回滚预扣费与日志，禁止 swallow。
+		if convErr != nil {
+			result.StreamErrored = true
+			result.FailedTerminal = true
+			if result.FailureError == nil {
+				result.FailureError = &model.Error{Message: convErr.Error(), Type: "upstream_error", Code: "invalid_upstream_response"}
+			}
+			logger.Log.Errorf("[responses-converted] chat→responses stream conversion failed: %v", convErr)
+			c.Writer.Flush()
+			_, _ = io.Copy(io.Discard, body)
+			return result, convErr
 		}
 		c.Writer.Flush()
 		if result.FailedTerminal || result.SuccessTerminal {

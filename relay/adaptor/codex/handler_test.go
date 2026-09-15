@@ -737,7 +737,11 @@ func TestConvertOpenAIChatToResponses_InterleavedToolTerminalOrdering(t *testing
 		]
 	}`)
 	for _, chunk := range chunks {
-		allEvents = append(allEvents, ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)...)
+		ev, evErr := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+		if evErr != nil {
+			t.Fatalf("unexpected conversion error on valid stream chunk %q: %v", chunk, evErr)
+		}
+		allEvents = append(allEvents, ev...)
 	}
 
 	messageDoneIndex := -1
@@ -845,8 +849,11 @@ func TestStreamResponsesHandler_FailedTerminalShortCircuitsSuccess(t *testing.T)
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, responseText, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected failed terminal after SSE start not to bubble JSON error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected failed terminal after SSE start to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if responseText != "partial text" {
 		t.Fatalf("expected partial delta text preserved before failure, got %q", responseText)
@@ -874,6 +881,65 @@ func TestStreamResponsesHandler_FailedTerminalShortCircuitsSuccess(t *testing.T)
 	}
 }
 
+// TestStreamResponsesHandler_CommittedReadFailureReturnsErrorWithoutAppendingOutput 锁定批次二契约：
+// SSE 已提交后发生上游读错误时必须回传非 nil 502 供渠道失败记账，且只按既有 SSE 帧写出——
+// 不得追加 JSON HTTP 错误体、伪造 [DONE] 或成功终态，也不得重复终态事件。
+func TestStreamResponsesHandler_CommittedReadFailureReturnsErrorWithoutAppendingOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	chunks := []string{strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_read_fail","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":2,"output_tokens":0,"total_tokens":2}}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"partial"}`,
+		"",
+	}, "\n") + "\n"}
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	resp := &http.Response{StatusCode: http.StatusOK, Body: &errReader{chunks: chunks, err: io.ErrUnexpectedEOF}}
+
+	err, responseText, _ := StreamResponsesHandler(c, resp)
+	if err == nil {
+		t.Fatal("expected committed read failure to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
+	}
+	if responseText != "partial" {
+		t.Fatalf("expected preserved partial text, got %q", responseText)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected committed SSE to keep HTTP 200, got %d", recorder.Code)
+	}
+
+	body := recorder.Body.String()
+	// 已提交客户端流只能由 SSE 帧行组成：不得追加 JSON HTTP 错误体。
+	for _, line := range strings.Split(body, "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "event: ") && !strings.HasPrefix(line, "data: ") {
+			t.Fatalf("non-SSE content appended after committed stream header: %q (body=%q)", line, body)
+		}
+	}
+	if strings.Contains(body, `{"error":`) {
+		t.Fatalf("expected no JSON HTTP error body appended, got %q", body)
+	}
+	if strings.Count(body, `data: [DONE]`) != 0 {
+		t.Fatalf("expected no fabricated [DONE] on failure, got %q", body)
+	}
+	if strings.Count(body, `"type":"response.completed"`) != 0 {
+		t.Fatalf("expected no fabricated success terminal, got %q", body)
+	}
+	if strings.Count(body, `"type":"error"`) != 1 {
+		t.Fatalf("expected exactly one terminal error event, got %q", body)
+	}
+}
+
 func TestStreamResponsesHandler_FailedTerminalDropsDuplicateFailed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -898,8 +964,11 @@ func TestStreamResponsesHandler_FailedTerminalDropsDuplicateFailed(t *testing.T)
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, responseText, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected duplicate failed terminal after SSE start not to bubble JSON error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected duplicate failed terminal after SSE start to return non-nil 502")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if responseText != "" {
 		t.Fatalf("expected no response text for failed-only stream, got %q", responseText)
@@ -974,8 +1043,11 @@ func TestStreamResponsesHandler_FailedTerminalUsagePrefersNonZeroNestedButPreser
 			resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 			err, _, usage := StreamResponsesHandler(c, resp)
-			if err != nil {
-				t.Fatalf("expected failed terminal to stay on SSE path, got %+v", err)
+			if err == nil {
+				t.Fatal("expected failed terminal to return non-nil 502 for channel failure accounting")
+			}
+			if err.StatusCode != http.StatusBadGateway {
+				t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 			}
 			if usage == nil {
 				t.Fatalf("expected failed terminal usage to be captured")
@@ -1299,7 +1371,11 @@ func TestConvertOpenAIChatToResponses_FailedTerminalDropsLateNormalChunk(t *test
 	var allEvents []string
 	reqBody := []byte(`{"model":"codex-test"}`)
 	for _, chunk := range chunks {
-		allEvents = append(allEvents, ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)...)
+		ev, evErr := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+		if evErr != nil {
+			t.Fatalf("unexpected conversion error on valid stream chunk %q: %v", chunk, evErr)
+		}
+		allEvents = append(allEvents, ev...)
 	}
 
 	failedPayloads := parseResponsesEventData(allEvents, "response.failed")
@@ -1465,7 +1541,8 @@ func TestStreamResponsesHandler_MixedToolsSurviveBadItem(t *testing.T) {
 func TestStreamResponsesHandler_DetectsResponseFailedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	// rate_limit_exceeded -> 429 应该触发重试
+	// 首帧即 response.failed：SSE 头已提交，失败只经事件表达，但必须回传非 nil 错误供渠道失败记账
+	// （重试由框架层 Written() 守卫抑制，不再依赖错误码映射）。
 	stream := strings.Join([]string{
 		`event: response.failed`,
 		`data: {"type":"response.failed","response":{"id":"resp_fail_1","model":"gpt-4o","status":"failed","output":[],"error":{"code":"rate_limit_exceeded","message":"Concurrency limit exceeded for user, please retry later"}}}`,
@@ -1479,8 +1556,11 @@ func TestStreamResponsesHandler_DetectsResponseFailedEvent(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected first failed event to be handled in-stream, got %v", err)
+	if err == nil {
+		t.Fatal("expected first failed event to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from failed response, got %#v", usage)
@@ -1509,8 +1589,11 @@ func TestStreamResponsesHandler_ResponseFailedServerErrorMapsTo5xx(t *testing.T)
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected first failed event to be handled in-stream, got %v", err)
+	if err == nil {
+		t.Fatal("expected server-error failed event to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from first-frame failed event, got %#v", usage)
@@ -1539,8 +1622,11 @@ func TestStreamResponsesHandler_ResponseFailedInvalidRequestMapsTo4xx(t *testing
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected first failed invalid-request event to be handled in-stream, got %v", err)
+	if err == nil {
+		t.Fatal("expected invalid-request failed event to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from invalid-request failed event, got %#v", usage)
@@ -1569,8 +1655,11 @@ func TestStreamResponsesHandler_DetectsErrorEvent(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected first error event to be handled in-stream, got %v", err)
+	if err == nil {
+		t.Fatal("expected first error event to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from error event, got %#v", usage)
@@ -1602,8 +1691,11 @@ func TestStreamResponsesHandler_DetectsErrorEventDuringStream(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, responseText, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected mid-stream error not to bubble JSON error, got %+v", err)
+	if err == nil {
+		t.Fatalf("expected mid-stream error to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if responseText != "Hello" {
 		t.Fatalf("expected partial response text Hello, got %q", responseText)
@@ -1633,8 +1725,11 @@ func TestStreamResponsesHandler_ErrorEventWithEmptyCode(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected first error event with empty code to be handled in-stream, got %v", err)
+	if err == nil {
+		t.Fatal("expected first error event with empty code to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from error event, got %#v", usage)
@@ -1662,8 +1757,11 @@ func TestStreamResponsesHandler_ErrorPayloadTypeWithoutEventName(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected payload type error without explicit event name to be handled in-stream, got %v", err)
+	if err == nil {
+		t.Fatal("expected payload type error without explicit event name to return non-nil 502")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from first-frame payload type error, got %#v", usage)
@@ -1882,8 +1980,11 @@ func TestStreamResponsesHandler_ErrorEventMissingMessageField(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected missing-message error event after headers committed to return nil error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected missing-message error event after headers committed to return non-nil 502")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from error event, got %#v", usage)
@@ -1912,8 +2013,11 @@ func TestStreamResponsesHandler_ErrorEventMissingBothMessageAndCode(t *testing.T
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected minimal error event after headers committed to return nil error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected minimal error event after headers committed to return non-nil 502")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from error event, got %#v", usage)
@@ -1942,8 +2046,11 @@ func TestStreamResponsesHandler_ErrorEventWithExtraFields(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected extra-field error event after headers committed to return nil error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected extra-field error event after headers committed to return non-nil 502")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from error event, got %#v", usage)
@@ -1972,8 +2079,11 @@ func TestStreamResponsesHandler_ErrorEventWithOnlyTypeField(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected type-only error event after headers committed to return nil error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected type-only error event after headers committed to return non-nil 502")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage != nil {
 		t.Fatalf("expected nil usage from error event, got %#v", usage)
@@ -2029,8 +2139,11 @@ func TestStreamResponsesHandler_ErrorEventMixedWithOtherEvents(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, responseText, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected mixed stream error not to bubble JSON error, got %+v", err)
+	if err == nil {
+		t.Fatalf("expected mixed stream error to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	// 验证 responseText 包含 error 前的累积内容。
 	if responseText != "Hello world" {
@@ -2071,8 +2184,11 @@ func TestStreamResponsesHandler_MultipleErrorEvents_OnlyFirstRecorded(t *testing
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, responseText, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected repeated error events not to bubble JSON error, got %+v", err)
+	if err == nil {
+		t.Fatalf("expected repeated error events to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if responseText != "Hello" {
 		t.Fatalf("expected partial response text Hello, got %q", responseText)
@@ -2129,7 +2245,7 @@ func TestMapFailedErrorToStatusCode(t *testing.T) {
 	}
 }
 
-func TestStreamResponsesHandler_FirstTerminalErrorAfterHeaderWriteReturnsNilError(t *testing.T) {
+func TestStreamResponsesHandler_FirstTerminalErrorAfterHeaderWriteReturnsFailureError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
@@ -2145,14 +2261,15 @@ data: {"message":"upstream failed","type":"server_error","code":"bad_response"}
 	}
 
 	err, _, _ := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected already-written first-frame terminal error to not bubble biz error, got %v", err)
+	if err == nil {
+		t.Fatal("expected first-frame terminal error after header write to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status 200 already written, got %d", recorder.Code)
 	}
-	body := recorder.Body.String()
-	_ = body
 }
 
 func TestStreamResponsesHandler_FlushesHeadersAfterFirstValidEvent(t *testing.T) {
@@ -2206,8 +2323,11 @@ func TestStreamResponsesHandler_DoesNotAppendDoneOnAbnormalEOF(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: &errReader{chunks: chunks, err: io.ErrUnexpectedEOF}}
 
 	err, responseText, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected abnormal eof after SSE start not to bubble JSON error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected abnormal eof after SSE start to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if responseText != "partial" {
 		t.Fatalf("expected known partial text preserved, got %q", responseText)
@@ -2241,8 +2361,11 @@ func TestStreamResponsesHandler_LargeEventErrorIsObservable(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, _ := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected oversize first event after SSE start to stay in stream, got %+v", err)
+	if err == nil {
+		t.Fatal("expected oversize first event after SSE start to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected SSE stream to keep 200 status once headers are flushed, got %d", recorder.Code)
@@ -2287,8 +2410,11 @@ func TestStreamResponsesHandler_StreamErrorDoesNotFinalizeAsJSONError(t *testing
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, _ := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected stream error to be handled inside SSE without bubbling JSON error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected stream error to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	body := recorder.Body.String()
 	if !strings.Contains(body, `event: error`) {
@@ -2324,8 +2450,11 @@ func TestStreamResponsesHandler_ReadErrorAfterStreamBeginsEmitsTerminalErrorEven
 	resp := &http.Response{StatusCode: http.StatusOK, Body: streamReader}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected stream read error to stay in SSE channel, got %+v", err)
+	if err == nil {
+		t.Fatal("expected stream read error to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage == nil || usage.TotalTokens != 1 {
 		t.Fatalf("expected last known usage snapshot preserved, got %#v", usage)
@@ -2369,8 +2498,11 @@ func TestStreamResponsesHandler_FirstFrameResponseFailedPreservesUsageAndCapture
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected first response.failed frame to be handled in-stream, got %v", err)
+	if err == nil {
+		t.Fatal("expected first response.failed frame to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage == nil {
 		t.Fatalf("expected failed first-frame usage to be preserved")
@@ -2412,8 +2544,11 @@ func TestStreamResponsesHandler_ResponseFailedAggregatesUsage(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, usage := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected failed response to stay in SSE channel, got %+v", err)
+	if err == nil {
+		t.Fatal("expected failed response to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	if usage == nil {
 		t.Fatalf("expected usage from failed response payload")
@@ -2542,8 +2677,11 @@ func TestStreamResponsesHandler_ExplicitFailedDoesNotSynthesizeCompleted(t *test
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
 
 	err, _, _ := StreamResponsesHandler(c, resp)
-	if err != nil {
-		t.Fatalf("expected no transport error, got %+v", err)
+	if err == nil {
+		t.Fatal("expected explicit response.failed to return non-nil 502 for channel failure accounting")
+	}
+	if err.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502, got %d", err.StatusCode)
 	}
 	body := recorder.Body.String()
 	if strings.Count(body, `"type":"response.completed"`) != 0 {
@@ -2721,6 +2859,141 @@ func TestStreamResponsesHandler_PreservesIncompleteDetailsInCaptureSnapshot(t *t
 	}
 	if details["reason"] != "max_output_tokens" {
 		t.Fatalf("expected truncation reason preserved for log consumers, got %#v", details["reason"])
+	}
+}
+
+// TestResponsesUsageDetailsReachCaptureAndInternalUsage 锁定共享 usage details 承载（报告一 P1-11 / 报告二 20、26）：
+// response.completed 的 cached/cache_write/reasoning/accepted/rejected/audio/text details
+// 必须在 capture 重序列化后保留协议键名，并可在网关内部 Usage 中读取；直连原始 body 字节不得被改写。
+func TestResponsesUsageDetailsReachCaptureAndInternalUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const completedPayload = `{"type":"response.completed","response":{"id":"resp_details","object":"response","created_at":1700000000,"status":"completed","error":null,"incomplete_details":null,"model":"gpt-5-codex","output":[],"previous_response_id":"resp_prev_1","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":12},"output_tokens":50,"output_tokens_details":{"reasoning_tokens":10,"accepted_prediction_tokens":2,"rejected_prediction_tokens":1,"audio_tokens":3,"text_tokens":34},"total_tokens":150}}}`
+
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_details","object":"response","created_at":1700000000,"model":"gpt-5-codex","output":[],"status":"in_progress","previous_response_id":"resp_prev_1"}}`,
+		"",
+		`event: response.completed`,
+		`data: ` + completedPayload,
+		"",
+	}, "\n")
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}
+
+	errWithCode, _, usage := StreamResponsesHandler(c, resp)
+	if errWithCode != nil {
+		t.Fatalf("stream handler returned error: %+v", errWithCode)
+	}
+
+	// 1. 转发给客户端的原始帧字节必须原样保留（capture 的 wire tag 修正不得改写透传 body）
+	if !strings.Contains(recorder.Body.String(), completedPayload) {
+		t.Fatalf("expected forwarded SSE body to keep the original completed frame bytes, got %q", recorder.Body.String())
+	}
+
+	// 2. capture 重序列化后协议键名与 details 数值全保留
+	var capture struct {
+		Response map[string]any `json:"response"`
+	}
+	rawBody := c.GetString(ctxkey.ResponseBody)
+	if err := json.Unmarshal([]byte(rawBody), &capture); err != nil {
+		t.Fatalf("unmarshal capture snapshot: %v (body=%s)", err, rawBody)
+	}
+	snap := capture.Response
+	if snap == nil {
+		t.Fatalf("expected response snapshot in capture, got %s", rawBody)
+	}
+	if _, ok := snap["created"]; ok {
+		t.Fatalf("capture snapshot must not emit protocol-illegal key \"created\", got %s", rawBody)
+	}
+	if _, ok := snap["previous_id"]; ok {
+		t.Fatalf("capture snapshot must not emit protocol-illegal key \"previous_id\", got %s", rawBody)
+	}
+	if snap["created_at"] != float64(1700000000) {
+		t.Fatalf("expected created_at preserved in capture snapshot, got %#v", snap["created_at"])
+	}
+	if snap["previous_response_id"] != "resp_prev_1" {
+		t.Fatalf("expected previous_response_id preserved in capture snapshot, got %#v", snap["previous_response_id"])
+	}
+	if snap["object"] != "response" {
+		t.Fatalf("expected object preserved in capture snapshot, got %#v", snap["object"])
+	}
+	usageJSON, ok := snap["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected usage object in capture snapshot, got %#v", snap["usage"])
+	}
+	inputDetails, ok := usageJSON["input_tokens_details"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected input_tokens_details in capture snapshot, got %#v", usageJSON["input_tokens_details"])
+	}
+	if inputDetails["cached_tokens"] != float64(40) || inputDetails["cache_write_tokens"] != float64(12) {
+		t.Fatalf("expected cached/cache_write tokens preserved in capture snapshot, got %#v", inputDetails)
+	}
+	outputDetails, ok := usageJSON["output_tokens_details"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected output_tokens_details in capture snapshot, got %#v", usageJSON["output_tokens_details"])
+	}
+	for key, want := range map[string]float64{
+		"reasoning_tokens":           10,
+		"accepted_prediction_tokens": 2,
+		"rejected_prediction_tokens": 1,
+		"audio_tokens":               3,
+		"text_tokens":                34,
+	} {
+		if outputDetails[key] != want {
+			t.Fatalf("expected output detail %s=%v in capture snapshot, got %#v", key, want, outputDetails)
+		}
+	}
+
+	// 3. 内部 Usage details 可读（计费与日志消费路径）
+	if usage == nil {
+		t.Fatalf("expected usage extracted from completed stream")
+	}
+	if usage.PromptTokens != 100 || usage.CompletionTokens != 50 || usage.TotalTokens != 150 {
+		t.Fatalf("expected totals 100/50/150, got %#v", usage)
+	}
+	if usage.PromptTokensDetails == nil {
+		t.Fatalf("expected prompt tokens details carrying cached/cache_write, got nil")
+	}
+	if usage.PromptTokensDetails.CachedTokens != 40 || usage.PromptTokensDetails.CacheWriteTokens != 12 {
+		t.Fatalf("expected cached=40 cache_write=12 in internal usage, got %#v", usage.PromptTokensDetails)
+	}
+	if usage.CompletionTokensDetails == nil {
+		t.Fatalf("expected completion tokens details, got nil")
+	}
+	if usage.CompletionTokensDetails.ReasoningTokens != 10 ||
+		usage.CompletionTokensDetails.AcceptedPredictionTokens != 2 ||
+		usage.CompletionTokensDetails.RejectedPredictionTokens != 1 ||
+		usage.CompletionTokensDetails.AudioTokens != 3 ||
+		usage.CompletionTokensDetails.TextTokens != 34 {
+		t.Fatalf("expected reasoning/accepted/rejected/audio/text details, got %#v", usage.CompletionTokensDetails)
+	}
+
+	// 4. 直连非流式：原 body 字节不改写，同时内部 usage 仍携带 details
+	nonStreamRecorder := httptest.NewRecorder()
+	nonStreamCtx, _ := gin.CreateTestContext(nonStreamRecorder)
+	nonStreamCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	body := `{"id":"resp_details","object":"response","created_at":1700000000,"status":"completed","model":"gpt-5-codex","output":[],"previous_response_id":"resp_prev_1","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":12},"output_tokens":50,"output_tokens_details":{"reasoning_tokens":10,"accepted_prediction_tokens":2,"rejected_prediction_tokens":1,"audio_tokens":3,"text_tokens":34},"total_tokens":150}}`
+	directResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	directUsage, directErr := DoResponsesResponse(nonStreamCtx, directResp, &meta.Meta{})
+	if directErr != nil {
+		t.Fatalf("direct non-stream handler returned error: %+v", directErr)
+	}
+	if nonStreamRecorder.Body.String() != body {
+		t.Fatalf("direct non-stream body must stay byte-identical, got %q", nonStreamRecorder.Body.String())
+	}
+	if directUsage == nil || directUsage.PromptTokensDetails == nil || directUsage.PromptTokensDetails.CacheWriteTokens != 12 {
+		t.Fatalf("expected direct usage carrying cache_write detail, got %#v", directUsage)
+	}
+	if directUsage == nil || directUsage.CompletionTokensDetails == nil || directUsage.CompletionTokensDetails.ReasoningTokens != 10 {
+		t.Fatalf("expected direct usage carrying reasoning detail, got %#v", directUsage)
 	}
 }
 

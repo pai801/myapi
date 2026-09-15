@@ -2,6 +2,8 @@ package codex
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -74,8 +76,16 @@ type chatToResponsesState struct {
 	TotalTokens      int64
 	CachedTokens     int64 // input_tokens_details.cached_tokens / cache_read_input_tokens
 	CacheWriteTokens int64 // prompt_tokens_details.cache_write_tokens → input_tokens_details.cache_write_tokens
-	ReasoningTokens  int64 // output_tokens_details.reasoning_tokens
+	ReasoningTokens  int64 // output_tokens_details.reasoning_tokens（仅来自上游 usage，缺失为 0，禁止文本估算 P0-4）
 	UsageSeen        bool
+	// CompletionDetails 承载 Chat completion_tokens_details 全字段（chat §8.2）：
+	// accepted/rejected/audio/reasoning/text 与非流式 normalizeOutputDetails 同源映射（P1-9）。
+	CompletionDetails     model.CompletionTokensDetails
+	completionDetailsSeen bool                   // 上游是否提供过 completion/output_tokens_details 对象
+	completionDetailsRaw  map[string]interface{} // details 原始对象（透传零值子字段，字段集合与非流式一致）
+	// ConversionError 记录本流首个转换错误（invalid_stream_event / malformed_tool_call 等）。
+	// 置位后 generateFailedEvents 产出唯一 failed 终态，[DONE] 及后续 chunk 一律不得合成 completed（P0-1）。
+	ConversionError error
 	// Claude 缓存 TTL 细分
 	CacheCreationTokens   int64  // cache_creation_input_tokens
 	CacheCreation5mTokens int64  // cache_creation_5m_input_tokens
@@ -99,13 +109,6 @@ const (
 	responsesTerminalFailed     responsesTerminalEvent = "response.failed"
 	responsesTerminalIncomplete responsesTerminalEvent = "response.incomplete"
 )
-
-type responsesFailureState struct {
-	ResponseID    string
-	CreatedAt     int64
-	Error         *model.Error
-	TerminalEvent responsesTerminalEvent
-}
 
 // isCustomProxy 返回给定索引的工具调用是否为 Codex 自定义工具代理
 func (st *chatToResponsesState) isCustomProxy(idx int) bool {
@@ -345,8 +348,12 @@ func GetStreamCompletedBody(param interface{}, originalRequestRawJSON []byte) []
 	if st.CompletedBodyJSON != nil {
 		return st.CompletedBodyJSON
 	}
-	// 兜底：尚未生成过 completed 事件时，按原有逻辑生成
-	events := st.generateCompletedEvents(originalRequestRawJSON)
+	// 兜底：尚未生成过 completed 事件时，按原有逻辑生成（错误显式记日志：终态链已由 forwarder 消费，
+	// 此处仅用于日志响应体提取，失败即无 completed body）
+	events, genErr := st.generateCompletedEvents(originalRequestRawJSON)
+	if genErr != nil {
+		logger.Log.Warnf("GetStreamCompletedBody: terminal generation failed: %v", genErr)
+	}
 	for _, event := range events {
 		if strings.Contains(event, "response.completed") || strings.Contains(event, "response.incomplete") {
 			dataPrefix := "data: "
@@ -381,6 +388,224 @@ func (st *chatToResponsesState) ensureCodexToolContext(originalRequestRawJSON []
 	st.CodexCtxInitialized = true
 }
 
+// conversionModelError 把协议转换错误映射为 response.failed 终态的 error 对象（responses §4 error 结构）。
+// Code 保留稳定机器码（invalid_stream_event / malformed_tool_call 等），供客户端与日志分派。
+func conversionModelError(err error) *model.Error {
+	e := &model.Error{Message: err.Error(), Type: "upstream_error", Code: "invalid_upstream_response"}
+	var pce *model.ProtocolConversionError
+	if errors.As(err, &pce) {
+		e.Code = pce.Code
+	}
+	return e
+}
+
+// failConversion 接管任何转换错误（契约 §1.3）：partial 事件照常写流，随后产出唯一
+// response.failed 终态并向上返回错误；TerminalEvent 置位后后续 chunk（含 [DONE]）
+// 全部丢弃，禁止合成 completed/incomplete 假成功（P0-1 stream）。SSE 已提交，
+// 错误只经事件终态表达，不得再附加 JSON error body。
+func (st *chatToResponsesState) failConversion(originalRequestRawJSON []byte, partial []string, convErr error) ([]string, error) {
+	if st.ConversionError == nil {
+		st.ConversionError = convErr
+	}
+	events, genErr := st.generateFailedEvents(originalRequestRawJSON, conversionModelError(convErr))
+	out := append(append([]string{}, partial...), events...)
+	if genErr != nil {
+		return out, errors.Join(convErr, genErr)
+	}
+	return out, convErr
+}
+
+// checkToolCallLifecycle 校验 tool item 的 added/done 生命周期不变量（responses §7，P1-10）：
+// 任何有内容（id / name / arguments 至少其一非空）却未成功 add（add 需 id+name 齐备）的
+// call 都属上游畸形，close 时不得为其发 output_item.done，整流经 malformed_tool_call 走失败终态。
+func (st *chatToResponsesState) checkToolCallLifecycle() error {
+	idxs := make([]int, 0, len(st.FuncArgsBuf))
+	for idx := range st.FuncArgsBuf {
+		idxs = append(idxs, idx)
+	}
+	sort.Ints(idxs)
+	for _, idx := range idxs {
+		if st.FuncItemAdded[idx] {
+			continue
+		}
+		hasContent := st.FuncCallIDs[idx] != "" || st.FuncNames[idx] != ""
+		if buf := st.FuncArgsBuf[idx]; buf != nil && buf.Len() > 0 {
+			hasContent = true
+		}
+		if hasContent {
+			return errResponse(model.CodeMalformedToolCall, fmt.Sprintf("choices[0].delta.tool_calls[%d]", idx),
+				fmt.Errorf("tool call delta registered without id or name: output_item.added was never emitted, closing it as done would orphan the item"))
+		}
+	}
+	return nil
+}
+
+// captureCompletionTokensDetails 读取 usage 输出细分对象（Chat §8.2 completion_tokens_details，
+// 兼容 Responses 命名 output_tokens_details）全字段进 state，并留存原始对象供终态与非流式
+// normalizeOutputDetails 同源透传（零值子字段同样保留，保证流式/非流式字段集合一致）。
+// 返回是否存在该对象。
+func captureCompletionTokensDetails(details gjson.Result, st *chatToResponsesState) bool {
+	if !details.Exists() || !details.IsObject() {
+		return false
+	}
+	raw := make(map[string]interface{})
+	details.ForEach(func(k, v gjson.Result) bool {
+		raw[k.String()] = v.Value()
+		return true
+	})
+	st.completionDetailsRaw = raw
+	if v := details.Get("reasoning_tokens"); v.Exists() {
+		st.CompletionDetails.ReasoningTokens = int(v.Int())
+	}
+	if v := details.Get("accepted_prediction_tokens"); v.Exists() {
+		st.CompletionDetails.AcceptedPredictionTokens = int(v.Int())
+	}
+	if v := details.Get("rejected_prediction_tokens"); v.Exists() {
+		st.CompletionDetails.RejectedPredictionTokens = int(v.Int())
+	}
+	if v := details.Get("audio_tokens"); v.Exists() {
+		st.CompletionDetails.AudioTokens = int(v.Int())
+	}
+	if v := details.Get("text_tokens"); v.Exists() {
+		st.CompletionDetails.TextTokens = int(v.Int())
+	}
+	return true
+}
+
+// terminalRequestEchoKeys 是终态快照回显的原请求字段清单，与 T6 非流式
+// ConvertChatResponseToResponsesWithContext 的回显清单逐项一致（P2-3 流式/非流式统一）。
+var terminalRequestEchoKeys = []string{
+	"instructions", "max_output_tokens", "parallel_tool_calls", "reasoning",
+	"temperature", "tool_choice", "tools", "top_p", "metadata", "text",
+	"modalities", "store", "service_tier", "previous_response_id",
+}
+
+// buildTerminalResponseSnapshot 构建终态事件（completed/incomplete/failed）response 对象的基础快照
+// （responses §4）：网关身份字段 + 原请求可回显字段（含 text/modalities/store/service_tier/user，
+// 修复 P2-3 只回显部分字段）+ usage details（与非流式同源映射）。status/error/output/
+// incomplete_details/truncated 由具体终态生成方按语义填充。
+// originalRequestRawJSON 非法 JSON 显式返回错误，不静默丢回显（与 T6 同口径）。
+func buildTerminalResponseSnapshot(originalRequestRawJSON []byte, st *chatToResponsesState) (map[string]interface{}, error) {
+	snapshot := map[string]interface{}{
+		"id":                   st.ResponseID,
+		"object":               "response",
+		"created_at":           st.CreatedAt,
+		"background":           false,
+		"error":                nil,
+		"incomplete_details":   nil,
+		"previous_response_id": nil,
+		"user":                 nil,
+		"truncated":            false,
+		"usage":                buildStreamUsage(st),
+	}
+	if originalRequestRawJSON == nil {
+		return snapshot, nil
+	}
+	var req map[string]interface{}
+	if err := json.Unmarshal(originalRequestRawJSON, &req); err != nil || req == nil {
+		return nil, errResponse(model.CodeInvalidSourceJSON, "original_request",
+			errors.New("original responses request is not a valid JSON object"))
+	}
+	for _, key := range terminalRequestEchoKeys {
+		if v, ok := req[key]; ok {
+			snapshot[key] = v
+		}
+	}
+	if v, ok := req["model"]; ok {
+		snapshot["model"] = v
+	}
+	if v, ok := req["user"]; ok && v != nil {
+		snapshot["user"] = v
+	}
+	return snapshot, nil
+}
+
+// buildStreamUsage 把流式累积状态映射为 responses §6 usage 对象。
+// completion details 走与非流式 normalizeOutputDetails 相同的字段映射（P1-9）：
+// 上游提供过 completion_tokens_details / output_tokens_details 时透传原始对象并保证
+// reasoning_tokens 存在；reasoning_tokens 只来自上游统计，缺失为 0，无字节估算（P0-4）。
+func buildStreamUsage(st *chatToResponsesState) map[string]interface{} {
+	inputTokens := st.InputTokens
+	total := st.TotalTokens
+	needTotalRecalc := st.HasClaudeCacheFields && (st.CachedTokens > 0 || effectiveCacheCreationTokens(st.CacheCreationTokens, st.CacheCreation5mTokens, st.CacheCreation1hTokens) > 0)
+	if total == 0 || needTotalRecalc {
+		if st.HasClaudeCacheFields {
+			// Claude 上游：input_tokens 不含 cache，total 需汇集 cache 三件套（与上游 total 口径一致）
+			total = calculateClaudeTotalTokens(
+				inputTokens,
+				st.OutputTokens,
+				st.CachedTokens,
+				st.CacheCreationTokens,
+				st.CacheCreation5mTokens,
+				st.CacheCreation1hTokens,
+			)
+		} else {
+			// OpenAI 上游：input_tokens 已含 cached，total = input + output（responses §6）
+			total = inputTokens + st.OutputTokens
+		}
+	}
+
+	// 输入口径与 docs/responses-protocol.md §6 及非流式 parseUsage 对齐：
+	// input_tokens 为总输入（含 cached），cached 命中数仅经 input_tokens_details.cached_tokens 单独表达。
+	// details 对象恒存在（responses §6 必填），值为 0 也输出。
+	outputDetails := map[string]interface{}{"reasoning_tokens": st.ReasoningTokens}
+	if st.completionDetailsSeen && st.completionDetailsRaw != nil {
+		merged := make(map[string]interface{}, len(st.completionDetailsRaw)+1)
+		for k, v := range st.completionDetailsRaw {
+			merged[k] = v
+		}
+		if _, ok := merged["reasoning_tokens"]; !ok {
+			merged["reasoning_tokens"] = st.ReasoningTokens
+		}
+		// 非流式同源函数保证返回 map[string]interface{}（reasoning_tokens 恒存在）
+		if normalized, ok := normalizeOutputDetails(merged).(map[string]interface{}); ok {
+			outputDetails = normalized
+		} else {
+			outputDetails = merged
+		}
+	}
+
+	usage := map[string]interface{}{
+		"input_tokens":  inputTokens,
+		"output_tokens": st.OutputTokens,
+		"total_tokens":  total,
+		"input_tokens_details": map[string]interface{}{
+			"cached_tokens":      st.CachedTokens,
+			"cache_write_tokens": st.CacheWriteTokens,
+		},
+		"output_tokens_details": outputDetails,
+	}
+	// Claude 缓存 TTL 细分字段（与非流式 parseUsage 同口径：有值才输出）
+	if st.CacheCreationTokens > 0 {
+		usage["cache_creation_input_tokens"] = st.CacheCreationTokens
+	}
+	if st.CacheCreation5mTokens > 0 {
+		usage["cache_creation_5m_input_tokens"] = st.CacheCreation5mTokens
+	}
+	if st.CacheCreation1hTokens > 0 {
+		usage["cache_creation_1h_input_tokens"] = st.CacheCreation1hTokens
+	}
+	if st.HasClaudeCacheFields && st.CachedTokens > 0 {
+		usage["cache_read_input_tokens"] = st.CachedTokens
+	}
+	if st.CacheTTL != "" {
+		usage["cache_ttl"] = st.CacheTTL
+	}
+	return usage
+}
+
+// marshalNoEscapeJSON 序列化快照为紧凑 JSON，不转义 <>&（保持与既有 sjson 路径字节级内容一致，
+// 避免 instructions/tools 里的 URL 查询符被改写）。
+func marshalNoEscapeJSON(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // ConvertOpenAIChatToResponses 将 OpenAI Chat Completions SSE 转换为 Responses SSE 事件。
 // 旧 5 参数入口，作为 thin wrapper 调用 ConvertOpenAIChatToResponsesWithContext 并传 nil 作为
 // originalRequestRawJSON，保持对历史调用方的 100% 行为兼容。
@@ -388,7 +613,9 @@ func (st *chatToResponsesState) ensureCodexToolContext(originalRequestRawJSON []
 // requestRawJSON: 转换后的 Chat Completions 请求 JSON
 // rawJSON: OpenAI Chat Completions SSE 行
 // param: 状态指针（*any，在多次调用间保持状态）
-func ConvertOpenAIChatToResponses(originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any, fallbackReasoningToMessage bool) []string {
+// 返回的 error 为协议转换显式边界（契约 §1.3）：畸形 chunk / 畸形工具调用等，调用方必须消费，
+// 经错误终态链处理，禁止 swallow。
+func ConvertOpenAIChatToResponses(originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any, fallbackReasoningToMessage bool) ([]string, error) {
 	return ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJSON, rawJSON, param, fallbackReasoningToMessage)
 }
 
@@ -402,7 +629,12 @@ func ConvertOpenAIChatToResponses(originalRequestRawJSON, requestRawJSON, rawJSO
 // rawJSON: OpenAI Chat Completions SSE 行
 // param: 状态指针（*any，在多次调用间保持状态）
 // fallbackReasoningToMessage: 兜底无 content 仅 reasoning 时复制文本为 message
-func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any, fallbackReasoningToMessage bool) []string {
+//
+// 返回 ([]string, error)：error 为协议转换显式边界（契约 §1.3）——非 [DONE] chunk 未通过
+// JSON validity/object 校验返回 invalid_stream_event；工具 delta 缺 id/name 未成功 added
+// 却在 close 时返回 malformed_tool_call；两者都已产出生成唯一 response.failed 终态并置
+// TerminalEvent，后续 [DONE] 不得合成 completed。调用方（forwarder）必须消费该 error。
+func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any, fallbackReasoningToMessage bool) ([]string, error) {
 	var st *chatToResponsesState
 	if param == nil {
 		st = &chatToResponsesState{
@@ -440,22 +672,38 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 
 	// 期望 `data: {..}` 格式
 	if !bytes.HasPrefix(rawJSON, chatDataTag) {
-		return []string{}
+		return []string{}, nil
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
 	// 一旦已经产生终态事件，后续普通 chunk 和迟到终态都直接丢弃，避免破坏终态状态机。
 	if st.TerminalEvent != "" {
-		return []string{}
+		return []string{}, nil
 	}
 
 	// 检查 [DONE] 标记
 	if string(rawJSON) == "[DONE]" {
-		// 生成完成事件
+		// 生成完成事件（存在 ConversionError 时产出 failed 终态，不得合成 completed，P0-1）
 		return st.generateCompletedEvents(originalRequestRawJSON)
 	}
 
+	// 空 data 载荷属保活帧而非 Chat chunk（chat §7.1 每 chunk 必为 JSON object），跳过不初始化响应
+	if len(rawJSON) == 0 {
+		return []string{}, nil
+	}
+
+	// 非 [DONE] chunk 必须先通过 JSON validity + object 形状校验（chat §7.1，P0-1 stream）：
+	// gjson 对无效载荷静默返回空结果会让畸形 chunk 触发 created/in_progress 初始化并在 [DONE]
+	// 时合成成功终态，显式拒绝并转唯一 response.failed。
+	if !json.Valid(rawJSON) {
+		return st.failConversion(originalRequestRawJSON, nil,
+			errResponse(model.CodeInvalidStreamEvent, "data", fmt.Errorf("upstream chat stream chunk is not valid JSON")))
+	}
 	root := gjson.ParseBytes(rawJSON)
+	if !root.IsObject() {
+		return st.failConversion(originalRequestRawJSON, nil,
+			errResponse(model.CodeInvalidStreamEvent, "data", fmt.Errorf("upstream chat stream chunk is not a JSON object")))
+	}
 	var out []string
 
 	nextSeq := func() int { st.Seq++; return st.Seq }
@@ -473,7 +721,12 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		} else {
 			st.ResponseID = fmt.Sprintf("resp_%d", time.Now().UnixNano())
 		}
+		// P2-2：首个合法 Chat chunk 的 created 优先作为 Responses created_at（chat §7.1 必填、
+		// responses §4），缺失/非正数才回落网关时间
 		st.CreatedAt = time.Now().Unix()
+		if v := root.Get("created"); v.Exists() && v.Type == gjson.Number && v.Int() > 0 {
+			st.CreatedAt = v.Int()
+		}
 
 		// 重置状态
 		st.TextBuf.Reset()
@@ -513,6 +766,9 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		st.InputTokens = 0
 		st.OutputTokens = 0
 		st.TerminalEvent = ""
+		// 与 TerminalEvent 对称重置：state 复用跑第二段流时，残留的上一段转换错误不得
+		// 强制新流 [DONE] 走 failed（生产路径每请求新建 state，此处锁状态不变量）
+		st.ConversionError = nil
 		st.CachedTokens = 0
 		st.CacheWriteTokens = 0
 		st.ReasoningTokens = 0
@@ -521,6 +777,9 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		st.CacheCreation1hTokens = 0
 		st.CacheTTL = ""
 		st.UsageSeen = false
+		st.CompletionDetails = model.CompletionTokensDetails{}
+		st.completionDetailsSeen = false
+		st.completionDetailsRaw = nil
 
 		st.ensureCodexToolContext(originalRequestRawJSON)
 
@@ -563,8 +822,16 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 		if v := usage.Get("prompt_tokens_details.cache_write_tokens"); v.Exists() {
 			st.CacheWriteTokens = v.Int()
 		}
-		if v := usage.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
-			st.ReasoningTokens = v.Int()
+		// completion details 全字段采集（chat §8.2 → responses §6 output_tokens_details，P1-9）：
+		// reasoning/accepted/rejected/audio/text 与非流式 normalizeOutputDetails 同源映射；
+		// reasoning_tokens 仅取上游值，缺失即 0，绝不由 ReasoningBuf 长度估算（P0-4）。
+		st.completionDetailsSeen = captureCompletionTokensDetails(usage.Get("completion_tokens_details"), st) ||
+			st.completionDetailsSeen
+		if !st.completionDetailsSeen && usage.Get("output_tokens_details").Exists() {
+			st.completionDetailsSeen = captureCompletionTokensDetails(usage.Get("output_tokens_details"), st)
+		}
+		if st.CompletionDetails.ReasoningTokens != 0 {
+			st.ReasoningTokens = int64(st.CompletionDetails.ReasoningTokens)
 		}
 
 		// Claude 格式基础字段（优先级高于 OpenAI）
@@ -608,7 +875,7 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 	// 解析 choices
 	choices := root.Get("choices")
 	if !choices.Exists() || !choices.IsArray() {
-		return out
+		return out, nil
 	}
 
 	for _, choice := range choices.Array() {
@@ -775,12 +1042,17 @@ func ConvertOpenAIChatToResponsesWithContext(originalRequestRawJSON, requestRawJ
 				out = append(out, st.closeRefusalBlock(nextSeq)...)
 			}
 			if st.InFuncBlock {
-				out = append(out, st.closeFuncBlocks(nextSeq)...)
+				closed, cerr := st.closeFuncBlocks(nextSeq)
+				if cerr != nil {
+					// P1-10：未成功 added 的工具禁止在 close 时 done → 唯一 response.failed 终态
+					return st.failConversion(originalRequestRawJSON, out, cerr)
+				}
+				out = append(out, closed...)
 			}
 		}
 	}
 
-	return out
+	return out, nil
 }
 
 func parseChatStreamError(root gjson.Result) *model.Error {
@@ -1278,9 +1550,16 @@ func (st *chatToResponsesState) closeRefusalBlock(nextSeq func() int) []string {
 }
 
 // closeFuncBlocks 关闭所有 function call blocks
-func (st *chatToResponsesState) closeFuncBlocks(nextSeq func() int) []string {
+func (st *chatToResponsesState) closeFuncBlocks(nextSeq func() int) ([]string, error) {
 	if !st.InFuncBlock || len(st.FuncArgsBuf) == 0 {
-		return nil
+		return nil, nil
+	}
+
+	// 事务性预检（P1-10）：任何有内容但未成功 added（缺 id 或 name）的 call 使整个 close 失败，
+	// 不得为其产出 output_item.done；调用方经 failConversion 走唯一 failed 终态。
+	if err := st.checkToolCallLifecycle(); err != nil {
+		st.InFuncBlock = false
+		return nil, err
 	}
 
 	var out []string
@@ -1293,6 +1572,10 @@ func (st *chatToResponsesState) closeFuncBlocks(nextSeq func() int) []string {
 	sort.Ints(idxs)
 
 	for _, idx := range idxs {
+		// 预检通过后仍未 added 的只可能是无任何内容的空登记（不发事件，避免凭空造 item）
+		if !st.FuncItemAdded[idx] {
+			continue
+		}
 		args := "{}"
 		if buf := st.FuncArgsBuf[idx]; buf != nil && buf.Len() > 0 {
 			args = buf.String()
@@ -1316,6 +1599,17 @@ func (st *chatToResponsesState) closeFuncBlocks(nextSeq func() int) []string {
 			ctcDelta, _ = sjson.Set(ctcDelta, "delta", customInput)
 			out = append(out, emitResponsesEvent("response.custom_tool_call_input.delta", ctcDelta))
 
+			// P1-8：custom 关闭序列必须含 response.custom_tool_call_input.done（delta/done 成对，
+			// responses §7），其 final input 与紧随的 output_item.done.item.input 完全一致，
+			// 否则依赖 .done 定稿的客户端永久等待。
+			ctcDone := `{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","call_id":"","output_index":0,"input":""}`
+			ctcDone, _ = sjson.Set(ctcDone, "sequence_number", nextSeq())
+			ctcDone, _ = sjson.Set(ctcDone, "item_id", itemID)
+			ctcDone, _ = sjson.Set(ctcDone, "call_id", callID)
+			ctcDone, _ = sjson.Set(ctcDone, "output_index", outputIndex)
+			ctcDone, _ = sjson.Set(ctcDone, "input", customInput)
+			out = append(out, emitResponsesEvent("response.custom_tool_call_input.done", ctcDone))
+
 			itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","call_id":"","name":"","input":""}}`
 			itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
 			itemDone, _ = sjson.Set(itemDone, "output_index", outputIndex)
@@ -1334,7 +1628,9 @@ func (st *chatToResponsesState) closeFuncBlocks(nextSeq func() int) []string {
 			itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("ts_%s", callID))
 			itemDone, _ = sjson.Set(itemDone, "item.name", name)
 			itemDone, _ = sjson.Set(itemDone, "item.call_id", callID)
-			itemDone, _ = sjson.Set(itemDone, "item.arguments", args)
+			// tool_search_call 的 arguments 是内嵌 JSON 对象，与 function_call.arguments 字符串口径不同；
+			// 取值口径见 toolSearchArgumentsValue（统一 helper，三条输出路径结构一致）。
+			itemDone, _ = sjson.Set(itemDone, "item.arguments", toolSearchArgumentsValue(args))
 			out = append(out, emitResponsesEvent("response.output_item.done", itemDone))
 			continue
 		} else if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "web_search") {
@@ -1375,13 +1671,46 @@ func (st *chatToResponsesState) closeFuncBlocks(nextSeq func() int) []string {
 	}
 
 	st.InFuncBlock = false
-	return out
+	return out, nil
 }
 
-// generateCompletedEvents 生成完成事件
-func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON []byte) []string {
+// toolSearchArgumentsValue 返回 tool_search_call.arguments 在输出中的取值：
+// 整串为合法 JSON 对象时返回其 map 形态（内嵌对象；codex core 侧该字段 serde 目标是结构体
+// SearchToolCallParams，传字符串会报 invalid type: string ...）；其余情况（被截断的对象前缀、null、
+// 标量、非法 JSON、空串）返回原字符串，交由 core 显式报错。
+// 判定必须用严格的 json.Unmarshal，不可用 gjson 前缀解析（截断的 `{"query":"x` 也会被判为 object）；
+// 渲染必须走 sjson.Set / json.Marshal 让换行被转义，严禁 SetRaw 原样注入——未闭合前缀或含裸换行的
+// 对象都会破坏外层 SSE 帧。
+func toolSearchArgumentsValue(args string) interface{} {
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(args), &m); err != nil || m == nil {
+		return args
+	}
+	return m
+}
+
+// generateCompletedEvents 生成完成事件。返回 error 为协议转换显式边界（契约 §1.3）：
+// 工具 added/done 生命周期违规（malformed_tool_call）时产出唯一 failed 终态并返回错误，
+// 不得合成 completed/incomplete 假成功（P0-1/P1-10）。
+func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON []byte) ([]string, error) {
 	if st.TerminalEvent != "" {
-		return nil
+		return nil, nil
+	}
+	// 转换错误已记录（畸形 chunk/畸形工具）：只允许 failed 终态，禁止 [DONE] 合成 completed（P0-1）
+	if st.ConversionError != nil {
+		events, genErr := st.generateFailedEvents(originalRequestRawJSON, conversionModelError(st.ConversionError))
+		if genErr != nil {
+			// 合并返回（与 failConversion errors.Join 同口径）：主转换错误必须保持可经
+			// errors.As 提取稳定机器码，genErr（终态快照诊断）不得丢弃也不得遮蔽主错误
+			return events, errors.Join(st.ConversionError, genErr)
+		}
+		return events, st.ConversionError
+	}
+	// 未显式 close（无 finish_reason 直接 [DONE]）的畸形工具调用同样在终态前拦截（P1-10）
+	if len(st.FuncArgsBuf) > 0 {
+		if cerr := st.checkToolCallLifecycle(); cerr != nil {
+			return st.failConversion(originalRequestRawJSON, nil, cerr)
+		}
 	}
 
 	var out []string
@@ -1404,7 +1733,11 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		out = append(out, st.closeRefusalBlock(nextSeq)...)
 	}
 	if st.InFuncBlock {
-		out = append(out, st.closeFuncBlocks(nextSeq)...)
+		closed, cerr := st.closeFuncBlocks(nextSeq)
+		if cerr != nil {
+			return st.failConversion(originalRequestRawJSON, out, cerr)
+		}
+		out = append(out, closed...)
 	}
 
 	// 兜底：整轮流无有效 content，仅 reasoning，则将 reasoning 文本复制为 message 渲染。
@@ -1475,53 +1808,23 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		statusValue = "incomplete"
 		incompleteReason = "content_filter"
 	}
-	completed := `{"type":"","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null}}`
-	completed, _ = sjson.Set(completed, "type", string(terminal))
-	completed, _ = sjson.Set(completed, "response.status", statusValue)
-	completed, _ = sjson.Set(completed, "response.id", st.ResponseID)
-	completed, _ = sjson.Set(completed, "response.created_at", st.CreatedAt)
+	// 统一终态快照（P2-3）：身份字段 + 原请求回显（含 text/modalities/store/service_tier/user）
+	// + usage，与非流式 T6 同一清单；status/incomplete_details 按终态种类填充。
+	snapshot, snapErr := buildTerminalResponseSnapshot(originalRequestRawJSON, st)
+	if snapErr != nil {
+		return st.failConversion(originalRequestRawJSON, out, snapErr)
+	}
+	snapshot["status"] = statusValue
 	if terminal == responsesTerminalIncomplete {
-		completed, _ = sjson.Set(completed, "response.incomplete_details", map[string]interface{}{"reason": incompleteReason})
-		completed, _ = sjson.Set(completed, "response.truncated", true)
+		snapshot["incomplete_details"] = map[string]interface{}{"reason": incompleteReason}
+		snapshot["truncated"] = true
 	}
-
-	// 注入原始请求字段
-	if originalRequestRawJSON != nil {
-		req := gjson.ParseBytes(originalRequestRawJSON)
-		if v := req.Get("instructions"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.instructions", v.String())
-		}
-		if v := req.Get("max_output_tokens"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.max_output_tokens", v.Int())
-		}
-		if v := req.Get("model"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.model", v.String())
-		}
-		if v := req.Get("parallel_tool_calls"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.parallel_tool_calls", v.Bool())
-		}
-		if v := req.Get("previous_response_id"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.previous_response_id", v.String())
-		}
-		if v := req.Get("reasoning"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.reasoning", v.Value())
-		}
-		if v := req.Get("temperature"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.temperature", v.Float())
-		}
-		if v := req.Get("tool_choice"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.tool_choice", v.Value())
-		}
-		if v := req.Get("tools"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.tools", v.Value())
-		}
-		if v := req.Get("top_p"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.top_p", v.Float())
-		}
-		if v := req.Get("metadata"); v.Exists() {
-			completed, _ = sjson.Set(completed, "response.metadata", v.Value())
-		}
+	snapshotBody, marshalErr := marshalNoEscapeJSON(snapshot)
+	if marshalErr != nil {
+		return st.failConversion(originalRequestRawJSON, out, errResponse(model.CodeInvalidSourceShape, "response", marshalErr))
 	}
+	completed := `{"type":"","sequence_number":0,"response":` + string(snapshotBody) + `}`
+	completed, _ = sjson.Set(completed, "type", string(terminal))
 
 	// 构建 output 数组
 	var outputs []interface{}
@@ -1619,7 +1922,8 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		outputs = append(outputs, o.item)
 	}
 
-	// function_call items
+	// function_call items（仅输出已成功 added 的 call；生命周期违规在函数头部已拦截走 failed 终态，
+	// 无任何内容的空登记不得凭空造 terminal item，P1-10）
 	if len(st.FuncArgsBuf) > 0 {
 		idxs := make([]int, 0, len(st.FuncArgsBuf))
 		for idx := range st.FuncArgsBuf {
@@ -1627,6 +1931,9 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		}
 		sort.Ints(idxs)
 		for _, idx := range idxs {
+			if !st.FuncItemAdded[idx] {
+				continue
+			}
 			args := ""
 			if b := st.FuncArgsBuf[idx]; b != nil {
 				args = b.String()
@@ -1651,11 +1958,13 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 				continue
 			}
 			if st.CodexCtxInitialized && st.CodexCtx.IsBuiltinTool(name, "tool_search") {
+				// tool_search_call 的 arguments 是内嵌 JSON 对象，与 function_call.arguments 字符串口径不同；
+				// 取值口径见 toolSearchArgumentsValue（统一 helper，三条输出路径结构一致）。
 				item := map[string]interface{}{
 					"id":        fmt.Sprintf("ts_%s", callID),
 					"type":      "tool_search_call",
 					"status":    "completed",
-					"arguments": args,
+					"arguments": toolSearchArgumentsValue(args),
 					"call_id":   callID,
 					"name":      name,
 					"execution": "client",
@@ -1696,66 +2005,10 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 		completed, _ = sjson.Set(completed, "response.output", outputs)
 	}
 
-	// 添加 usage（完整支持多格式详细字段）
-	reasoningTokens := st.ReasoningTokens
-	if reasoningTokens == 0 && st.ReasoningBuf.Len() > 0 {
-		reasoningTokens = int64(st.ReasoningBuf.Len() / 4)
-	}
-
-	// 输入口径与 docs/responses-protocol.md §6 及非流式 parseUsage 对齐：
-	// input_tokens 为总输入（含 cached），cached 命中数仅经 input_tokens_details.cached_tokens 单独表达，
-	// 不再从主字段扣除（旧实现曾对 OpenAI 上游扣除 cached，与协议总口径相悖，已移除）。
-	// OpenAI prompt_tokens 已含 cached → 直通；Claude input_tokens 不含 cache → 保持上游原值。
-	inputTokens := st.InputTokens
-
-	// 始终添加基础 usage 字段，即使值为 0
-	completed, _ = sjson.Set(completed, "response.usage.input_tokens", inputTokens)
-	completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.OutputTokens)
-	total := st.TotalTokens
-	needTotalRecalc := st.HasClaudeCacheFields && (st.CachedTokens > 0 || effectiveCacheCreationTokens(st.CacheCreationTokens, st.CacheCreation5mTokens, st.CacheCreation1hTokens) > 0)
-	if total == 0 || needTotalRecalc {
-		if st.HasClaudeCacheFields {
-			// Claude 上游：input_tokens 不含 cache，total 需汇集 cache 三件套（与上游 total 口径一致）
-			total = calculateClaudeTotalTokens(
-				inputTokens,
-				st.OutputTokens,
-				st.CachedTokens,
-				st.CacheCreationTokens,
-				st.CacheCreation5mTokens,
-				st.CacheCreation1hTokens,
-			)
-		} else {
-			// OpenAI 上游：input_tokens 已含 cached，total = input + output（responses §6）
-			total = inputTokens + st.OutputTokens
-		}
-	}
-	completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
-
-	// 详情字段（responses §6：usage 内字段含两个 details 对象全部必填）：
-	// details 对象与子字段恒存在，值为 0 也输出 —— 旧实现「有值才添加」会让按必填解析的客户端拿到 undefined。
-	// input_tokens_details：OpenAI 与 Claude 路径均写入标准字段，
-	// Claude 同时保留下方 cache_read_input_tokens 透传（下游既有消费方兼容）
-	completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
-	completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cache_write_tokens", st.CacheWriteTokens)
-	// output_tokens_details
-	completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
-
-	// Claude 缓存 TTL 细分字段
-	if st.CacheCreationTokens > 0 {
-		completed, _ = sjson.Set(completed, "response.usage.cache_creation_input_tokens", st.CacheCreationTokens)
-	}
-	if st.CacheCreation5mTokens > 0 {
-		completed, _ = sjson.Set(completed, "response.usage.cache_creation_5m_input_tokens", st.CacheCreation5mTokens)
-	}
-	if st.CacheCreation1hTokens > 0 {
-		completed, _ = sjson.Set(completed, "response.usage.cache_creation_1h_input_tokens", st.CacheCreation1hTokens)
-	}
-	if st.HasClaudeCacheFields && st.CachedTokens > 0 {
-		completed, _ = sjson.Set(completed, "response.usage.cache_read_input_tokens", st.CachedTokens)
-	}
-	if st.CacheTTL != "" {
-		completed, _ = sjson.Set(completed, "response.usage.cache_ttl", st.CacheTTL)
-	}
+	// usage 已随统一终态快照注入（buildTerminalResponseSnapshot → buildStreamUsage，responses §6：
+	// 五个顶层字段 + 两个 details 对象恒存在）。completion details 与非流式 normalizeOutputDetails
+	// 同源映射（P1-9）；reasoning_tokens 仅来自上游 usage，缺失为 0——旧实现按 reasoning 文本字节长度
+	// 除以常数估算 token 伪造计费数据的通道已彻底移除（P0-4，报告一 P0-4）。
 
 	// message item done 终态统一补发点（reviewer v2 裁决：放弃「定稿点」概念）：
 	// 所有 message item（text item 与独立 refusal item 一体适用）的唯一 output_item.done
@@ -1803,13 +2056,16 @@ func (st *chatToResponsesState) generateCompletedEvents(originalRequestRawJSON [
 	st.CompletedBodyJSON = []byte(completed)
 	st.TerminalEvent = terminal
 	out = append(out, emitResponsesEvent(string(terminal), completed))
-	return out
+	return out, nil
 }
 
-// generateFailedEvents 生成失败终态事件，并阻断后续成功终态发射。
-func (st *chatToResponsesState) generateFailedEvents(originalRequestRawJSON []byte, errResp *model.Error) []string {
+// generateFailedEvents 生成唯一失败终态事件（response.failed），并阻断后续成功终态发射。
+// 终态 response 对象使用与 completed 同一 buildTerminalResponseSnapshot（P2-3 统一快照：
+// 回显 text/modalities/store/service_tier/user 等原请求字段 + usage details）。
+// 返回的 error 仅在统一快照构建失败时非 nil（events 已用最小合法快照兜底产出，仍为唯一 failed 终态）。
+func (st *chatToResponsesState) generateFailedEvents(originalRequestRawJSON []byte, errResp *model.Error) ([]string, error) {
 	if st.TerminalEvent != "" || errResp == nil {
-		return nil
+		return nil, nil
 	}
 
 	var out []string
@@ -1829,8 +2085,15 @@ func (st *chatToResponsesState) generateFailedEvents(originalRequestRawJSON []by
 	if st.InRefusalBlock {
 		out = append(out, st.closeRefusalBlock(nextSeq)...)
 	}
-	if st.InFuncBlock {
-		out = append(out, st.closeFuncBlocks(nextSeq)...)
+	// 工具 blocks：仅当 added/done 生命周期合法时才 close 补发 done；畸形工具直接放弃 done
+	// （不得为未 added 的 call 发 output_item.done，P1-10），failed 终态本身即错误边界。
+	if len(st.FuncArgsBuf) > 0 {
+		closed, cerr := st.closeFuncBlocks(nextSeq)
+		if cerr == nil {
+			out = append(out, closed...)
+		} else if st.ConversionError == nil {
+			st.ConversionError = cerr
+		}
 	}
 
 	// failed 终态统一补发点：为流式已 added 的全部 message item（独立 refusal item +
@@ -1873,28 +2136,23 @@ func (st *chatToResponsesState) generateFailedEvents(originalRequestRawJSON []by
 		st.CreatedAt = time.Now().Unix()
 	}
 
-	failure := responsesFailureState{
-		ResponseID:    st.ResponseID,
-		CreatedAt:     st.CreatedAt,
-		Error:         errResp,
-		TerminalEvent: responsesTerminalFailed,
+	// 统一终态快照（与 completed 同一构建，P2-3）；原请求非法导致快照失败时退化为无回显的
+	// 最小合法 failed 快照——终态事件必须产出（SSE 已提交），快照错误仍随 events 向上暴露。
+	snapshot, snapErr := buildTerminalResponseSnapshot(originalRequestRawJSON, st)
+	if snapErr != nil {
+		snapshot, _ = buildTerminalResponseSnapshot(nil, st)
 	}
-
-	failed := `{"type":"response.failed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"failed","error":null,"output":[]}}`
-	failed, _ = sjson.Set(failed, "type", string(failure.TerminalEvent))
+	snapshot["status"] = "failed"
+	snapshot["error"] = errResp
+	snapshot["output"] = []interface{}{}
+	snapshotBody, marshalErr := marshalNoEscapeJSON(snapshot)
+	if marshalErr != nil {
+		return out, errors.Join(snapErr, marshalErr)
+	}
+	failed := `{"type":"response.failed","sequence_number":0,"response":` + string(snapshotBody) + `}`
 	failed, _ = sjson.Set(failed, "sequence_number", nextSeq())
-	failed, _ = sjson.Set(failed, "response.id", failure.ResponseID)
-	failed, _ = sjson.Set(failed, "response.created_at", failure.CreatedAt)
-	failed, _ = sjson.Set(failed, "response.error", failure.Error)
 
-	if originalRequestRawJSON != nil {
-		req := gjson.ParseBytes(originalRequestRawJSON)
-		if v := req.Get("model"); v.Exists() {
-			failed, _ = sjson.Set(failed, "response.model", v.String())
-		}
-	}
-
-	st.TerminalEvent = failure.TerminalEvent
-	out = append(out, emitResponsesEvent(string(failure.TerminalEvent), failed))
-	return out
+	st.TerminalEvent = responsesTerminalFailed
+	out = append(out, emitResponsesEvent(string(st.TerminalEvent), failed))
+	return out, snapErr
 }

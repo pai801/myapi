@@ -123,7 +123,16 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 			continue
 		}
 		var contents []Content
-		openaiContent := message.ParseContent()
+		openaiContent, pcErr := message.ParseContent()
+		if pcErr != nil {
+			// ParseContent 已改为防御性 error 签名；本 adaptor 无 error 返回通道，
+			// 显式记错并退回 string content 聚合，保持原转换行为等价，不 swallow
+			logger.Log.Errorf("anthropic: parse content failed for role %s: %v", message.Role, pcErr)
+			openaiContent = nil
+			if s := message.StringContent(); s != "" {
+				openaiContent = []model.MessageContent{{Type: model.ContentTypeText, Text: s}}
+			}
+		}
 		for _, part := range openaiContent {
 			var content Content
 			if part.Type == model.ContentTypeText {

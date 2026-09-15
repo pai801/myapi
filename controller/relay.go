@@ -122,6 +122,11 @@ func Relay(c *gin.Context) {
 		failedModel = c.GetString(ctxkey.SuggestedModel)
 		logger.Log.Debugf("retry failed channel #%d status=%d requestId=%s", channelId, bizErr.StatusCode, requestId)
 		go processChannelRelayError(ctx, userId, channelId, channelName, failedModel, *bizErr)
+		// 本次重试已向客户端提交 SSE：继续重试会追加第二段流，必须停止（失败记账已在上方完成）。
+		if c.Writer.Written() {
+			logger.Log.Infof("retry response already committed, stop retrying requestId=%s", requestId)
+			break
+		}
 	}
 	if bizErr != nil {
 		logger.Log.Infof("all retries exhausted lastFailedChannel=%d status=%d requestId=%s model=%s group=%s",
@@ -132,14 +137,27 @@ func Relay(c *gin.Context) {
 
 		// BUG: bizErr is in race condition
 		bizErr.Error.Message = helper.MessageWithRequestId(bizErr.Error.Message, requestId)
-		c.JSON(bizErr.StatusCode, gin.H{
-			"error": bizErr.Error,
-		})
+		renderFinalRelayError(c, bizErr)
 		recordFailureLog(c, bizErr, channelName)
 	}
 }
 
+// renderFinalRelayError 仅在响应未提交时写最终 JSON 错误体。
+// SSE 已提交后禁止追加 JSON HTTP 错误体（协议契约 §1.3）；渠道失败记账与失败日志不受此判断影响。
+func renderFinalRelayError(c *gin.Context, bizErr *model.ErrorWithStatusCode) {
+	if c.Writer.Written() {
+		return
+	}
+	c.JSON(bizErr.StatusCode, gin.H{
+		"error": bizErr.Error,
+	})
+}
+
 func shouldRetry(c *gin.Context, bizErr *model.ErrorWithStatusCode) bool {
+	// 响应体已提交（SSE 已开始写 body）后重试会向同一响应追加第二段流，禁止重试。
+	if c.Writer.Written() {
+		return false
+	}
 	if _, ok := c.Get(ctxkey.SpecificChannelId); ok {
 		return false
 	}
@@ -165,7 +183,7 @@ func shouldRetry(c *gin.Context, bizErr *model.ErrorWithStatusCode) bool {
 	if isClientSideStatus(statusCode) {
 		return isProviderCompatibilityError(bizErr)
 	}
-	if looksLikeRequestShapeFailure(bizErr) {
+	if bizErr.LooksLikeRequestShapeFailure() {
 		return false
 	}
 	return true
@@ -179,7 +197,7 @@ func isExplicitAdapterFailure(bizErr *model.ErrorWithStatusCode) bool {
 	if bizErr == nil {
 		return false
 	}
-	text := errorSemanticText(bizErr)
+	text := bizErr.SemanticText()
 	if strings.Contains(text, "bad_response") {
 		return true
 	}
@@ -206,7 +224,7 @@ func isProviderCompatibilityError(bizErr *model.ErrorWithStatusCode) bool {
 	if bizErr == nil {
 		return false
 	}
-	text := errorSemanticText(bizErr)
+	text := bizErr.SemanticText()
 	compatibilityMarkers := []string{
 		"unsupported_model",
 		"model_not_supported",
@@ -222,40 +240,6 @@ func isProviderCompatibilityError(bizErr *model.ErrorWithStatusCode) bool {
 		}
 	}
 	return false
-}
-
-func looksLikeRequestShapeFailure(bizErr *model.ErrorWithStatusCode) bool {
-	if bizErr == nil {
-		return false
-	}
-	text := errorSemanticText(bizErr)
-	requestShapeMarkers := []string{
-		"invalid_request_error",
-		"invalid request",
-		"invalid input",
-		"invalid parameter",
-		"invalid schema",
-		"invalid format",
-		"malformed",
-		"unsupported_request",
-		"request body",
-		"request schema",
-	}
-	for _, marker := range requestShapeMarkers {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func errorSemanticText(bizErr *model.ErrorWithStatusCode) string {
-	parts := []string{
-		strings.ToLower(strings.TrimSpace(bizErr.Type)),
-		strings.ToLower(strings.TrimSpace(fmt.Sprint(bizErr.Code))),
-		strings.ToLower(strings.TrimSpace(bizErr.Message)),
-	}
-	return strings.Join(parts, " | ")
 }
 
 func buildFailureLog(c *gin.Context, bizErr *model.ErrorWithStatusCode, channelName string) *dbmodel.Log {
@@ -297,14 +281,14 @@ func processChannelRelayError(ctx context.Context, userId int, channelId int, ch
 }
 
 // cooldownErrorWeight 根据错误语义为单次失败赋予累计权重：
-// - looksLikeRequestShapeFailure 命中 → 0（客户端参数类，不计数不冷却）
+// - LooksLikeRequestShapeFailure 命中 → 0（客户端参数类，不计数不冷却）
 // - 401/403 → 2（确定型失败，较快触发冷却）
 // - 其余（5xx、超时、连接失败、适配器解析失败等）→ 1
 func cooldownErrorWeight(err *model.ErrorWithStatusCode) int {
 	if err == nil {
 		return 0
 	}
-	if looksLikeRequestShapeFailure(err) {
+	if err.LooksLikeRequestShapeFailure() {
 		return 0
 	}
 	if err.StatusCode == http.StatusUnauthorized || err.StatusCode == http.StatusForbidden {

@@ -111,17 +111,7 @@ func DoResponsesResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (
 		return nil, ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError)
 	}
 
-	usage := &model.Usage{
-		PromptTokens:     textResponse.Usage.InputTokens,
-		CompletionTokens: textResponse.Usage.OutputTokens,
-		TotalTokens:      textResponse.Usage.TotalTokens,
-	}
-	// 如果有缓存命中的token，设置到 PromptTokensDetails 中
-	if textResponse.Usage.InputTokensDetails != nil && textResponse.Usage.InputTokensDetails.CachedTokens > 0 {
-		usage.PromptTokensDetails = &model.PromptTokensDetails{
-			CachedTokens: textResponse.Usage.InputTokensDetails.CachedTokens,
-		}
-	}
+	usage := responsesUsageToInternalUsage(&textResponse.Usage)
 
 	c.Set(ctxkey.ResponseBody, string(responseBody))
 	return usage, nil
@@ -139,7 +129,6 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 	sawCompletedTerminal := false
 	sentSyntheticCompleted := false
 	incompleteStream := false
-	streamBegan := false
 	sawDone := false
 	lastEventType := ""
 	eventCount := 0
@@ -171,7 +160,6 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 	common.SetEventStreamHeaders(c)
 	c.Writer.WriteHeader(http.StatusOK)
 	c.Writer.Flush()
-	streamBegan = true
 
 	doneRendered := false
 	var streamError model.Error
@@ -188,7 +176,8 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 			Data:  json.RawMessage(rawErrorPayload),
 		})
 		finalizeStreamCapture(c, &capture, usage)
-		return nil, responseText, usage
+		// SSE 头已提交：失败已由 error 事件写回客户端，这里只回传错误供渠道失败记账。
+		return streamFailureError(streamError), responseText, usage
 	}
 
 	if firstEventErr, ok := classifyTerminalStreamError(firstEvent); ok {
@@ -199,11 +188,9 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 		if closeErr := resp.Body.Close(); closeErr != nil {
 			logger.Log.Warnf("failed to close response body on initial terminal event path: %v", closeErr)
 		}
-		statusCode := mapFailedErrorToStatusCode(fmt.Sprintf("%v", firstEventErr.Code), firstEventErr.Type, firstEventErr.Message)
-		if streamBegan {
-			return nil, responseText, usage
-		}
-		return &model.ErrorWithStatusCode{Error: firstEventErr, StatusCode: statusCode}, responseText, usage
+		// SSE 头已提交：首帧即成失败终态时不得返回 nil，否则渠道被误记成功；错误对象仅供记账，
+		// 框架层依据 Written() 抑制重试与 JSON 渲染，禁止再向客户端追加任何内容。
+		return streamFailureError(firstEventErr), responseText, usage
 	}
 
 	eventCount++
@@ -280,20 +267,20 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 		if err := resp.Body.Close(); err != nil {
 			logger.Log.Warnf("failed to close response body on stream error path: %v", err)
 		}
-		if streamBegan {
-			if !sawCompletedTerminal && !sawFailedTerminal {
-				markCaptureResponseFailed(&capture, streamError)
-				capture.Frames = append(capture.Frames, model.ResponsesStreamFrame{
-					Event: "error",
-					Data:  renderTerminalStreamErrorEvent(c, streamError),
-				})
-			}
-			finalizeStreamCapture(c, &capture, usage)
+		if !sawCompletedTerminal && !sawFailedTerminal {
+			markCaptureResponseFailed(&capture, streamError)
+			capture.Frames = append(capture.Frames, model.ResponsesStreamFrame{
+				Event: "error",
+				Data:  renderTerminalStreamErrorEvent(c, streamError),
+			})
+		}
+		finalizeStreamCapture(c, &capture, usage)
+		if sawCompletedTerminal {
+			// 已见成功终态：迟到错误只保留在 capture 供观测，不判渠道失败（客户端已收到完整成功响应）。
 			return nil, responseText, usage
 		}
-		errCode := fmt.Sprintf("%v", streamError.Code)
-		statusCode := mapFailedErrorToStatusCode(errCode, streamError.Type, streamError.Message)
-		return &model.ErrorWithStatusCode{Error: streamError, StatusCode: statusCode}, responseText, usage
+		// SSE 已提交后的流失败：回传非 nil 错误供渠道失败记账，禁止再向客户端追加任何写出。
+		return streamFailureError(streamError), responseText, usage
 	}
 
 	flushFrame()
@@ -307,6 +294,12 @@ func StreamResponsesHandler(c *gin.Context, resp *http.Response) (*model.ErrorWi
 	if err != nil {
 		logger.Log.Errorf("[%s] %+v", "close_response_body_failed", err)
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), "", nil
+	}
+
+	// EOF 无终态：SSE 已提交且上游未给出 completed/incomplete/failed 任一终态，判流失败供渠道记账；
+	// 客户端流已按既有帧写出，禁止追加任何内容。
+	if incompleteStream {
+		return streamFailureError(streamError), responseText, usage
 	}
 
 	return nil, responseText, usage
@@ -586,6 +579,24 @@ func buildStreamReadError(err error) model.Error {
 	}
 }
 
+// streamFailureError 把 SSE 已提交后的流失败映射为 502 upstream_error（与 converted 路径
+// controller.responsesStreamFailureError 同口径，跨包不便复用故按同风格在本包构造）。
+// 失败已由已写出的 SSE 事件表达，这里只回传渠道失败记账所需的错误对象；调用方不得据此
+// 再向客户端追加任何内容（框架层 Written() 守卫会抑制重试与 JSON 渲染）。
+// 复用既有错误码/类型（如 stream_read_error/bad_response），仅在缺失时按通用信息兜底。
+func streamFailureError(errInfo model.Error) *model.ErrorWithStatusCode {
+	if errInfo.Message == "" {
+		errInfo.Message = "responses stream failed after SSE headers committed"
+	}
+	if errInfo.Type == "" {
+		errInfo.Type = "upstream_error"
+	}
+	if errInfo.Code == nil || errInfo.Code == "" {
+		errInfo.Code = "invalid_upstream_response"
+	}
+	return &model.ErrorWithStatusCode{Error: errInfo, StatusCode: http.StatusBadGateway}
+}
+
 func renderTerminalStreamErrorEventPayload(streamErr model.Error) string {
 	payload, err := json.Marshal(model.ResponseStreamErrorEvent{
 		Type:    "error",
@@ -621,20 +632,40 @@ func markCaptureResponseFailed(capture *model.ResponsesStreamCapture, streamErr 
 	}
 }
 
-func setUsageFromResponsesUsage(target **model.Usage, source *model.ResponsesUsage) {
+// responsesUsageToInternalUsage 把 Responses wire usage（§6）映射为网关内部 Usage（Chat §8 details 字段名）。
+// 计费公式仍只看总数与 cached_tokens：cache_write/reasoning 等只进入 detail 承载，供日志与后续策略使用。
+func responsesUsageToInternalUsage(source *model.ResponsesUsage) *model.Usage {
 	if source == nil {
-		return
+		return nil
 	}
-	*target = &model.Usage{
+	usage := &model.Usage{
 		PromptTokens:     source.InputTokens,
 		CompletionTokens: source.OutputTokens,
 		TotalTokens:      source.TotalTokens,
 	}
-	if source.InputTokensDetails != nil && source.InputTokensDetails.CachedTokens > 0 {
-		(*target).PromptTokensDetails = &model.PromptTokensDetails{
-			CachedTokens: source.InputTokensDetails.CachedTokens,
+	if d := source.InputTokensDetails; d != nil && (d.CachedTokens != 0 || d.CacheWriteTokens != 0) {
+		usage.PromptTokensDetails = &model.PromptTokensDetails{
+			CachedTokens:     d.CachedTokens,
+			CacheWriteTokens: d.CacheWriteTokens,
 		}
 	}
+	if d := source.OutputTokensDetails; d != nil && (d.ReasoningTokens != 0 || d.AcceptedPredictionTokens != 0 || d.RejectedPredictionTokens != 0 || d.AudioTokens != 0 || d.TextTokens != 0) {
+		usage.CompletionTokensDetails = &model.CompletionTokensDetails{
+			ReasoningTokens:          d.ReasoningTokens,
+			AcceptedPredictionTokens: d.AcceptedPredictionTokens,
+			RejectedPredictionTokens: d.RejectedPredictionTokens,
+			AudioTokens:              d.AudioTokens,
+			TextTokens:               d.TextTokens,
+		}
+	}
+	return usage
+}
+
+func setUsageFromResponsesUsage(target **model.Usage, source *model.ResponsesUsage) {
+	if source == nil {
+		return
+	}
+	*target = responsesUsageToInternalUsage(source)
 }
 
 func finalizeCompletedCapture(capture *model.ResponsesStreamCapture, usage **model.Usage, completedResponse *model.ResponsesResponse, outputItems []model.ResponsesItem) {

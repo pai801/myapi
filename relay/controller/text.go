@@ -53,6 +53,23 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	}
 	ctx = context.WithValue(ctx, CtxKeyRequestHeader, MaskAuthorizationHeader(c.Request.Header))
 
+	// 请求转换前移到余额检查与预扣费之前：客户端不可映射请求（*model.ProtocolConversionError）
+	// 必须在不改变余额、不触碰上游的前提下返回 HTTP 400（契约 T2 Error Propagation）。
+	// 其余 adaptor 的 ConvertRequest 为纯函数转换，仅错误归类顺序变化，成功路径行为不变。
+	adaptor := relay.GetAdaptor(meta.APIType)
+	if adaptor == nil {
+		logger.Log.Errorf("[%s] %+v", "invalid_api_type", fmt.Errorf("invalid api type: %d", meta.APIType))
+		return openai.ErrorWrapper(fmt.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
+	}
+	adaptor.Init(meta)
+
+	// get request body
+	requestBody, err := getRequestBody(c, meta, textRequest, adaptor)
+	if err != nil {
+		logger.Log.Errorf("[%s] %+v", "convert_request_failed", err)
+		return classifyConversionError(err)
+	}
+
 	// get model ratio
 	modelRatio := billingratio.GetModelRatio(textRequest.Model, meta.ChannelType)
 	groupRatio := dbmodel.GetGroupModelRatio(meta.Group)
@@ -84,20 +101,6 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 		return openai.ErrorWrapper(err, "pre_consume_quota_failed", http.StatusInternalServerError)
 	} else {
 		ctx = context.WithValue(ctx, CtxKeyPreConsumedQuota, estimatedQuota)
-	}
-
-	adaptor := relay.GetAdaptor(meta.APIType)
-	if adaptor == nil {
-		logger.Log.Errorf("[%s] %+v", "invalid_api_type", fmt.Errorf("invalid api type: %d", meta.APIType))
-		return openai.ErrorWrapper(fmt.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
-	}
-	adaptor.Init(meta)
-
-	// get request body
-	requestBody, err := getRequestBody(c, meta, textRequest, adaptor)
-	if err != nil {
-		logger.Log.Errorf("[%s] %+v", "convert_request_failed", err)
-		return openai.ErrorWrapper(err, "convert_request_failed", http.StatusInternalServerError)
 	}
 
 	// do request
@@ -137,6 +140,26 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 	// post-consume quota
 	go postConsumeQuota(ctx, usage, meta, textRequest, ratio, modelRatio, systemPromptReset)
 	return nil
+}
+
+// classifyConversionError 按契约 §1.3 归类请求转换错误：
+// 客户端请求不可映射（*model.ProtocolConversionError）→ HTTP 400 invalid_request_error，
+// code 保留稳定机器码、param 保留源协议 JSON path；其他转换基础设施错误保持 500。
+// 调用点位于余额检查与预扣费之前，错误路径天然不改余额、不触达上游。
+func classifyConversionError(err error) *model.ErrorWithStatusCode {
+	var convErr *model.ProtocolConversionError
+	if errors.As(err, &convErr) {
+		return &model.ErrorWithStatusCode{
+			Error: model.Error{
+				Message: convErr.Error(),
+				Type:    "invalid_request_error",
+				Param:   convErr.Path,
+				Code:    convErr.Code,
+			},
+			StatusCode: http.StatusBadRequest,
+		}
+	}
+	return openai.ErrorWrapper(err, "convert_request_failed", http.StatusInternalServerError)
 }
 
 func getRequestBody(c *gin.Context, meta *meta.Meta, textRequest *model.GeneralOpenAIRequest, adaptor adaptor.Adaptor) (io.Reader, error) {

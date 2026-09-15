@@ -40,6 +40,7 @@ type GeneralOpenAIRequest struct {
 	Audio               *Audio          `json:"audio,omitempty"`
 	PresencePenalty     *float64        `json:"presence_penalty,omitempty"`
 	ResponseFormat      *ResponseFormat `json:"response_format,omitempty"`
+	Verbosity           string          `json:"verbosity,omitempty"` // §2.2 low|medium|high，Chat→Responses 转 text.verbosity
 	Seed                float64         `json:"seed,omitempty"`
 	ServiceTier         *string         `json:"service_tier,omitempty"`
 	Stop                any             `json:"stop,omitempty"`

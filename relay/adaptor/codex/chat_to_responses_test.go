@@ -2,11 +2,16 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/pai801/myapi/relay/model"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/tidwall/gjson"
 )
@@ -86,12 +91,22 @@ func trimSpace(s string) string {
 	return s[start:end]
 }
 
+// mustConvertEvents 是测试适配层：把转换错误显式暴露为 panic（不 swallow error）。
+// 仅用于历史合法流式回归样本——若某合法样本触发 error，说明转换器回归破坏或样本畸形，测试立即失败。
+// 需要断言 error 行为的新用例直接调用 ConvertOpenAIChatToResponsesWithContext 的 (events, error) 形式。
+func mustConvertEvents(events []string, err error) []string {
+	if err != nil {
+		panic(err)
+	}
+	return events
+}
+
 // sendChunks 模拟发送一系列 SSE chunk 并返回最终完成事件
 func sendChunks(chunks []string, fallback bool) []string {
 	var param any
 	var allEvents []string
 	for _, chunk := range chunks {
-		events := ConvertOpenAIChatToResponses(nil, nil, []byte(chunk), &param, fallback)
+		events := mustConvertEvents(ConvertOpenAIChatToResponses(nil, nil, []byte(chunk), &param, fallback))
 		allEvents = append(allEvents, events...)
 	}
 	return allEvents
@@ -371,6 +386,61 @@ func parseOutputItemDone(events []string) []map[string]interface{} {
 	return out
 }
 
+// parseOutputItemDoneArguments 返回指定 item type 的 output_item.done 事件里 item.arguments 的原始 gjson
+// 结果，用于区分「内嵌 JSON 对象」与「字符串」两种形态（tool_search_call 应为对象）。
+func parseOutputItemDoneArguments(events []string, itemType string) gjson.Result {
+	for _, evt := range events {
+		if !strings.Contains(evt, "event: response.output_item.done") {
+			continue
+		}
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if !gjson.Valid(dataStr) {
+			continue
+		}
+		parsed := gjson.Parse(dataStr)
+		if parsed.Get("type").String() != "response.output_item.done" {
+			continue
+		}
+		if parsed.Get("item.type").String() != itemType {
+			continue
+		}
+		return parsed.Get("item.arguments")
+	}
+	return gjson.Result{}
+}
+
+// assertSSEDataLinesValidJSON 断言所有 SSE 事件的 data: 行均为合法 JSON（[DONE] 哨兵除外），
+// 且 data 载荷必须是单物理行。
+// 解析类 helper（parseOutputItemDoneArguments 等）内部有 `if !gjson.Valid(dataStr) { continue }`，
+// 会静默跳过已损坏帧导致回归假通过；本 helper 显式拦下非法帧，保护 tool_search_call 内嵌对象
+// 注入未闭合 JSON 破坏外层帧的 P0 场景。
+// 单行性断言用于挡住「SetRaw 把含裸换行的对象原样注入，破坏 SSE 帧」的 P1 场景：gjson.Valid 允许
+// LF/CR 作为 token 间空白，会把跨物理行的载荷当「合法的含空白 JSON」放行，但 SSE 写出层是逐字写出
+// （`data: %s\n\n`），未做按行 `data: ` 前缀归一化，客户端按物理行拆分后会丢掉无 `data: ` 前缀的行。
+func assertSSEDataLinesValidJSON(t *testing.T, events []string) {
+	t.Helper()
+	for _, evt := range events {
+		idx := indexOf(evt, "data: ")
+		if idx < 0 {
+			continue
+		}
+		dataStr := trimSpace(evt[idx+len("data: "):])
+		if dataStr == "[DONE]" {
+			continue
+		}
+		if strings.ContainsAny(dataStr, "\n\r") {
+			t.Fatalf("SSE data 载荷含裸换行（必须单行，否则客户端按物理行拆分后丢帧）: %q", dataStr)
+		}
+		if !gjson.Valid(dataStr) {
+			t.Fatalf("SSE data 行不是合法 JSON: %s", dataStr)
+		}
+	}
+}
+
 func parseOutputItemEventSummaries(events []string, eventType string) []map[string]interface{} {
 	var out []map[string]interface{}
 	for _, evt := range events {
@@ -504,7 +574,7 @@ func TestConvertOpenAIChatToResponses_ReasoningWhitespaceAndBuiltinToolSearch(t 
 		var allEvents []string
 		reqBody := codexRequestWithBuiltinTool("tool_search")
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, true)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, true))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -532,7 +602,7 @@ func TestConvertOpenAIChatToResponses_ReasoningWhitespaceAndBuiltinToolSearch(t 
 		So(doneTool["type"], ShouldEqual, "tool_search_call")
 		So(doneTool["id"], ShouldEqual, "ts_call_ts_1")
 		So(doneTool["call_id"], ShouldEqual, "call_ts_1")
-		So(doneTool["arguments"], ShouldEqual, `{"query":"multi-agent subagent spawn utility"}`)
+		So(doneTool["arguments"], ShouldResemble, map[string]interface{}{"query": "multi-agent subagent spawn utility"})
 		fcDeltas := parseFunctionCallArgumentEvents(allEvents, "response.function_call_arguments.delta")
 		fcDones := parseFunctionCallArgumentEvents(allEvents, "response.function_call_arguments.done")
 		for _, evt := range fcDeltas {
@@ -556,7 +626,7 @@ func TestConvertOpenAIChatToResponses_ReasoningWhitespaceAndBuiltinToolSearch(t 
 		So(tool["id"], ShouldEqual, "ts_call_ts_1")
 		So(tool["call_id"], ShouldEqual, "call_ts_1")
 		So(tool["name"], ShouldEqual, "tool_search")
-		So(tool["arguments"], ShouldEqual, `{"query":"multi-agent subagent spawn utility"}`)
+		So(tool["arguments"], ShouldResemble, map[string]interface{}{"query": "multi-agent subagent spawn utility"})
 		So(tool["status"], ShouldEqual, "completed")
 
 		completedIDs := map[string]string{}
@@ -596,7 +666,7 @@ func TestConvertOpenAIChatToResponses_CompletedOutput_WebSearchBuiltin(t *testin
 		var allEvents []string
 		reqBody := codexRequestWithBuiltinTool("web_search")
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -647,7 +717,7 @@ func TestConvertOpenAIChatToResponses_PlainFunctionKeepsArgumentDeltaAndDone(t *
 		var allEvents []string
 		reqBody := codexRequestWithFunction()
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -678,7 +748,7 @@ func TestConvertOpenAIChatToResponses_ToolSearchEmitsLifecycleAndSearchQueryEven
 		var allEvents []string
 		reqBody := codexRequestWithBuiltinTool("tool_search")
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -730,7 +800,7 @@ func TestConvertOpenAIChatToResponses_WebSearchEmitsLifecycleEvents(t *testing.T
 		var allEvents []string
 		reqBody := codexRequestWithBuiltinTool("web_search")
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -749,8 +819,8 @@ func TestConvertOpenAIChatToResponses_WebSearchEmitsLifecycleEvents(t *testing.T
 }
 
 func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *testing.T) {
-	Convey("builtin tool output item 使用 client execution（仅 tool_search）与字符串 arguments、ts_/ws_ 前缀", t, func() {
-		Convey("tool_search added done completed output 均使用字符串 arguments 且 item id 为 ts 前缀", func() {
+	Convey("builtin tool output item 使用 client execution（仅 tool_search）与 tool_search 对象 arguments、web_search 字符串 arguments、ts_/ws_ 前缀", t, func() {
+		Convey("tool_search added done completed output 均使用对象 arguments 且 item id 为 ts 前缀", func() {
 			chunks := []string{
 				`data: {"id":"resp_tsc_shape","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_tsc_shape","type":"function","function":{"name":"tool_search","arguments":"{\"query\":"}}]},"finish_reason":null}]}`,
 				`data: {"id":"resp_tsc_shape","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"spawn agent\",\"limit\":5}"}}]},"finish_reason":null}]}`,
@@ -762,7 +832,7 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 			var allEvents []string
 			reqBody := codexRequestWithBuiltinTool("tool_search")
 			for _, chunk := range chunks {
-				ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+				ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 				allEvents = append(allEvents, ev...)
 			}
 
@@ -789,7 +859,7 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 			So(doneTool, ShouldNotBeNil)
 			So(doneTool["id"], ShouldEqual, "ts_call_tsc_shape")
 			So(doneTool["execution"], ShouldEqual, "client")
-			So(doneTool["arguments"], ShouldEqual, `{"query":"spawn agent","limit":5}`)
+			So(doneTool["arguments"], ShouldResemble, map[string]interface{}{"query": "spawn agent", "limit": float64(5)})
 
 			output := parseCompletedOutput(allEvents)
 			So(output, ShouldNotBeNil)
@@ -803,7 +873,7 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 			So(outputTool, ShouldNotBeNil)
 			So(outputTool["id"], ShouldEqual, "ts_call_tsc_shape")
 			So(outputTool["execution"], ShouldEqual, "client")
-			So(outputTool["arguments"], ShouldEqual, `{"query":"spawn agent","limit":5}`)
+			So(outputTool["arguments"], ShouldResemble, map[string]interface{}{"query": "spawn agent", "limit": float64(5)})
 
 			searchDone := parseBuiltinToolLifecycleEvents(allEvents, "response.tool_search_call.search_query.done")
 			So(len(searchDone), ShouldEqual, 1)
@@ -822,7 +892,7 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 			var allEvents []string
 			reqBody := codexRequestWithBuiltinTool("web_search")
 			for _, chunk := range chunks {
-				ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+				ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 				allEvents = append(allEvents, ev...)
 			}
 
@@ -876,7 +946,7 @@ func TestConvertOpenAIChatToResponses_BuiltinToolItemsUseStructuredArguments(t *
 			var allEvents []string
 			reqBody := codexRequestWithBuiltinTool("tool_search")
 			for _, chunk := range chunks {
-				ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+				ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 				allEvents = append(allEvents, ev...)
 			}
 
@@ -908,7 +978,7 @@ func TestConvertOpenAIChatToResponses_ToolSearchSearchQueryDoneFallsBackToRawArg
 			var allEvents []string
 			reqBody := codexRequestWithBuiltinTool("tool_search")
 			for _, chunk := range chunks {
-				ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+				ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 				allEvents = append(allEvents, ev...)
 			}
 
@@ -928,7 +998,7 @@ func TestConvertOpenAIChatToResponses_ToolSearchSearchQueryDoneFallsBackToRawArg
 			var allEvents []string
 			reqBody := codexRequestWithBuiltinTool("tool_search")
 			for _, chunk := range chunks {
-				ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+				ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 				allEvents = append(allEvents, ev...)
 			}
 
@@ -936,6 +1006,222 @@ func TestConvertOpenAIChatToResponses_ToolSearchSearchQueryDoneFallsBackToRawArg
 			So(len(searchDone), ShouldEqual, 1)
 			So(searchDone[0]["query"], ShouldEqual, `{"keyword":"utility subagent"}`)
 		})
+	})
+}
+
+func TestConvertOpenAIChatToResponses_ToolSearchCallArgumentsInlineJSONObject(t *testing.T) {
+	Convey("tool_search_call 的 arguments 是内嵌 JSON 对象而非字符串（与 function_call 口径不同）", t, func() {
+		chunks := []string{
+			`data: {"id":"resp_ts_obj","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_ts_obj","type":"function","function":{"name":"tool_search","arguments":"{\"query\":"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_ts_obj","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_ts_obj","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+
+		var param any
+		var allEvents []string
+		reqBody := codexRequestWithBuiltinTool("tool_search")
+		for _, chunk := range chunks {
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
+			allEvents = append(allEvents, ev...)
+		}
+
+		// 流式 output_item.done：item.arguments 必须是内嵌对象，query 可直接取值（非字符串外层）
+		doneArgs := parseOutputItemDoneArguments(allEvents, "tool_search_call")
+		So(doneArgs.Exists(), ShouldBeTrue)
+		So(doneArgs.IsObject(), ShouldBeTrue)
+		So(doneArgs.Get("query").Exists(), ShouldBeTrue)
+		So(doneArgs.Get("query").Type, ShouldEqual, gjson.String)
+		So(doneArgs.Get("query").String(), ShouldEqual, "x")
+
+		// 完整 tool_calls 定稿（response.completed 的 output）同型
+		output := parseCompletedOutput(allEvents)
+		So(output, ShouldNotBeNil)
+		var completedTool map[string]interface{}
+		for _, outputItem := range output {
+			item := outputItem.(map[string]interface{})
+			if item["type"] == "tool_search_call" {
+				completedTool = item
+			}
+		}
+		So(completedTool, ShouldNotBeNil)
+		So(completedTool["arguments"], ShouldResemble, map[string]interface{}{"query": "x"})
+	})
+}
+
+// TestConvertOpenAIChatToResponses_ToolSearchCallArgumentsNewlineObjectKeepsSSEFrameSingleLine 保护 P1-1：
+// arguments 是「美化打印」的合法对象（含裸换行/首尾空白）时，gjson.Valid 允许 LF/CR 作为 token 间空白，
+// 若据此走 sjson.SetRaw 会把裸换行原样注入 SSE data 载荷；SSE 写出层逐字写出、不做按行 `data: ` 前缀
+// 归一化，客户端按物理行拆分后会丢掉无前缀的行导致载荷截断。必须：形态保持内嵌对象，且 data 载荷单行。
+func TestConvertOpenAIChatToResponses_ToolSearchCallArgumentsNewlineObjectKeepsSSEFrameSingleLine(t *testing.T) {
+	Convey("tool_search_call arguments 为含裸换行的合法对象时 done 帧保持对象且 data 载荷单行", t, func() {
+		chunks := []string{
+			`data: {"id":"resp_ts_nl","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_ts_nl","type":"function","function":{"name":"tool_search","arguments":"{\n  \"query\": \"x\"\n}"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_ts_nl","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+
+		var param any
+		var allEvents []string
+		reqBody := codexRequestWithBuiltinTool("tool_search")
+		for _, chunk := range chunks {
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
+			allEvents = append(allEvents, ev...)
+		}
+
+		// 关键：含裸换行的对象不得以 SetRaw 原样注入；整帧合法且 data 载荷单行。
+		assertSSEDataLinesValidJSON(t, allEvents)
+
+		// 形态不得退化：done 帧 item.arguments 仍是内嵌对象，query 可直接取值。
+		doneArgs := parseOutputItemDoneArguments(allEvents, "tool_search_call")
+		So(doneArgs.Exists(), ShouldBeTrue)
+		So(doneArgs.IsObject(), ShouldBeTrue)
+		So(doneArgs.Get("query").Exists(), ShouldBeTrue)
+		So(doneArgs.Get("query").String(), ShouldEqual, "x")
+
+		// completed 输出同口径：对象而非字符串。
+		output := parseCompletedOutput(allEvents)
+		So(output, ShouldNotBeNil)
+		var completedTool map[string]interface{}
+		for _, outputItem := range output {
+			item := outputItem.(map[string]interface{})
+			if item["type"] == "tool_search_call" {
+				completedTool = item
+			}
+		}
+		So(completedTool, ShouldNotBeNil)
+		So(completedTool["arguments"], ShouldResemble, map[string]interface{}{"query": "x"})
+	})
+}
+
+func TestConvertOpenAIChatToResponses_ToolSearchCallArgumentsNonJSONFallsBackToString(t *testing.T) {
+	Convey("tool_search_call arguments 非法 JSON 时回落字符串且外层 item JSON 仍可解析", t, func() {
+		chunks := []string{
+			`data: {"id":"resp_ts_bad","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_ts_bad","type":"function","function":{"name":"tool_search","arguments":"not json"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_ts_bad","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+
+		var param any
+		var allEvents []string
+		reqBody := codexRequestWithBuiltinTool("tool_search")
+		for _, chunk := range chunks {
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
+			allEvents = append(allEvents, ev...)
+		}
+
+		doneArgs := parseOutputItemDoneArguments(allEvents, "tool_search_call")
+		So(doneArgs.Exists(), ShouldBeTrue)
+		So(doneArgs.IsObject(), ShouldBeFalse)
+		So(doneArgs.Type, ShouldEqual, gjson.String)
+		So(doneArgs.String(), ShouldEqual, "not json")
+
+		// 垃圾入垃圾出：外层 data JSON 必须仍合法，禁止非法 JSON 破坏 item
+		for _, evt := range allEvents {
+			if !strings.Contains(evt, "event: response.output_item.done") {
+				continue
+			}
+			idx := indexOf(evt, "data: ")
+			So(idx, ShouldBeGreaterThanOrEqualTo, 0)
+			So(gjson.Valid(trimSpace(evt[idx+len("data: "):])), ShouldBeTrue)
+		}
+
+		output := parseCompletedOutput(allEvents)
+		So(output, ShouldNotBeNil)
+		var completedTool map[string]interface{}
+		for _, outputItem := range output {
+			item := outputItem.(map[string]interface{})
+			if item["type"] == "tool_search_call" {
+				completedTool = item
+			}
+		}
+		So(completedTool, ShouldNotBeNil)
+		So(completedTool["arguments"], ShouldEqual, "not json")
+	})
+}
+
+// TestConvertOpenAIChatToResponses_ToolSearchCallTruncatedArgumentsFallsBackToString 保护 P0-1：
+// arguments 是截断的未闭合对象前缀（如 max_output_tokens 截断/流中断）时，gjson.Parse 会前缀宽容地
+// 判为 object，若据此 SetRaw 会注入未闭合 JSON 使整条 output_item.done 帧非法；必须回落字符串
+// 且整帧仍是合法 JSON。
+func TestConvertOpenAIChatToResponses_ToolSearchCallTruncatedArgumentsFallsBackToString(t *testing.T) {
+	Convey("tool_search_call arguments 为截断对象前缀时回落字符串且 done 帧仍是合法 JSON", t, func() {
+		chunks := []string{
+			`data: {"id":"resp_ts_trunc","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_ts_trunc","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"x"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_ts_trunc","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+
+		var param any
+		var allEvents []string
+		reqBody := codexRequestWithBuiltinTool("tool_search")
+		for _, chunk := range chunks {
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
+			allEvents = append(allEvents, ev...)
+		}
+
+		// 关键：截断前缀不得被当作对象内嵌而破坏外层帧。
+		assertSSEDataLinesValidJSON(t, allEvents)
+
+		doneArgs := parseOutputItemDoneArguments(allEvents, "tool_search_call")
+		So(doneArgs.Exists(), ShouldBeTrue)
+		So(doneArgs.IsObject(), ShouldBeFalse)
+		So(doneArgs.Type, ShouldEqual, gjson.String)
+		So(doneArgs.String(), ShouldEqual, `{"query":"x`)
+
+		// completed 输出同口径：字符串，且整体合法。
+		output := parseCompletedOutput(allEvents)
+		So(output, ShouldNotBeNil)
+		var completedTool map[string]interface{}
+		for _, outputItem := range output {
+			item := outputItem.(map[string]interface{})
+			if item["type"] == "tool_search_call" {
+				completedTool = item
+			}
+		}
+		So(completedTool, ShouldNotBeNil)
+		So(completedTool["arguments"], ShouldEqual, `{"query":"x`)
+	})
+}
+
+// TestConvertOpenAIChatToResponses_ToolSearchCallNullArgumentsFallsBackToString 锁定 P2-1 口径：
+// json.Unmarshal("null", &map) 返回 err==nil 但 map==nil，若不显式判空会让 completed 输出 JSON null；
+// 统一 helper 后 null 在流式 done 与 completed 均回落字符串 "null"。
+func TestConvertOpenAIChatToResponses_ToolSearchCallNullArgumentsFallsBackToString(t *testing.T) {
+	Convey("tool_search_call arguments 为 null 时流式 done 与 completed 均为字符串 \"null\"", t, func() {
+		chunks := []string{
+			`data: {"id":"resp_ts_null","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_ts_null","type":"function","function":{"name":"tool_search","arguments":"null"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_ts_null","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+
+		var param any
+		var allEvents []string
+		reqBody := codexRequestWithBuiltinTool("tool_search")
+		for _, chunk := range chunks {
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
+			allEvents = append(allEvents, ev...)
+		}
+
+		assertSSEDataLinesValidJSON(t, allEvents)
+
+		doneArgs := parseOutputItemDoneArguments(allEvents, "tool_search_call")
+		So(doneArgs.Exists(), ShouldBeTrue)
+		So(doneArgs.IsObject(), ShouldBeFalse)
+		So(doneArgs.Type, ShouldEqual, gjson.String)
+		So(doneArgs.String(), ShouldEqual, "null")
+
+		output := parseCompletedOutput(allEvents)
+		So(output, ShouldNotBeNil)
+		var completedTool map[string]interface{}
+		for _, outputItem := range output {
+			item := outputItem.(map[string]interface{})
+			if item["type"] == "tool_search_call" {
+				completedTool = item
+			}
+		}
+		So(completedTool, ShouldNotBeNil)
+		So(completedTool["arguments"], ShouldEqual, "null")
 	})
 }
 
@@ -991,7 +1277,7 @@ func TestConvertOpenAIChatToResponses_LeadingWhitespaceBeforeToolKeepsMessageAnd
 		var allEvents []string
 		reqBody := codexRequestWithBuiltinTool("web_search")
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, true)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, true))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -1034,7 +1320,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_Namespace(t *testing.T) {
 		var allEvents []string
 		reqBody := codexRequestWithNamespace()
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -1061,7 +1347,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_PlainFunction(t *testing.T
 		var allEvents []string
 		reqBody := codexRequestWithFunction()
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -1089,7 +1375,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_CustomTool(t *testing.T) {
 		var allEvents []string
 		reqBody := codexRequestWithApplyPatch()
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -1117,7 +1403,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_UnknownTool(t *testing.T) 
 		var allEvents []string
 		reqBody := codexRequestWithFunction() // 请求里只注册 get_weather
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -1145,7 +1431,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_NilRequest(t *testing.T) {
 		var paramNew any
 		var newEvents []string
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(nil, nil, []byte(chunk), &paramNew, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(nil, nil, []byte(chunk), &paramNew, false))
 			newEvents = append(newEvents, ev...)
 		}
 
@@ -1153,7 +1439,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_NilRequest(t *testing.T) {
 		var paramOld any
 		var oldEvents []string
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponses(nil, nil, []byte(chunk), &paramOld, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponses(nil, nil, []byte(chunk), &paramOld, false))
 			oldEvents = append(oldEvents, ev...)
 		}
 
@@ -1192,7 +1478,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_WithOriginalRequest(t *tes
 		chunk := `data: {"id":"resp_sem","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_sem_a","type":"function","function":{"name":"apply_patch_add_file","arguments":"{\"path\":\"a.txt\",\"content\":\"x\"}"}},{"index":1,"id":"call_sem_b","type":"function","function":{"name":"team__spawn_agent","arguments":"{}"}}]},"finish_reason":null}]}`
 
 		var param any
-		events := ConvertOpenAIChatToResponses(reqBody, nil, []byte(chunk), &param, false)
+		events := mustConvertEvents(ConvertOpenAIChatToResponses(reqBody, nil, []byte(chunk), &param, false))
 		added := parseOutputItemAdded(events)
 
 		So(len(added), ShouldEqual, 2)
@@ -1256,7 +1542,7 @@ func TestConvertOpenAIChatToResponses_DeferredNamespaceToolsFromInput(t *testing
 		var param any
 		var allEvents []string
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -1307,7 +1593,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_ChatFlowContinuity(t *test
 		var allEvents []string
 		reqBody := codexRequestWithNamespace()
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -2116,7 +2402,7 @@ func TestConvertOpenAIChatToResponses_FinishReasonLength(t *testing.T) {
 			var allEvents []string
 			reqBody := codexRequestWithFunction()
 			for _, chunk := range chunks {
-				ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+				ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 				allEvents = append(allEvents, ev...)
 			}
 
@@ -2158,10 +2444,15 @@ func TestConvertOpenAIChatToResponses_FinishReasonLength(t *testing.T) {
 			resp, termType := parseTerminalResponse(events)
 			So(termType, ShouldEqual, "response.completed")
 			So(resp["status"], ShouldEqual, "completed")
-			_, hasDetails := resp["incomplete_details"]
-			So(hasDetails, ShouldBeFalse)
-			_, hasTruncated := resp["truncated"]
-			So(hasTruncated, ShouldBeFalse)
+			// P2-3：统一终态快照与 T6 非流式一致 —— responses §4 规范形态下
+			// incomplete_details/truncated 恒存在（completed 分别为 null/false），
+			// 旧断言「省略二者」是非规范形态，已按协议重写。
+			detailsVal, hasDetails := resp["incomplete_details"]
+			So(hasDetails, ShouldBeTrue)
+			So(detailsVal, ShouldBeNil)
+			truncVal, hasTruncated := resp["truncated"]
+			So(hasTruncated, ShouldBeTrue)
+			So(truncVal, ShouldEqual, false)
 		})
 
 		Convey("T5: finish_reason=content_filter → 终态 incomplete + reason=content_filter + truncated", func() {
@@ -2209,7 +2500,7 @@ func TestConvertOpenAIChatToResponses_OutputItemAdded_MultipleTools(t *testing.T
 		var param any
 		var allEvents []string
 		for _, chunk := range chunks {
-			ev := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false)
+			ev := mustConvertEvents(ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, false))
 			allEvents = append(allEvents, ev...)
 		}
 
@@ -3292,4 +3583,600 @@ func TestConvertOpenAIChatToResponses_MessageItemDoneMatchesTerminalContent(t *t
 			So(done[1].(map[string]interface{})["refusal"], ShouldEqual, "cannot Athen refuse B")
 		})
 	})
+}
+
+// ============================================================================
+// T7 契约测试（报告一 P0-1(stream)/P0-4、P1-8/P1-9/P1-10、P2-2/P2-3）
+// 上游样本严格按 chat §7（chat.completion.chunk + [DONE]）构造，产物按协议解码。
+// ============================================================================
+
+// t7Payloads 提取指定事件类型所有帧的 data payload（payload type 字段必须与事件名一致）。
+func t7Payloads(events []string, eventType string) []gjson.Result {
+	var out []gjson.Result
+	for _, evt := range events {
+		lines := strings.Split(evt, "\n")
+		if len(lines) == 0 || lines[0] != "event: "+eventType {
+			continue
+		}
+		for _, line := range lines[1:] {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			if !gjson.Valid(data) {
+				continue
+			}
+			parsed := gjson.Parse(data)
+			if parsed.Get("type").String() == eventType {
+				out = append(out, parsed)
+			}
+		}
+	}
+	return out
+}
+
+// t7FrameIndex 返回首个包含指定事件帧的下标，找不到返回 -1。
+func t7FrameIndex(events []string, eventType string) int {
+	for i, evt := range events {
+		if strings.HasPrefix(evt, "event: "+eventType+"\n") {
+			return i
+		}
+	}
+	return -1
+}
+
+// t7RunStream 模拟 forwarder 按序喂入 chunk；出现转换错误后继续喂入，
+// 验证终态后不再产出成功事件。返回全部事件与首个转换错误。
+func t7RunStream(reqBody []byte, chunks []string, fallback bool) ([]string, error) {
+	var param any
+	var all []string
+	var firstErr error
+	for _, chunk := range chunks {
+		events, err := ConvertOpenAIChatToResponsesWithContext(reqBody, nil, []byte(chunk), &param, fallback)
+		all = append(all, events...)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return all, firstErr
+}
+
+// t7ConversionErrorCode 断言错误为 *model.ProtocolConversionError 并提取稳定机器码。
+func t7ConversionErrorCode(t *testing.T, err error) string {
+	t.Helper()
+	var pce *model.ProtocolConversionError
+	if !errors.As(err, &pce) {
+		t.Fatalf("expected *model.ProtocolConversionError, got %#v", err)
+	}
+	return pce.Code
+}
+
+// t7AssertNoOrphanDone 断言每个 output_item.done 都有同 item id 的 output_item.added
+// （responses §7 item 生命周期，P1-10）。
+func t7AssertNoOrphanDone(t *testing.T, events []string) {
+	t.Helper()
+	added := map[string]bool{}
+	for _, p := range t7Payloads(events, "response.output_item.added") {
+		added[p.Get("item.id").String()] = true
+	}
+	for _, p := range t7Payloads(events, "response.output_item.done") {
+		id := p.Get("item.id").String()
+		if !added[id] {
+			t.Fatalf("orphan output_item.done without matching added: item id %q", id)
+		}
+	}
+}
+
+func TestConvertOpenAIChatToResponsesRejectsMalformedChunkAndToolLifecycle(t *testing.T) {
+	// G: 畸形 JSON 或缺 id/name 的 tool delta 后接 [DONE] | W: converter/forwarder | T: error/failed 终态，无 completed，无 orphan output_item.done
+
+	t.Run("M1 畸形 JSON chunk 后接 [DONE] 不得合成 completed", func(t *testing.T) {
+		chunks := []string{
+			`data: {"id":"resp_mal1","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+			`data: {"id":"resp_mal1","choices":[{"index":0,"delta":{"content":"broken",`,
+			`data: [DONE]`,
+		}
+		events, err := t7RunStream([]byte(`{"model":"gpt-4o"}`), chunks, false)
+		if err == nil {
+			t.Fatalf("expected invalid_stream_event error for malformed chunk")
+		}
+		if code := t7ConversionErrorCode(t, err); code != model.CodeInvalidStreamEvent {
+			t.Fatalf("expected code invalid_stream_event, got %q", code)
+		}
+		if n := len(t7Payloads(events, "response.completed")); n != 0 {
+			t.Fatalf("expected no completed terminal after malformed chunk, got %d", n)
+		}
+		if n := len(t7Payloads(events, "response.incomplete")); n != 0 {
+			t.Fatalf("expected no incomplete terminal after malformed chunk, got %d", n)
+		}
+		failed := t7Payloads(events, "response.failed")
+		if len(failed) != 1 {
+			t.Fatalf("expected exactly one failed terminal, got %d", len(failed))
+		}
+		if got := failed[0].Get("response.status").String(); got != "failed" {
+			t.Fatalf("expected failed terminal status=failed, got %q", got)
+		}
+		if got := failed[0].Get("response.error.code").String(); got != model.CodeInvalidStreamEvent {
+			t.Fatalf("expected failed terminal error.code=invalid_stream_event, got %q", got)
+		}
+		t7AssertNoOrphanDone(t, events)
+	})
+
+	t.Run("M2 合法 JSON 非 object chunk 同为无效流事件", func(t *testing.T) {
+		chunks := []string{`data: [1,2,3]`, `data: [DONE]`}
+		events, err := t7RunStream([]byte(`{"model":"gpt-4o"}`), chunks, false)
+		if err == nil {
+			t.Fatalf("expected invalid_stream_event error for non-object chunk")
+		}
+		if code := t7ConversionErrorCode(t, err); code != model.CodeInvalidStreamEvent {
+			t.Fatalf("expected code invalid_stream_event, got %q", code)
+		}
+		if n := len(t7Payloads(events, "response.completed")); n != 0 {
+			t.Fatalf("expected no completed terminal, got %d", n)
+		}
+		if n := len(t7Payloads(events, "response.failed")); n != 1 {
+			t.Fatalf("expected exactly one failed terminal, got %d", n)
+		}
+		t7AssertNoOrphanDone(t, events)
+	})
+
+	t.Run("M3 tool delta 缺 name 未 added，close 转 malformed_tool_call 失败终态", func(t *testing.T) {
+		chunks := []string{
+			`data: {"id":"resp_mal3","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_m3","type":"function","function":{"arguments":"{\"a\":1}"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_mal3","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+		events, err := t7RunStream(codexRequestWithFunction(), chunks, false)
+		if err == nil {
+			t.Fatalf("expected malformed_tool_call error for tool delta without name")
+		}
+		if code := t7ConversionErrorCode(t, err); code != model.CodeMalformedToolCall {
+			t.Fatalf("expected code malformed_tool_call, got %q", code)
+		}
+		if n := len(t7Payloads(events, "response.completed")); n != 0 {
+			t.Fatalf("expected no completed terminal, got %d", n)
+		}
+		if n := len(t7Payloads(events, "response.failed")); n != 1 {
+			t.Fatalf("expected exactly one failed terminal, got %d", n)
+		}
+		if n := len(t7Payloads(events, "response.output_item.added")); n != 0 {
+			t.Fatalf("expected no output_item.added for call without name, got %d", n)
+		}
+		for _, p := range t7Payloads(events, "response.output_item.done") {
+			t.Fatalf("expected no output_item.done for never-added call, got %s", p.Raw)
+		}
+		t7AssertNoOrphanDone(t, events)
+	})
+
+	t.Run("M4 tool delta 缺 id 有 name 同样走失败终态", func(t *testing.T) {
+		chunks := []string{
+			`data: {"id":"resp_mal4","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"type":"function","function":{"name":"get_weather","arguments":"{}"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_mal4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+		events, err := t7RunStream(codexRequestWithFunction(), chunks, false)
+		if err == nil {
+			t.Fatalf("expected malformed_tool_call error for tool delta without id")
+		}
+		if code := t7ConversionErrorCode(t, err); code != model.CodeMalformedToolCall {
+			t.Fatalf("expected code malformed_tool_call, got %q", code)
+		}
+		if n := len(t7Payloads(events, "response.failed")); n != 1 {
+			t.Fatalf("expected exactly one failed terminal, got %d", n)
+		}
+		if n := len(t7Payloads(events, "response.completed")); n != 0 {
+			t.Fatalf("expected no completed terminal, got %d", n)
+		}
+		t7AssertNoOrphanDone(t, events)
+	})
+}
+
+func TestConvertOpenAIChatToResponsesCustomDoneAndUsageDetails(t *testing.T) {
+	// G: 合法 custom call + 完整 Chat usage details | W: 完成流 | T: custom input delta/done 成对，usage details 全保留且无文本估算
+
+	t.Run("D1 custom close 序列含 custom_tool_call_input.done 且 final input 一致", func(t *testing.T) {
+		chunks := []string{
+			`data: {"id":"resp_ct","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_ct_1","type":"function","function":{"name":"my_grammar","arguments":"{\"input\":\"hello grammar\"}"}}]},"finish_reason":null}]}`,
+			`data: {"id":"resp_ct","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			`data: [DONE]`,
+		}
+		events, err := t7RunStream(codexRequestWithPlainCustom(), chunks, false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		deltas := t7Payloads(events, "response.custom_tool_call_input.delta")
+		dones := t7Payloads(events, "response.custom_tool_call_input.done")
+		if len(deltas) != 1 || len(dones) != 1 {
+			t.Fatalf("expected paired custom input delta/done, got deltas=%d dones=%d", len(deltas), len(dones))
+		}
+		var itemDone gjson.Result
+		found := false
+		for _, p := range t7Payloads(events, "response.output_item.done") {
+			if p.Get("item.id").String() == "ctc_call_ct_1" {
+				itemDone = p
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected output_item.done for ctc_call_ct_1")
+		}
+		if deltas[0].Get("delta").String() != "hello grammar" {
+			t.Fatalf("expected delta input 'hello grammar', got %q", deltas[0].Get("delta").String())
+		}
+		if dones[0].Get("input").String() != "hello grammar" {
+			t.Fatalf("expected custom_tool_call_input.done input 'hello grammar', got %q", dones[0].Get("input").String())
+		}
+		// .done final input 与 output_item.done.item.input 一致（P1-8）
+		if dones[0].Get("input").String() != itemDone.Get("item.input").String() {
+			t.Fatalf("custom_tool_call_input.done input %q != output_item.done item.input %q",
+				dones[0].Get("input").String(), itemDone.Get("item.input").String())
+		}
+		if dones[0].Get("item_id").String() != "ctc_call_ct_1" {
+			t.Fatalf("expected done item_id ctc_call_ct_1, got %q", dones[0].Get("item_id").String())
+		}
+		// 顺序：delta < done < output_item.done（responses §7 生命周期）
+		iDelta, iDone, iItem := t7FrameIndex(events, "response.custom_tool_call_input.delta"), t7FrameIndex(events, "response.custom_tool_call_input.done"), -1
+		for i, evt := range events {
+			if strings.HasPrefix(evt, "event: response.output_item.done\n") && strings.Contains(evt, "ctc_call_ct_1") {
+				iItem = i
+			}
+		}
+		if !(iDelta >= 0 && iDone > iDelta && iItem > iDone) {
+			t.Fatalf("expected ordering delta(%d) < done(%d) < item.done(%d)", iDelta, iDone, iItem)
+		}
+		t7AssertNoOrphanDone(t, events)
+	})
+
+	t.Run("D2 Chat usage completion details 全保留且与非流式字段集合一致", func(t *testing.T) {
+		usageJSON := `"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":3,"accepted_prediction_tokens":5,"rejected_prediction_tokens":1,"audio_tokens":2,"text_tokens":7}}`
+		chunks := []string{
+			`data: {"id":"resp_ct2","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`,
+			`data: {"id":"resp_ct2","choices":[],` + usageJSON + `}`,
+			`data: [DONE]`,
+		}
+		events, err := t7RunStream([]byte(`{"model":"gpt-4o"}`), chunks, false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		usage := parseCompletedUsage(events)
+		if usage == nil {
+			t.Fatalf("expected completed usage")
+		}
+		od, ok := usage["output_tokens_details"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected output_tokens_details object, got %#v", usage["output_tokens_details"])
+		}
+		for key, want := range map[string]float64{
+			"reasoning_tokens": 3, "accepted_prediction_tokens": 5,
+			"rejected_prediction_tokens": 1, "audio_tokens": 2, "text_tokens": 7,
+		} {
+			if got := od[key]; got != want {
+				t.Fatalf("expected output_tokens_details.%s=%v, got %#v", key, want, got)
+			}
+		}
+		id, ok := usage["input_tokens_details"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected input_tokens_details object")
+		}
+		if id["cached_tokens"] != float64(4) || id["cache_write_tokens"] != float64(2) {
+			t.Fatalf("expected cached/cache_write 4/2, got %#v", id)
+		}
+
+		// 与非流式（T6 同一段 usage）对照：details 字段集合与值完全一致（P1-9 同源映射）
+		chatBody := []byte(`{"id":"chatcmpl_ct2","object":"chat.completion","created":1700000042,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],` + usageJSON + `}`)
+		reqBody := []byte(`{"model":"gpt-4o"}`)
+		nonStream, nsErr := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-4o", false, reqBody)
+		if nsErr != nil {
+			t.Fatalf("non-stream conversion failed: %v", nsErr)
+		}
+		nsParsed := gjson.GetBytes(nonStream, "usage")
+		streamDetails := gjson.Parse(gjson.Parse(trimSpace(extractT7Data(events, "response.completed"))).Get("response.usage").Raw)
+		for _, path := range []string{"output_tokens_details", "input_tokens_details"} {
+			nsKeys := sortedDetailKeys(nsParsed.Get(path))
+			stKeys := sortedDetailKeys(streamDetails.Get(path))
+			if !reflect.DeepEqual(nsKeys, stKeys) {
+				t.Fatalf("usage %s field set mismatch: non-stream=%v stream=%v", path, nsKeys, stKeys)
+			}
+		}
+	})
+
+	t.Run("D3 reasoning 文本不得估算 reasoning_tokens（P0-4）", func(t *testing.T) {
+		longReasoning := strings.Repeat("推", 200) // UTF-8 每字 3 字节，旧字节估算路径会伪造出非 0 token
+		chunks := []string{
+			`data: {"id":"resp_ct3","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"` + longReasoning + `"},"finish_reason":null}]}`,
+			`data: {"id":"resp_ct3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`data: {"id":"resp_ct3","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}`,
+			`data: [DONE]`,
+		}
+		events, err := t7RunStream([]byte(`{"model":"gpt-4o"}`), chunks, false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		usage := parseCompletedUsage(events)
+		od, ok := usage["output_tokens_details"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected output_tokens_details object")
+		}
+		if od["reasoning_tokens"] != float64(0) {
+			t.Fatalf("expected reasoning_tokens=0 without upstream usage detail, got %#v (estimation path must be removed)", od["reasoning_tokens"])
+		}
+	})
+}
+
+// extractT7Data 返回指定事件帧的 data payload 字符串。
+func extractT7Data(events []string, eventType string) string {
+	for _, evt := range events {
+		if !strings.HasPrefix(evt, "event: "+eventType+"\n") {
+			continue
+		}
+		for _, line := range strings.Split(evt, "\n") {
+			if strings.HasPrefix(line, "data: ") {
+				return strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}
+	return ""
+}
+
+// sortedDetailKeys 提取 usage details 对象的键名并排序，供流式/非流式对照。
+func sortedDetailKeys(obj gjson.Result) []string {
+	if !obj.IsObject() {
+		return nil
+	}
+	var keys []string
+	obj.ForEach(func(k, _ gjson.Result) bool {
+		keys = append(keys, k.String())
+		return true
+	})
+	sort.Strings(keys)
+	return keys
+}
+
+func TestConvertOpenAIChatToResponsesCreatedAndRequestSnapshot(t *testing.T) {
+	// G: chunk.created 与原请求 text/modalities/store/service_tier/user | W: 完成流 | T: 全事件/终态 created_at 使用上游值，终态字段与请求一致
+
+	reqBody := []byte(`{"model":"codex-snap","instructions":"sys","text":{"format":{"type":"text","verbosity":"low"}},"modalities":["text"],"store":false,"service_tier":"default","user":"user-42","temperature":0.3,"reasoning":{"effort":"low"},"parallel_tool_calls":true,"max_output_tokens":128,"metadata":{"k":"v"},"tool_choice":"auto","previous_response_id":"resp_prev_9"}`)
+
+	validChunks := func(withCreated bool) []string {
+		created := ""
+		if withCreated {
+			created = `"created":1700000042,`
+		}
+		return []string{
+			`data: {` + created + `"id":"resp_cr","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`,
+			`data: {` + created + `"id":"resp_cr","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}
+	}
+
+	t.Run("C1 首个合法 chunk 的 created 贯穿 created/in_progress/终态（P2-2）", func(t *testing.T) {
+		events, err := t7RunStream(reqBody, validChunks(true), false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		for _, evtType := range []string{"response.created", "response.in_progress", "response.completed"} {
+			payloads := t7Payloads(events, evtType)
+			if len(payloads) == 0 {
+				t.Fatalf("expected %s event", evtType)
+			}
+			if got := payloads[0].Get("response.created_at").Int(); got != 1700000042 {
+				t.Fatalf("expected %s response.created_at=1700000042, got %d", evtType, got)
+			}
+		}
+	})
+
+	t.Run("C2 chunk 缺失 created 时回落网关时间", func(t *testing.T) {
+		base := time.Now().Unix() - 1
+		events, err := t7RunStream(reqBody, validChunks(false), false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		payloads := t7Payloads(events, "response.completed")
+		if len(payloads) == 0 {
+			t.Fatalf("expected completed event")
+		}
+		got := payloads[0].Get("response.created_at").Int()
+		if got < base || got > time.Now().Unix()+1 {
+			t.Fatalf("expected gateway-time fallback created_at in [%d, %d], got %d", base, time.Now().Unix()+1, got)
+		}
+	})
+
+	t.Run("C3 终态快照回显 text/modalities/store/service_tier/user 及现有字段（P2-3）", func(t *testing.T) {
+		events, err := t7RunStream(reqBody, validChunks(true), false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		resp := gjson.Parse(extractT7Data(events, "response.completed")).Get("response")
+		if !resp.IsObject() {
+			t.Fatalf("expected completed response object")
+		}
+		checks := map[string]interface{}{
+			"status":                "completed",
+			"model":                 "codex-snap",
+			"instructions":          "sys",
+			"service_tier":          "default",
+			"user":                  "user-42",
+			"previous_response_id":  "resp_prev_9",
+			"tool_choice":           "auto",
+			"text.format.type":      "text",
+			"text.format.verbosity": "low",
+			"modalities.0":          "text",
+			"reasoning.effort":      "low",
+			"metadata.k":            "v",
+		}
+		for path, want := range checks {
+			if got := resp.Get(path).Value(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("expected response.%s=%v, got %#v", path, want, got)
+			}
+		}
+		if v := resp.Get("store"); !v.Exists() || v.Type != gjson.False {
+			t.Fatalf("expected response.store=false echoed, got %#v", v.Raw)
+		}
+		if v := resp.Get("temperature"); v.Float() != 0.3 {
+			t.Fatalf("expected response.temperature=0.3, got %s", v.Raw)
+		}
+		if v := resp.Get("max_output_tokens"); v.Int() != 128 {
+			t.Fatalf("expected response.max_output_tokens=128, got %s", v.Raw)
+		}
+		if v := resp.Get("parallel_tool_calls"); !v.Bool() {
+			t.Fatalf("expected response.parallel_tool_calls=true, got %s", v.Raw)
+		}
+	})
+
+	t.Run("C4 流式终态与非流式回显字段集合一致", func(t *testing.T) {
+		events, err := t7RunStream(reqBody, validChunks(true), false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		var streamResp map[string]interface{}
+		if e := json.Unmarshal([]byte(gjson.Parse(extractT7Data(events, "response.completed")).Get("response").Raw), &streamResp); e != nil {
+			t.Fatalf("parse stream terminal response: %v", e)
+		}
+		chatBody := []byte(`{"id":"chatcmpl_snap","object":"chat.completion","created":1700000042,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`)
+		nonStream, nsErr := ConvertChatResponseToResponsesWithContext(chatBody, "gpt-4o", false, reqBody)
+		if nsErr != nil {
+			t.Fatalf("non-stream conversion failed: %v", nsErr)
+		}
+		var nsResp map[string]interface{}
+		if e := json.Unmarshal(nonStream, &nsResp); e != nil {
+			t.Fatalf("parse non-stream response: %v", e)
+		}
+		// 契约 T7 State/Data：至少 text/modalities/store/service_tier/user + T6 现有回显清单
+		echoKeys := []string{
+			"instructions", "max_output_tokens", "parallel_tool_calls", "reasoning",
+			"temperature", "tool_choice", "tools", "top_p", "metadata", "text",
+			"modalities", "store", "service_tier", "previous_response_id", "user",
+		}
+		for _, key := range echoKeys {
+			_, inStream := streamResp[key]
+			_, inNS := nsResp[key]
+			if inStream != inNS {
+				t.Fatalf("echo field %q presence mismatch: stream=%v non-stream=%v", key, inStream, inNS)
+			}
+			if inStream && !reflect.DeepEqual(streamResp[key], nsResp[key]) {
+				t.Fatalf("echo field %q value mismatch: stream=%#v non-stream=%#v", key, streamResp[key], nsResp[key])
+			}
+		}
+	})
+
+	t.Run("C5 failed 终态同样使用统一快照回显", func(t *testing.T) {
+		chunks := []string{
+			`data: {"created":1700000042,"id":"resp_cr5","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`,
+			`data: {"error":{"message":"boom","type":"server_error","code":"server_error"}}`,
+			`data: [DONE]`,
+		}
+		events, err := t7RunStream(reqBody, chunks, false)
+		if err != nil {
+			t.Fatalf("unexpected conversion error: %v", err)
+		}
+		failed := t7Payloads(events, "response.failed")
+		if len(failed) != 1 {
+			t.Fatalf("expected exactly one failed terminal, got %d", len(failed))
+		}
+		resp := failed[0].Get("response")
+		if resp.Get("status").String() != "failed" {
+			t.Fatalf("expected status failed, got %s", resp.Get("status").Raw)
+		}
+		if resp.Get("error.code").String() != "server_error" {
+			t.Fatalf("expected upstream error code preserved, got %s", resp.Get("error.code").Raw)
+		}
+		for _, path := range []string{"service_tier", "user", "text.format.type", "modalities.0", "instructions"} {
+			if !resp.Get(path).Exists() {
+				t.Fatalf("expected failed terminal to echo response.%s (unified snapshot)", path)
+			}
+		}
+		if got := resp.Get("created_at").Int(); got != 1700000042 {
+			t.Fatalf("expected failed terminal created_at=1700000042, got %d", got)
+		}
+		if len(t7Payloads(events, "response.completed")) != 0 {
+			t.Fatalf("expected no completed after failed terminal")
+		}
+		t7AssertNoOrphanDone(t, events)
+	})
+}
+
+// P2-1：FirstChunk 重置块必须与 TerminalEvent 对称重置 ConversionError。
+// 生产路径每请求新建 state（残留错误场景不可达），此处直接构造「state 内
+// ConversionError 已置位 + FirstChunk=true」的第二段流起点，锁定状态不变量：
+// 残留错误不得经重置块存活并强制新流 [DONE] 走 failed。
+func TestChatToResponsesFirstChunkResetClearsResidualConversionError(t *testing.T) {
+	req := []byte(`{"model":"gpt-4o"}`)
+	st := &chatToResponsesState{
+		FuncArgsBuf:   make(map[int]*strings.Builder),
+		FuncNames:     make(map[int]string),
+		FuncCallIDs:   make(map[int]string),
+		FuncItemAdded: make(map[int]bool),
+		FirstChunk:    true,
+		// 上一段流 failConversion 残留的转换错误（TerminalEvent 已由重置块语义清零）
+		ConversionError: errResponse(model.CodeInvalidStreamEvent, "data", errors.New("previous stream malformed chunk")),
+	}
+	var param any = st
+
+	// 新流首 chunk：重置块执行后不得因残留错误报错，且字段被清零
+	if _, err := ConvertOpenAIChatToResponsesWithContext(req, nil,
+		[]byte(`data: {"id":"resp_reuse1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}`),
+		&param, false); err != nil {
+		t.Fatalf("first chunk of reused stream must not inherit residual error, got %v", err)
+	}
+	if st.ConversionError != nil {
+		t.Fatalf("FirstChunk reset block must clear ConversionError (symmetric with TerminalEvent), got %v", st.ConversionError)
+	}
+
+	// [DONE]：无残留错误则正常合成 completed，禁止 failed
+	events, err := ConvertOpenAIChatToResponsesWithContext(req, nil, []byte(`data: [DONE]`), &param, false)
+	if err != nil {
+		t.Fatalf("[DONE] after reset must not be forced failed by residual error, got %v", err)
+	}
+	if n := len(t7Payloads(events, "response.failed")); n != 0 {
+		t.Fatalf("expected no failed terminal for reused clean stream, got %d", n)
+	}
+	if n := len(t7Payloads(events, "response.completed")); n != 1 {
+		t.Fatalf("expected exactly one completed terminal, got %d", n)
+	}
+}
+
+// P2-2：generateCompletedEvents 的 ConversionError 分支在终态快照构建失败
+// （genErr 非 nil，经原请求非法 JSON 触发）时，返回错误必须是合并错误：
+// 主转换错误仍可经 errors.As 提取稳定机器码，genErr 诊断信息不得丢弃。
+func TestGenerateCompletedEventsMergesConversionErrorWithGenErr(t *testing.T) {
+	st := &chatToResponsesState{
+		FuncArgsBuf:   make(map[int]*strings.Builder),
+		FuncNames:     make(map[int]string),
+		FuncCallIDs:   make(map[int]string),
+		FuncItemAdded: make(map[int]bool),
+		ResponseID:    "resp_merge1",
+		CreatedAt:     1700000000,
+	}
+	mainErr := errResponse(model.CodeInvalidStreamEvent, "data", errors.New("malformed upstream chunk"))
+	st.ConversionError = mainErr
+
+	// 原请求非法 JSON → buildTerminalResponseSnapshot 失败 → generateFailedEvents 返回 genErr
+	events, err := st.generateCompletedEvents([]byte(`{"instructions":`))
+	if err == nil {
+		t.Fatalf("expected non-nil merged error when genErr != nil")
+	}
+	if !errors.Is(err, mainErr) {
+		t.Fatalf("merged error must keep main conversion error (errors.Is), got %v", err)
+	}
+	var pce *model.ProtocolConversionError
+	if !errors.As(err, &pce) {
+		t.Fatalf("expected *model.ProtocolConversionError extractable from merged error, got %#v", err)
+	}
+	if pce.Code != model.CodeInvalidStreamEvent {
+		t.Fatalf("errors.As must extract main machine code %q, got %q", model.CodeInvalidStreamEvent, pce.Code)
+	}
+	if !strings.Contains(err.Error(), model.CodeInvalidSourceJSON) {
+		t.Fatalf("genErr diagnostics (%s) must be preserved in merged error, got %v", model.CodeInvalidSourceJSON, err)
+	}
+
+	failed := t7Payloads(events, "response.failed")
+	if len(failed) != 1 {
+		t.Fatalf("expected exactly one failed terminal, got %d", len(failed))
+	}
+	if got := failed[0].Get("response.error.code").String(); got != model.CodeInvalidStreamEvent {
+		t.Fatalf("failed terminal error.code must be main machine code, got %q", got)
+	}
+	if st.TerminalEvent != responsesTerminalFailed {
+		t.Fatalf("expected TerminalEvent=%s, got %q", responsesTerminalFailed, st.TerminalEvent)
+	}
 }
