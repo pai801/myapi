@@ -368,7 +368,7 @@ code {
 /* 大屏幕 */
 @media screen and (min-width: 1367px) {
   .ui.container {
-    width: 92% !important;
+    width: 100% !important;
     max-width: 1600px !important;
     margin-left: auto !important;
     margin-right: auto !important;

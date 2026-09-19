@@ -27,6 +27,32 @@ import { Link } from 'react-router-dom';
 import DetailDialog from './DetailDialog';
 import ActiveRequestsPanel from './ActiveRequestsPanel';
 
+// 模型名带厂商前缀时（如 deepseek-ai/xxx），表格中只展示最后一段
+const getShortModelName = (name) => {
+  if (!name) return '';
+  const index = name.lastIndexOf('/');
+  if (index === -1) return name;
+  const shortName = name.slice(index + 1);
+  return shortName || name;
+};
+
+const MODEL_NAME_MAX_LENGTH = 20;
+
+// 简化后的模型名仍过长时截断，hover 用浮层展示完整名称
+const renderModelName = (name) => {
+  const shortName = getShortModelName(name);
+  if (shortName.length <= MODEL_NAME_MAX_LENGTH) {
+    return renderColorLabel(shortName);
+  }
+  return (
+    <Popup
+      content={name}
+      trigger={renderColorLabel(`${shortName.slice(0, MODEL_NAME_MAX_LENGTH)}...`)}
+      basic
+    />
+  );
+};
+
 function renderTimestamp(timestamp, request_id) {
   return (
     <code
@@ -745,7 +771,7 @@ const LogsTable = () => {
                   )}
                   <Table.Cell>{renderType(log.type, t)}</Table.Cell>
                   <Table.Cell>
-                    {log.model_name ? renderColorLabel(log.model_name) : ''}
+                    {log.model_name ? renderModelName(log.model_name) : ''}
                   </Table.Cell>
                   <Table.Cell className='hide-on-mobile'>
                     <Label basic color={log.is_stream ? 'blue' : 'grey'} size='mini'>
