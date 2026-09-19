@@ -1,0 +1,77 @@
+# public-build.yml — 本仓门禁（PRD §12.4 ① / AC2 / AC4 / AC6）
+#
+# 目的：保证本仓始终「可构建 + 可测试」，把 §12.2 的命令固化成 CI，
+#       避免人工验证不可靠导致的回退（R14）。
+#
+# 构建/测试检查全部复用 scripts/check-public-build.sh：它内含
+#   go build ./... / go vet ./... / go test <门禁包列表>，任一步失败即 exit 1。
+# 此处**不再另写 grep**——尤其避免 BRE 的 `\|` 交替
+# （本机 toybox grep 恒不匹配，CI 的 GNU grep 又行为不同；脚本已统一用 ERE）。
+#
+# 触发：push 到 main + 面向 main 的 PR。
+# 设计取舍：不设 paths 过滤。本门禁是「总闸」，任何改动都可能影响 go build/vet/test，
+#          漏跑一次的代价高于多跑一次，故保持 always-on。
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一 ref 上只保留最新一次运行，避免重复排队浪费 runner。
+concurrency:
+  group: public-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  public-build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # 显式锁定 toolchain 版本（对齐主仓 go.mod 的 `toolchain go1.24.3`），刻意不用 go-version-file：
+          # setup-go v5 只解析 go.mod 的 `go` 行（1.23），需靠 Go 自身 GOTOOLCHAIN=auto 再补拉 1.24.3；
+          # 一旦 runner 设了 GOTOOLCHAIN=local 就无法切换而构建失败。显式指定与 GOTOOLCHAIN 解耦、最确定。
+          go-version: '1.24.3'
+          cache: true
+
+      # AC2 / AC4：build + vet + test（门禁包列表）。
+      # 直接调用脚本，保证与本地/CI 行为一致。
+      # 注：刻意不裸跑 `go test ./...`——本仓存在两个与本次改造无关的预存在失败
+      #     （common/image 外网 TLS、common/logcleanup_test 环境变量），脚本已用门禁包列表规避。
+      - name: Gate (scripts/check-public-build.sh)
+        run: bash scripts/check-public-build.sh
+
+      # AC6：go.mod / go.sum 绝不含本模块命名空间之外的 module。刻意不点名，改用两条通用判据：
+      #   1) go.mod 不得含 replace 指令（本地多模块开发会经 replace 指向外部 module）；
+      #   2) go.mod 不得 require 本项目 VCS 命名空间（module 路径的父级）下的其它 module。
+      # 防「误跑 go mod tidy 把命名空间之外的 require 留在本仓」这类回归。用 grep -E（ERE，GNU/toybox 行为一致）。
+      - name: AC6 - go.mod/go.sum must not reference out-of-namespace modules
+        run: |
+          set -euo pipefail
+          if grep -nE '^[[:space:]]*replace([[:space:]]|\()' go.mod; then
+            echo "::error::go.mod 含 replace 指令（AC6 违规）" >&2
+            exit 1
+          fi
+          mod="$(sed -nE 's/^module[[:space:]]+([^[:space:]]+).*/\1/p' go.mod | head -n1)"
+          owner="${mod%/*}"
+          if grep -nE "^[[:space:]]*${owner}/" go.mod; then
+            echo "::error::go.mod require 了 ${owner} 命名空间下的其它 module（AC6 违规）" >&2
+            exit 1
+          fi
+          echo "AC6 通过：go.mod 无 replace、无命名空间外 module"
+
+      # 前端构建 job 刻意不纳入：不在任何 AC 内（AC1–AC10 均为 Go 维度），
+      # 且 T6/T7 已把前端改为 descriptor 驱动、同一份 bundle，本仓 bundle
+      # 的 tree-shake 已在 T6/T7 独立审查中验证。`npm run build` 会显著拉长每次 PR 的 CI，
+      # 收益不足。若未来需要，可另开独立 job（不与本 job 串行，避免阻塞 Go 门禁）。

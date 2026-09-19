@@ -200,7 +200,7 @@ ChatGPT サブスクリプションアカウントをチャネルとしてゲー
 
 ## サポートされるモデルチャネル
 
-**56 種のチャネルタイプ**、**21 の API アダプター**をサポートし、国内外の主要 LLM ベンダーをカバーしています:
+**53 種のチャネルタイプ**、**21 の API アダプター**をサポートし、国内外の主要 LLM ベンダーをカバーしています:
 
 **海外ベンダー**: OpenAI ChatGPT シリーズ（Azure OpenAI 含む）、Anthropic Claude シリーズ（AWS Claude 含む）、Google PaLM2/Gemini/Vertex AI、Mistral、Cohere、xAI、Groq、together.ai、Cloudflare Workers AI、DeepL、Ollama、Replicate、OpenRouter
 

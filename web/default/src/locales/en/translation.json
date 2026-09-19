@@ -107,6 +107,7 @@
       "status_disabled_tip": "This channel is manually disabled",
       "status_auto_disabled_tip": "This channel is automatically disabled",
       "status_unknown": "Unknown Status",
+      "unknown_channel": "Unknown channel (type {{type}})",
       "not_tested": "Not Tested",
       "priority_tip": "Channel selection priority, higher is preferred",
       "select_test_model": "Please select test model",
@@ -142,6 +143,7 @@
       "title_edit": "Update Channel Information",
       "title_create": "Create New Channel",
       "type": "Type",
+      "unknown_type": "Unknown channel (type {{type}})",
       "name": "Name",
       "name_placeholder": "Please enter name",
       "group": "Group",
@@ -207,6 +209,44 @@
         "fastgpt": "Enter in format: APIKey-AppId, e.g.: fastgpt-0sp2gtvfdgyi4k30jwlgwf1i-64f335d84283f05518e9e041",
         "tencent": "Enter in format: AppId|SecretId|SecretKey",
         "chatgpt_sub": "ChatGPT subscription session token (__Secure-next-auth.session-token) or Bearer token"
+      },
+      "descriptor": {
+        "default_base_url": "Default Base URL"
+      },
+      "oauth": {
+        "description": "Click the button below to authorize in a new window; the credential will be filled into the key field below. The gateway proxies the whole flow, so your browser never talks to the upstream directly.",
+        "button_start": "Start login",
+        "button_cancel": "Cancel login",
+        "button_retry": "Retry login",
+        "manual_hint": "You can also paste a credential manually: paste the authorization credential JSON into the key field.",
+        "elapsed": "Waited",
+        "open_manually": "If the authorization page did not open, visit it manually:",
+        "status_requesting": "Fetching the authorization URL…",
+        "status_waiting": "Please finish the login in the popup window",
+        "status_retrying": "Network or upstream is temporarily unavailable — retrying (attempt {{count}}/{{max}})…",
+        "status_done": "Login succeeded. The credential has been filled into the key field — click Save.",
+        "status_timeout": "Login timed out or was abandoned. Please start over.",
+        "status_error": "Login failed. Please retry or paste a credential manually.",
+        "messages": {
+          "popup_blocked": "The popup was blocked by the browser. Allow popups for this site and retry, or open the authorization URL manually.",
+          "popup_closed": "The authorization window was closed. Please start the login again.",
+          "expired": "The login session has expired (or was already used). Please start over.",
+          "timeout": "No authorization within 5 minutes — gave up. Please start over.",
+          "success": "Login succeeded",
+          "start_failed": "Failed to fetch the authorization URL",
+          "poll_failed": "Failed to query the login status",
+          "poll_unstable": "Could not reach the upstream login service after several attempts. Please check your network and retry."
+        }
+      },
+      "custom_headers": {
+        "title": "Custom Request Headers",
+        "description": "These headers are appended to requests sent upstream and can be used to fill in fingerprint headers (e.g. X-Api-Key, X-Agent-Purpose). Authentication-related headers (such as Authorization) are managed by the system and cannot be overridden. Leaving the value empty means the header is not sent (for built-in headers this deletes it).",
+        "name_placeholder": "Header name, e.g. X-Api-Key",
+        "value_placeholder": "Header value",
+        "add": "Add header",
+        "delete": "Delete this header",
+        "invalid_name": "Invalid header name \"{{name}}\": only letters, digits and these symbols are allowed: !#$%&'*+-.^_`|~",
+        "duplicate_name": "Duplicate header name \"{{name}}\" (case-insensitive)"
       }
     }
   },

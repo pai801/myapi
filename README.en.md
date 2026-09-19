@@ -200,7 +200,7 @@ Configure model name rewriting rules (in JSON format) at the token level, transp
 
 ## Supported Model Channels
 
-Supports **56 channel types** and **21 API adapters**, covering major domestic and international LLM providers:
+Supports **53 channel types** and **21 API adapters**, covering major domestic and international LLM providers:
 
 **International Providers**: OpenAI ChatGPT series (including Azure OpenAI), Anthropic Claude series (including AWS Claude), Google PaLM2/Gemini/Vertex AI, Mistral, Cohere, xAI, Groq, together.ai, Cloudflare Workers AI, DeepL, Ollama, Replicate, OpenRouter
 

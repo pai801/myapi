@@ -3,14 +3,28 @@ import {useTranslation} from 'react-i18next';
 import {Button, Card, Form, Input, Message} from 'semantic-ui-react';
 import {useNavigate, useParams} from 'react-router-dom';
 import {API, copy, getChannelModels, showError, showInfo, showSuccess, showWarning, verifyJSON,} from '../../helpers';
-import {CHANNEL_OPTIONS} from '../../constants';
 import {renderChannelTip} from '../../helpers/render';
+import {
+  buildChannelOptions,
+  descriptorKeyPrompt,
+  findDescriptor,
+  getChannelDescriptor,
+  loadChannelDescriptors,
+} from '../../helpers/channelDescriptor';
+import ChannelPanelRenderer from '../../components/ChannelPanelRenderer';
+
+// 渠道类型与元数据全部由后端下发的 ChannelDescriptor 清单驱动（PRD §5.12 / 决策 D7）：
+// 前端不再硬编码 54/55/56，也不写渠道专属分支。渠道专属能力（如自定义请求头）
+// 由清单的能力位（capabilities.supports_custom_headers）声明，前端据此渲染通用编辑器。
 
 const MODEL_MAPPING_EXAMPLE = {
   'gpt-3.5-turbo-0301': 'gpt-3.5-turbo',
   'gpt-4-0314': 'gpt-4',
   'gpt-4-32k-0314': 'gpt-4-32k',
 };
+
+// RFC 7230 tchar 子集：请求头名称允许字母、数字及 !#$%&'*+-.^_`|~（与后端 isValidHeaderName 对齐）。
+const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
 
 function type2secretPrompt(type, t) {
   switch (type) {
@@ -25,12 +39,13 @@ function type2secretPrompt(type, t) {
     case 53:
       return t('channel.edit.key_prompts.chatgpt_sub');
     default:
+      // 扩展渠道等由 ChannelDescriptor 携带 key_prompt，见调用处。
       return t('channel.edit.key_prompts.default');
   }
 }
 
 const EditChannel = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const params = useParams();
   const navigate = useNavigate();
   const channelId = params.id;
@@ -70,13 +85,33 @@ const EditChannel = () => {
     vertex_ai_project_id: '',
     vertex_ai_adc: '',
   });
+  // 自定义请求头的行式编辑态：对象无法承载「多个空名行 / 重名行并存」，
+  // 故 UI 用有序数组维护，加载时从 config 读取、提交时再折叠回对象写入 config。
+  const [customHeaders, setCustomHeaders] = useState([{ name: '', value: '' }]);
   // config 解析失败标记：为 true 时禁止提交，防止用默认 config 静默覆盖库中原始值
   const [configLoadFailed, setConfigLoadFailed] = useState(false);
+  // 后端下发的渠道能力清单（PRD §5.12 层1）：驱动渠道类型下拉与通用面板。
+  const [descriptors, setDescriptors] = useState([]);
+  // 当前所选渠道类型对应的清单（未加载 / 无对应清单时为 undefined）。
+  const currentDescriptor = findDescriptor(descriptors, inputs.type);
+  // 自定义出站请求头的 config 键名由清单下发（扩展方自选键名），前端不硬编码。
+  const customHeadersKey =
+    (currentDescriptor &&
+      currentDescriptor.capabilities &&
+      currentDescriptor.capabilities.custom_headers_key) ||
+    '';
+  // 渠道专属能力（如自定义出站请求头）由清单能力位声明 + 键名下发，前端据此渲染通用编辑器。
+  const supportsCustomHeaders =
+    !!(currentDescriptor &&
+      currentDescriptor.capabilities &&
+      currentDescriptor.capabilities.supports_custom_headers) &&
+    customHeadersKey !== '';
   const handleInputChange = (e, { name, value }) => {
     setInputs((inputs) => ({ ...inputs, [name]: value }));
     if (name === 'type') {
       let localModels = getChannelModels(value);
-      if (inputs.models.length === 0) {
+      // inputs.models 可能为 null（旧缓存/后端历史 payload），非数组一律按空处理
+      if (!Array.isArray(inputs.models) || inputs.models.length === 0) {
         setInputs((inputs) => ({ ...inputs, models: localModels }));
       }
       setBasicModels(localModels);
@@ -87,12 +122,52 @@ const EditChannel = () => {
     setConfig((inputs) => ({ ...inputs, [name]: value }));
   };
 
+  // 修改某一行请求头的名称或取值。
+  const updateCustomHeader = (index, field, value) => {
+    setCustomHeaders((rows) =>
+      rows.map((row, i) => (i === index ? { ...row, [field]: value } : row))
+    );
+  };
+
+  const addCustomHeader = () => {
+    setCustomHeaders((rows) => [...rows, { name: '', value: '' }]);
+  };
+
+  const removeCustomHeader = (index) => {
+    setCustomHeaders((rows) => {
+      const next = rows.filter((_, i) => i !== index);
+      // 至少保留一行空行，方便直接输入
+      return next.length > 0 ? next : [{ name: '', value: '' }];
+    });
+  };
+
+  // 校验自定义请求头：名称合法且不重复（大小写不敏感）。返回 false 表示已提示并应阻止提交。
+  const validateCustomHeaders = () => {
+    const seen = new Set();
+    for (const row of customHeaders) {
+      const name = row.name.trim();
+      if (name === '') continue;
+      if (!HEADER_NAME_RE.test(name)) {
+        showError(t('channel.edit.custom_headers.invalid_name', { name }));
+        return false;
+      }
+      const lower = name.toLowerCase();
+      if (seen.has(lower)) {
+        showWarning(t('channel.edit.custom_headers.duplicate_name', { name }));
+        return false;
+      }
+      seen.add(lower);
+    }
+    return true;
+  };
+
   const loadChannel = async () => {
     try {
       let res = await API.get(`/api/channel/${channelId}`);
       const { success, message, data } = res.data;
       if (success) {
-        if (data.models === '') {
+        // models 为空串或 null/undefined 都归为 []，否则 null.split(',') 会直接崩溃
+        if (data.models === '' || data.models === null || data.models === undefined) {
           data.models = [];
         } else {
           data.models = data.models.split(',');
@@ -117,7 +192,38 @@ const EditChannel = () => {
         setInputs(data);
         if (data.config !== '') {
           try {
-            setConfig(JSON.parse(data.config));
+            const parsedConfig = JSON.parse(data.config);
+            // 恢复整体替换：仅对「清单声明支持自定义请求头」的渠道补齐其键（清单下发的
+            // custom_headers_key）的默认值，其它默认值一律不补，确保不支持该能力的渠道落库形态与改动前逐字节一致。
+            const desc = getChannelDescriptor(data.type);
+            // 回填键名同样由清单下发，不回退任何硬编码字符串。
+            const descHeadersKey =
+              (desc &&
+                desc.capabilities &&
+                desc.capabilities.custom_headers_key) ||
+              '';
+            if (
+              desc &&
+              desc.capabilities &&
+              desc.capabilities.supports_custom_headers &&
+              descHeadersKey !== '' &&
+              !parsedConfig[descHeadersKey]
+            ) {
+              parsedConfig[descHeadersKey] = {};
+            }
+            setConfig(parsedConfig);
+            const headers = descHeadersKey
+              ? parsedConfig[descHeadersKey]
+              : undefined;
+            if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+              const rows = Object.entries(headers).map(([name, value]) => ({
+                name,
+                value: value === null || value === undefined ? '' : String(value),
+              }));
+              if (rows.length > 0) {
+                setCustomHeaders(rows);
+              }
+            }
           } catch (e) {
             // 解析失败时保留默认 config 避免页面崩溃，但必须标记失败态，
             // 否则提交时会用默认值静默覆盖库中原始 config
@@ -187,21 +293,36 @@ const EditChannel = () => {
   }, [originModelOptions, inputs.models]);
 
   useEffect(() => {
-    if (isEdit) {
-      // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
-      loadChannel().then().catch(() => {});
-    } else {
-      let localModels = getChannelModels(inputs.type);
-      setBasicModels(localModels);
-    }
+    let cancelled = false;
+    (async () => {
+      // 先加载渠道清单：loadChannel 与面板渲染都依赖它。
+      // 提交 / 加载渠道走模块缓存 getChannelDescriptor，避免 state 更新的时序问题。
+      const list = await loadChannelDescriptors();
+      if (cancelled) return;
+      setDescriptors(list);
+      if (isEdit) {
+        // 错误提示已由 api 拦截器统一弹出，此处仅需阻断 unhandled rejection
+        await loadChannel();
+      } else {
+        let localModels = getChannelModels(inputs.type);
+        setBasicModels(localModels);
+      }
+    })().catch(() => {});
     fetchModels().then();
     fetchGroups().then();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const submit = async () => {
     // config 未能成功解析时禁止提交，防止用默认值覆盖库中原始配置
     if (configLoadFailed) {
       showError('渠道 config 解析失败，已阻止保存以避免覆盖原始配置，请刷新页面后重试');
+      return;
+    }
+    if (supportsCustomHeaders && !validateCustomHeaders()) {
       return;
     }
     if (inputs.key === '') {
@@ -219,7 +340,7 @@ const EditChannel = () => {
       showInfo(t('channel.edit.messages.name_required'));
       return;
     }
-    if (inputs.type !== 43 && inputs.models.length === 0) {
+    if (inputs.type !== 43 && (!Array.isArray(inputs.models) || inputs.models.length === 0)) {
       showInfo(t('channel.edit.messages.models_required'));
       return;
     }
@@ -243,7 +364,27 @@ const EditChannel = () => {
     let res;
     localInputs.models = localInputs.models.join(',');
     localInputs.group = localInputs.groups.join(',');
-    localInputs.config = JSON.stringify(config);
+    // 提交前清洗自定义请求头：剔除空名条目，空对象则删除该字段，避免写入无意义配置。
+    const localConfig = { ...config };
+    if (supportsCustomHeaders) {
+      const headers = {};
+      customHeaders.forEach((row) => {
+        const name = row.name.trim();
+        if (name === '') return;
+        // 名称非空即写入；取值为空串也照常写入（headers[name] = ''），
+        // 后端据此走 value == "" 分支执行 Header.Del，真实删除该内置头（「留空=不发送」）。
+        headers[name] = row.value;
+      });
+      localConfig[customHeadersKey] = headers;
+    }
+    if (
+      localConfig[customHeadersKey] &&
+      typeof localConfig[customHeadersKey] === 'object' &&
+      Object.keys(localConfig[customHeadersKey]).length === 0
+    ) {
+      delete localConfig[customHeadersKey];
+    }
+    localInputs.config = JSON.stringify(localConfig);
     if (isEdit) {
       res = await API.put(`/api/channel/`, {
         ...localInputs,
@@ -267,8 +408,10 @@ const EditChannel = () => {
 
   const addCustomModel = () => {
     if (customModel.trim() === '') return;
-    if (inputs.models.includes(customModel)) return;
-    let localModels = [...inputs.models];
+    // inputs.models 可能为 null，先归一为数组再使用，避免 .includes / 展开崩溃
+    const currentModels = Array.isArray(inputs.models) ? inputs.models : [];
+    if (currentModels.includes(customModel)) return;
+    let localModels = [...currentModels];
     localModels.push(customModel);
     let localModelOptions = [];
     localModelOptions.push({
@@ -327,6 +470,25 @@ const EditChannel = () => {
     setFetchingModels(false);
   };
 
+  // 渠道类型下拉 = 内置常量 + 后端下发的清单（本仓默认构建不含扩展渠道）。
+  const channelOptions = buildChannelOptions(descriptors, i18n.language);
+  // 未知 type 兜底（渠道插件化 AC7）：编辑的渠道若为当前构建不认识的类型
+  // （已摘除的扩展渠道 / 历史遗留号段），下拉里补一个「未知渠道」项，避免类型选择器
+  // 因 value 不在 options 中而渲染成空白 / undefined；管理员仍可改选到其它类型。
+  const channelTypeOptions = channelOptions.some(
+    (option) => option.value === inputs.type
+  )
+    ? channelOptions
+    : [
+        ...channelOptions,
+        {
+          key: `unknown-type-${inputs.type}`,
+          text: t('channel.edit.unknown_type', { type: inputs.type }),
+          value: inputs.type,
+          color: 'grey',
+        },
+      ];
+
   return (
     <div className='dashboard-container'>
       <Card fluid className='chart-card'>
@@ -343,7 +505,7 @@ const EditChannel = () => {
                 name='type'
                 required
                 search
-                options={CHANNEL_OPTIONS}
+                options={channelTypeOptions}
                 value={inputs.type}
                 onChange={handleInputChange}
               />
@@ -375,6 +537,79 @@ const EditChannel = () => {
               />
             </Form.Field>
             {renderChannelTip(inputs.type)}
+
+            {/* 渠道专属面板（PRD §5.12 层2 / 决策 D7）：按 ChannelDescriptor 的 panel_type
+                渲染通用组件，不写渠道专属分支。oauth-* 面板成功后把凭证回填密钥框
+                （onCredential），密钥框始终可手写（降级路径）。 */}
+            <ChannelPanelRenderer
+              descriptor={currentDescriptor}
+              onCredential={(credential) =>
+                setInputs((prev) => ({ ...prev, key: credential }))
+              }
+              disabled={loading}
+            />
+
+            {/* 自定义出站请求头：由清单能力位 supports_custom_headers 声明，通用编辑器。 */}
+            {supportsCustomHeaders && (
+              <Form.Field>
+                <label>{t('channel.edit.custom_headers.title')}</label>
+                <div
+                  style={{
+                    color: '#666',
+                    fontWeight: 'normal',
+                    marginBottom: '0.6em',
+                  }}
+                >
+                  {t('channel.edit.custom_headers.description')}
+                </div>
+                {customHeaders.map((row, index) => (
+                  <div
+                    key={index}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.5em',
+                      marginBottom: '0.5em',
+                    }}
+                  >
+                    <Input
+                      style={{ flex: 1 }}
+                      placeholder={t(
+                        'channel.edit.custom_headers.name_placeholder'
+                      )}
+                      value={row.name}
+                      onChange={(e, { value }) =>
+                        updateCustomHeader(index, 'name', value)
+                      }
+                      autoComplete='new-password'
+                    />
+                    <Input
+                      style={{ flex: 1 }}
+                      placeholder={t(
+                        'channel.edit.custom_headers.value_placeholder'
+                      )}
+                      value={row.value}
+                      onChange={(e, { value }) =>
+                        updateCustomHeader(index, 'value', value)
+                      }
+                      autoComplete='new-password'
+                    />
+                    <Button
+                      type='button'
+                      icon='trash'
+                      aria-label={t('channel.edit.custom_headers.delete')}
+                      onClick={() => removeCustomHeader(index)}
+                    />
+                  </div>
+                ))}
+                <Button
+                  type='button'
+                  icon='plus'
+                  content={t('channel.edit.custom_headers.add')}
+                  onClick={addCustomHeader}
+                />
+              </Form.Field>
+            )}
 
             {/* Azure OpenAI specific fields */}
             {inputs.type === 3 && (
@@ -718,7 +953,10 @@ const EditChannel = () => {
                     label={t('channel.edit.key')}
                     name='key'
                     required
-                    placeholder={type2secretPrompt(inputs.type, t)}
+                    placeholder={
+                      descriptorKeyPrompt(currentDescriptor, i18n.language) ||
+                      type2secretPrompt(inputs.type, t)
+                    }
                     onChange={handleInputChange}
                     value={inputs.key}
                     autoComplete='new-password'

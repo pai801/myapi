@@ -1,17 +1,31 @@
 #!/bin/bash
 # 一键部署：构建前端(default) -> 编译后端 -> 停旧服务 -> 启动
-# 用法：bash deploy.sh；前置依赖 go/node/npm，.env 需就位
+# 用法：bash deploy.sh          全量部署
+#       bash deploy.sh restart  仅重启（跳过构建，复用现有 myapi 二进制）
+# 前置依赖 go/node/npm，.env 需就位
 # 业务日志在 logs/；nohup.out 收集 nohup 的 stdout/stderr
 set -e
 cd "$(dirname "$0")"
 
-# 前端：THEMES 中 berry/air 无源码，仅构建实际存在的 default；产物经 //go:embed 嵌入二进制
-(cd web/default && npm install && REACT_APP_VERSION="$(cat ../../VERSION)" npm run build)
-# npm 构建失败时可能残留旧产物，必须校验，防止旧前端被静默 embed
-[ -f web/build/default/index.html ] || { echo "前端产物 web/build/default/index.html 缺失，部署中止" >&2; exit 1; }
+case "${1:-}" in
+"")
+  # 前端：THEMES 中 berry/air 无源码，仅构建实际存在的 default；产物经 //go:embed 嵌入二进制
+  (cd web/default && npm install && REACT_APP_VERSION="$(cat ../../VERSION)" npm run build)
+  # npm 构建失败时可能残留旧产物，必须校验，防止旧前端被静默 embed
+  [ -f web/build/default/index.html ] || { echo "前端产物 web/build/default/index.html 缺失，部署中止" >&2; exit 1; }
 
-# 后端：与 Dockerfile 同款版本注入；CGO 保持开启（sqlite 依赖 cgo）
-go build -trimpath -ldflags "-s -w -X 'github.com/pai801/myapi/common.Version=$(cat VERSION)'" -o myapi
+  # 后端：与 Dockerfile 同款版本注入；CGO 保持开启（sqlite 依赖 cgo）
+  go build -trimpath -ldflags "-s -w -X 'github.com/pai801/myapi/common.Version=$(cat VERSION)'" -o myapi
+  ;;
+restart)
+  # 不构建，直接复用已编译的二进制；缺失时提示先全量部署
+  [ -x myapi ] || { echo "未找到可执行文件 ./myapi，请先执行 bash deploy.sh 完成全量部署" >&2; exit 1; }
+  ;;
+*)
+  echo "用法：bash deploy.sh [restart]" >&2
+  exit 1
+  ;;
+esac
 
 # 停旧服务：仅凭 myapi.pid 定位；文件缺失或进程已死则跳过
 if [ -f myapi.pid ]; then

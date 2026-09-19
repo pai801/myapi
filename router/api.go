@@ -3,6 +3,7 @@ package router
 import (
 	"github.com/pai801/myapi/controller"
 	"github.com/pai801/myapi/middleware"
+	"github.com/pai801/myapi/relay/routeregistry"
 
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
@@ -55,6 +56,9 @@ func SetApiRouter(router *gin.Engine) {
 			channelRoute.GET("/", controller.GetAllChannels)
 			channelRoute.GET("/search", controller.SearchChannels)
 			channelRoute.GET("/models", controller.ListAllModels)
+			// 渠道能力清单（PRD §5.12 层1 / D7）：前端据此渲染渠道类型与通用面板，
+			// 本仓不注册任何渠道，故返回空列表；扩展方注册的渠道由其在 init() 期注入。
+			channelRoute.GET("/descriptors", controller.GetChannelDescriptors)
 			channelRoute.GET("/:id", controller.GetChannel)
 			channelRoute.GET("/reset/:id", controller.ResetChannel)
 			channelRoute.GET("/test", controller.TestChannels)
@@ -109,5 +113,17 @@ func SetApiRouter(router *gin.Engine) {
 			modelMetadataRoute.PUT("/", controller.UpdateMetadata)
 			modelMetadataRoute.DELETE("/:name", controller.DeleteMetadata)
 		}
+		// 渠道插件化（PRD §5.11）：渠道专属的登录与回调路由改由路由注册表在启动期装配。
+		// 注册方在 init() 期只登记自己（见 router/channel_routes.go）；此处才真正挂到公开组
+		// （apiRouter，仅 gzip + 全局限流）与鉴权组（channelRoute，含 AdminAuth）。
+		// 中间件由分组决定，注册方碰不到；本仓不注册任何渠道 → 注册表为空 → 这些路由不存在 → 404。
+		//
+		// 刻意放在全部内置路由注册完之后：mountChannelRoutesWithEngine 用 engine.Routes()
+		// 取「内置基线」做冲突检测，基线必须含**全部**内置路由，否则注册方若撞上此处之后才
+		// 注册的内置路由将检测不到，panic 会落在 safeMountRegistrar 的 recover 覆盖之外，
+		// 带崩整个 SetApiRouter。放到末尾后，冲突 panic 也发生在 safeMountRegistrar 内部。
+		// 移动不改变匹配结果：注册方声明的路由只与 /api/channel/* 内置路由同子树，
+		// 而这些内置路由本就注册在挂载点之前，相对顺序不变。
+		mountChannelRoutesWithEngine(router, apiRouter, channelRoute, routeregistry.Registered())
 	}
 }

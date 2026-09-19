@@ -107,6 +107,7 @@
       "status_disabled_tip": "本渠道被手动禁用",
       "status_auto_disabled_tip": "本渠道被程序自动禁用",
       "status_unknown": "未知状态",
+      "unknown_channel": "未知渠道（类型 {{type}}）",
       "not_tested": "未测试",
       "priority_tip": "渠道选择优先级，越高越优先",
       "select_test_model": "请选择测试模型",
@@ -142,6 +143,7 @@
       "title_edit": "更新渠道信息",
       "title_create": "创建新的渠道",
       "type": "类型",
+      "unknown_type": "未知渠道（类型 {{type}}）",
       "name": "名称",
       "name_placeholder": "请输入名称",
       "group": "分组",
@@ -207,6 +209,44 @@
         "fastgpt": "按照如下格式输入：APIKey-AppId，例如：fastgpt-0sp2gtvfdgyi4k30jwlgwf1i-64f335d84283f05518e9e041",
         "tencent": "按照如下格式输入：AppId|SecretId|SecretKey",
         "chatgpt_sub": "ChatGPT 订阅会话令牌（__Secure-next-auth.session-token）或 Bearer token"
+      },
+      "descriptor": {
+        "default_base_url": "默认 Base URL"
+      },
+      "oauth": {
+        "description": "点击下方按钮在新窗口完成授权，凭证会自动填入下方密钥框。登录过程由本网关代理，浏览器不会直接访问上游。",
+        "button_start": "开始登录",
+        "button_cancel": "取消登录",
+        "button_retry": "重新登录",
+        "manual_hint": "也可以手动粘贴凭证：将授权凭证 JSON 直接粘到密钥框。",
+        "elapsed": "已等待",
+        "open_manually": "授权页未能自动打开时，请手动访问：",
+        "status_requesting": "正在获取授权链接…",
+        "status_waiting": "请在弹出的窗口中完成登录授权",
+        "status_retrying": "网络或上游暂时不可用，正在重试（第 {{count}}/{{max}} 次）…",
+        "status_done": "登录成功，凭证已填入密钥框，请点击保存。",
+        "status_timeout": "登录已超时或被放弃，请重新发起。",
+        "status_error": "登录失败，请重试或改用手动粘贴。",
+        "messages": {
+          "popup_blocked": "浏览器拦截了弹出窗口，请允许本站弹出窗口后重试，或手动打开下方授权链接。",
+          "popup_closed": "授权窗口已被关闭，请重新发起登录。",
+          "expired": "登录会话已过期（或已被使用过），请重新发起登录。",
+          "timeout": "等待授权超过 5 分钟，已自动放弃，请重新发起登录。",
+          "success": "登录成功",
+          "start_failed": "获取授权链接失败",
+          "poll_failed": "查询登录状态失败",
+          "poll_unstable": "连续多次无法连接上游登录服务，请检查网络后重试。"
+        }
+      },
+      "custom_headers": {
+        "title": "自定义请求头",
+        "description": "这些请求头会追加到发往上游的请求上，可用于补齐指纹头（如 X-Api-Key、X-Agent-Purpose）。鉴权相关的头（Authorization 等）由系统管理，无法覆盖。取值留空表示不发送该头（对内置头即删除）。",
+        "name_placeholder": "请求头名称，例如：X-Api-Key",
+        "value_placeholder": "请求头取值",
+        "add": "添加请求头",
+        "delete": "删除该请求头",
+        "invalid_name": "请求头名称 “{{name}}” 非法：仅允许字母、数字及这些符号 !#$%&'*+-.^_`|~",
+        "duplicate_name": "请求头名称 “{{name}}” 重复（不区分大小写）"
       }
     }
   },

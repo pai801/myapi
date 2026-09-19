@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/model"
 	relay "github.com/pai801/myapi/relay"
+	"github.com/pai801/myapi/relay/adaptor"
 	"github.com/pai801/myapi/relay/adaptor/openai"
 	"github.com/pai801/myapi/relay/apitype"
 	"github.com/pai801/myapi/relay/channeltype"
@@ -61,10 +63,18 @@ type OpenAIModels struct {
 	WebSearchToolType        string                  `json:"web_search_tool_type,omitempty"`
 }
 
-var models []OpenAIModels
-var modelsMap map[string]OpenAIModels
-var channelId2Models map[int][]string
-var defaultPermission []OpenAIModelPermission
+var (
+	models            []OpenAIModels
+	modelsMap         map[string]OpenAIModels
+	channelId2Models  map[int][]string
+	defaultPermission []OpenAIModelPermission
+
+	// catalogMu / catalogBuilt 守卫模型目录的惰性构建（见 ensureModelCatalog）。
+	// 用可重置的布尔标记而非 sync.Once：同包测试需要在临时登记/注销扩展渠道后重建目录，
+	// sync.Once 无法重置，会让测试无法复原全局状态。
+	catalogMu    sync.Mutex
+	catalogBuilt bool
+)
 
 func init() {
 	defaultPermission = append(defaultPermission, OpenAIModelPermission{
@@ -81,18 +91,42 @@ func init() {
 		Group:              nil,
 		IsBlocking:         false,
 	})
+}
+
+// ensureModelCatalog 惰性构建模型目录（models / modelsMap / channelId2Models），只构建一次。
+//
+// 动机：目录构建要读取 adaptor 注册表，而扩展渠道的 adaptor 与其 apiType 映射由扩展方在
+// **各自的 init()** 里经 relay.Register / channeltype.RegisterAPIType 完成。若在 init() 期
+// 构建，构建时点相对扩展包 init() 的先后由**包初始化顺序**决定：一旦本包的 init() 先跑，
+// 扩展渠道就会在此刻取不到 adaptor（ToAPIType 走不到注册表、GetAdaptor 返回 nil）而被**静默**
+// 漏掉——不报错、只是清单为空。改为首次访问时构建后，所有包的 init() 都已完成、注册表处于
+// 最终状态，扩展渠道不会再被漏掉。
+func ensureModelCatalog() {
+	catalogMu.Lock()
+	defer catalogMu.Unlock()
+	if catalogBuilt {
+		return
+	}
+	buildModelCatalog()
+	catalogBuilt = true
+}
+
+// buildModelCatalog 构建模型目录的全部产物。
+//
+// 覆盖范围 = 内置枚举 + 注册表登记项：前者保证内置行为逐字不变，后者取自注册表，
+// 使扩展方新增的渠道无需本仓改动即被纳入。
+func buildModelCatalog() {
+	models = nil
 	// https://platform.openai.com/docs/models/model-endpoint-compatibility
-	for i := 0; i < apitype.Dummy; i++ {
-		if i == apitype.AIProxyLibrary {
+	for i := 0; i < apitype.Dummy; i++ { // 内置范围
+		appendModelsForAPIType(i)
+	}
+	// 注册表登记项：含内置与扩展，按 apitype.Dummy 过滤后只追加扩展部分，避免与内置重复。
+	for _, apiType := range adaptor.RegisteredAPITypes() {
+		if apiType < apitype.Dummy {
 			continue
 		}
-		adaptor := relay.GetAdaptor(i)
-		channelName := adaptor.GetChannelName()
-		modelNames := adaptor.GetModelList()
-		for _, modelName := range modelNames {
-			modelObj := createModelObject(modelName, channelName)
-			models = append(models, modelObj)
-		}
+		appendModelsForAPIType(apiType)
 	}
 	for _, channelType := range openai.CompatibleChannels {
 		if channelType == channeltype.Azure {
@@ -105,18 +139,65 @@ func init() {
 		}
 	}
 	modelsMap = make(map[string]OpenAIModels)
-	for _, model := range models {
-		modelsMap[model.Id] = model
+	for _, m := range models {
+		modelsMap[m.Id] = m
 	}
+	buildChannelId2Models()
+}
+
+// appendModelsForAPIType 把 apiType 对应 adaptor 的模型清单追加进 models。
+// 跳过 AIProxyLibrary（保持既有枚举语义）与未注册 adaptor（nil 安全跳过）。
+func appendModelsForAPIType(apiType int) {
+	if apiType == apitype.AIProxyLibrary {
+		return
+	}
+	adp := relay.GetAdaptor(apiType)
+	if adp == nil { // 未注册的 apiType（扩展渠道未注册）安全跳过
+		return
+	}
+	channelName := adp.GetChannelName()
+	modelNames := adp.GetModelList()
+	for _, modelName := range modelNames {
+		models = append(models, createModelObject(modelName, channelName))
+	}
+}
+
+// buildChannelId2Models 构建 channelType -> 模型清单映射。
+// 覆盖内置渠道（1 .. Dummy-1）与注册表登记的扩展渠道（内置范围之外），
+// 使扩展渠道在渠道编辑的默认模型下拉中可见，而无需本仓登记任何具体扩展渠道。
+func buildChannelId2Models() {
 	channelId2Models = make(map[int][]string)
-	for i := 1; i < channeltype.Dummy; i++ {
-		adaptor := relay.GetAdaptor(channeltype.ToAPIType(i))
-		meta := &meta.Meta{
-			ChannelType: i,
-		}
-		adaptor.Init(meta)
-		channelId2Models[i] = adaptor.GetModelList()
+	for i := 1; i < channeltype.Dummy; i++ { // 内置范围（行为逐字不变）
+		fillChannelModels(i)
 	}
+	for _, ct := range channeltype.RegisteredChannelTypes() { // 内置范围之外的扩展渠道
+		// 防御：注册表优先语义下内置类型也可能被登记，避免与上面的内置循环重复填充。
+		if ct >= 1 && ct < channeltype.Dummy {
+			continue
+		}
+		fillChannelModels(ct)
+	}
+}
+
+// fillChannelModels 记录 channelType 对应 adaptor 的模型清单。
+// 未注册的 apiType（扩展渠道未注册）其 adaptor 为 nil，直接跳过，
+// 避免在 nil 上调用 Init / GetModelList 而 panic（PRD §7.2 决策 D5）。
+func fillChannelModels(channelType int) {
+	adp := relay.GetAdaptor(channeltype.ToAPIType(channelType))
+	if adp == nil { // 未注册的 apiType 安全跳过
+		return
+	}
+	meta := &meta.Meta{
+		ChannelType: channelType,
+	}
+	adp.Init(meta)
+	// nil 切片经 encoding/json 序列化为 JSON null（而非 []），而前端把每个渠道的模型
+	// 清单当数组用，取到 null 会直接崩溃；故此处统一归为零值空切片。
+	list := adp.GetModelList()
+	if list == nil {
+		list = []string{}
+	}
+	channelId2Models[channelType] = list
 }
 
 func createModelObject(modelName, channelName string) OpenAIModels {
@@ -150,6 +231,7 @@ func applyMetadataToModel(modelObj *OpenAIModels) {
 }
 
 func DashboardListModels(c *gin.Context) {
+	ensureModelCatalog()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -158,6 +240,7 @@ func DashboardListModels(c *gin.Context) {
 }
 
 func ListAllModels(c *gin.Context) {
+	ensureModelCatalog()
 	data := make([]OpenAIModels, 0, len(models))
 	for _, m := range models {
 		m.SupportedEndpointTypes = model.GetModelEndpointTypes(m.Id)
@@ -171,6 +254,7 @@ func ListAllModels(c *gin.Context) {
 }
 
 func ListModels(c *gin.Context) {
+	ensureModelCatalog()
 	ctx := c.Request.Context()
 	var availableModels []string
 	if c.GetString(ctxkey.AvailableModels) != "" {
@@ -216,6 +300,7 @@ func ListModels(c *gin.Context) {
 }
 
 func RetrieveModel(c *gin.Context) {
+	ensureModelCatalog()
 	modelId := c.Param("model")
 	if m, ok := modelsMap[modelId]; ok {
 		m.SupportedEndpointTypes = model.GetModelEndpointTypes(modelId)
@@ -296,8 +381,11 @@ func FetchChannelModels(c *gin.Context) {
 	// —— 确定 base_url ——
 	baseURL := strings.TrimRight(req.BaseURL, "/")
 	if baseURL == "" {
-		if req.ChannelType > 0 && req.ChannelType < len(channeltype.ChannelBaseURLs) {
-			baseURL = strings.TrimRight(channeltype.ChannelBaseURLs[req.ChannelType], "/")
+		// 用存在性判断而非 `ChannelType < len(map)`：ChannelBaseURLs 的键由内置渠道与
+		// 扩展方按需登记，可能稀疏（如扩展方用键 100），len 不能作为上界，否则扩展渠道
+		// 的默认 BaseURL 取不到、静默退化为 400。
+		if base, ok := channeltype.ChannelBaseURLs[req.ChannelType]; ok && req.ChannelType > 0 {
+			baseURL = strings.TrimRight(base, "/")
 		}
 	}
 	if baseURL == "" {

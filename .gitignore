@@ -29,7 +29,6 @@ request*.txt
 response*.txt
 .mimocode/
 .claude
-.workbuddy
 .freebuff
 .zcode
 myapi.pid

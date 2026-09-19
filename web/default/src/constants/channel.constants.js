@@ -87,6 +87,8 @@ export const CHANNEL_OPTIONS = [
   { key: 46, text: 'Replicate', value: 46, color: 'blue' },
   { key: 52, text: 'Codex', value: 52, color: 'blue' },
   { key: 53, text: 'ChatGPT 订阅', value: 53, color: 'purple' },
+  // 扩展渠道不再硬编码：渠道类型与文案由后端下发的
+  // ChannelDescriptor 清单提供（GET /api/channel/descriptors），见 helpers/channelDescriptor.js。
   {
     key: 8,
     text: '自定义渠道',

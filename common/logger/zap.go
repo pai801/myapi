@@ -36,6 +36,7 @@ type ILogger interface {
 	Panicw(msg string, keysAndValues ...interface{})
 	Fatalf(format string, args ...interface{})
 	Fatalw(msg string, keysAndValues ...interface{})
+	Enable(level string) bool
 }
 
 var Log ILogger
@@ -56,6 +57,14 @@ func init() {
 
 type impl struct {
 	zap.SugaredLogger
+}
+
+func (l *impl) Enable(level string) bool {
+	le, err := zapcore.ParseLevel(level)
+	if err != nil {
+		return false
+	}
+	return l.Level().Enabled(le)
 }
 
 type LogCfg struct {

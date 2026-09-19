@@ -14,7 +14,8 @@ import (
 )
 
 func SetWebRouter(router *gin.Engine, buildFS embed.FS) {
-	indexPageData, _ := buildFS.ReadFile("web/build/default/index.html")
+	// 前端产物由 web.BuildFS 内嵌：其根为 web/ 目录，故路径前缀是 build/default。
+	indexPageData, _ := buildFS.ReadFile("build/default/index.html")
 	// 全局 gzip 会缓冲 SSE 响应，因此只对非 API 路径（静态文件）应用
 	router.Use(func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -26,7 +27,7 @@ func SetWebRouter(router *gin.Engine, buildFS embed.FS) {
 	})
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
-	router.Use(static.Serve("/", common.EmbedFolder(buildFS, "web/build/default")))
+	router.Use(static.Serve("/", common.EmbedFolder(buildFS, "build/default")))
 	router.NoRoute(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") {
 			controller.RelayNotFound(c)

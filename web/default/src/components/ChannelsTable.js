@@ -13,30 +13,47 @@ import {
   timestamp2string,
 } from '../helpers';
 
-import {CHANNEL_OPTIONS, ITEMS_PER_PAGE} from '../constants';
+import {ITEMS_PER_PAGE} from '../constants';
+import {
+  buildChannelOptions,
+  loadChannelDescriptors,
+} from '../helpers/channelDescriptor';
 import {renderGroup, renderNumber} from '../helpers/render';
 
 function renderTimestamp(timestamp) {
   return <>{timestamp2string(timestamp)}</>;
 }
 
-let type2label = undefined;
+// buildType2Label 由渠道清单（内置常量 + 后端下发的 ChannelDescriptor）构建
+// type -> 选项 映射，供列表标签渲染使用（PRD §5.12 层1 / 决策 D7）。
+function buildType2Label(options, t) {
+  const map = {};
+  for (let i = 0; i < options.length; i++) {
+    map[options[i].value] = options[i];
+  }
+  map[0] = {
+    value: 0,
+    text: t('channel.table.status_unknown'),
+    color: 'grey',
+  };
+  return map;
+}
 
-function renderType(type, t) {
-  if (!type2label) {
-    type2label = new Map();
-    for (let i = 0; i < CHANNEL_OPTIONS.length; i++) {
-      type2label[CHANNEL_OPTIONS[i].value] = CHANNEL_OPTIONS[i];
-    }
-    type2label[0] = {
-      value: 0,
-      text: t('channel.table.status_unknown'),
-      color: 'grey',
-    };
+function renderType(type, t, type2label) {
+  const option = type2label[type];
+  // 未知 type 兜底（渠道插件化 AC7）：库里可能残留当前构建不认识的渠道行
+  // （如已摘除的扩展渠道 / 历史遗留号段）。此时不得渲染成裸露数字或 undefined，
+  // 统一渲染为「未知渠道」，保证列表不白屏、不报错。
+  if (!option) {
+    return (
+      <Label basic color='grey'>
+        {t('channel.table.unknown_channel', { type })}
+      </Label>
+    );
   }
   return (
-    <Label basic color={type2label[type]?.color}>
-      {type2label[type] ? type2label[type].text : type}
+    <Label basic color={option.color}>
+      {option.text}
     </Label>
   );
 }
@@ -78,7 +95,7 @@ function isShowDetail() {
 const promptID = 'detail';
 
 const ChannelsTable = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
@@ -89,6 +106,10 @@ const ChannelsTable = () => {
   const [updatingBalance, setUpdatingBalance] = useState(false);
   const [showPrompt, setShowPrompt] = useState(shouldShowPrompt(promptID));
   const [showDetail, setShowDetail] = useState(isShowDetail());
+  // 后端下发的渠道清单（PRD §5.12 层1）：默认构建仅含内置渠道，扩展渠道由后端下发清单。
+  const [descriptors, setDescriptors] = useState([]);
+  const channelOptions = buildChannelOptions(descriptors, i18n.language);
+  const type2label = buildType2Label(channelOptions, t);
 
   const processChannelData = (channel) => {
     if (channel.models === '') {
@@ -172,6 +193,9 @@ const ChannelsTable = () => {
       .then()
       .catch(() => {});
     loadChannelModels().then().catch(() => {});
+    loadChannelDescriptors()
+      .then((list) => setDescriptors(list))
+      .catch(() => {});
   }, []);
 
   const manageChannel = async (id, action, idx, value) => {
@@ -552,7 +576,7 @@ const ChannelsTable = () => {
                     {channel.name ? channel.name : t('channel.table.no_name')}
                   </Table.Cell>
                   <Table.Cell>{renderGroup(channel.group)}</Table.Cell>
-                  <Table.Cell>{renderType(channel.type, t)}</Table.Cell>
+                  <Table.Cell>{renderType(channel.type, t, type2label)}</Table.Cell>
                   <Table.Cell>{renderStatus(channel.status, t)}</Table.Cell>
                   <Table.Cell className='hide-on-mobile'>
                     <Popup

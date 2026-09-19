@@ -187,13 +187,22 @@ export async function loadChannelModels() {
 
 export function getChannelModels(type) {
   if (channelModels !== undefined && type in channelModels) {
-    return channelModels[type];
+    // 归一为数组：上游/缓存中的值可能是 null（空清单曾被序列化成 null），
+    // 调用方一律按数组使用，返回 null 会让它们 .length / .includes 崩溃。
+    return Array.isArray(channelModels[type]) ? channelModels[type] : [];
   }
   let models = localStorage.getItem('channel_models');
   if (!models) {
     return [];
   }
   channelModels = JSON.parse(models);
+  // 浏览器里已缓存的旧 channel_models 是后端原始 payload，可能逐项为 null，
+  // 这里把每项归一为数组，避免后续走缓存路径时把 null 交给调用方。
+  Object.keys(channelModels).forEach((key) => {
+    if (!Array.isArray(channelModels[key])) {
+      channelModels[key] = [];
+    }
+  });
   if (type in channelModels) {
     return channelModels[type];
   }

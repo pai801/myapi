@@ -202,7 +202,7 @@ GET /api/log/active/events
 
 ## 支持的模型渠道
 
-支持 **56 种渠道类型**，**21 个 API 适配器**，覆盖主流国内外大模型供应商：
+支持 **53 种渠道类型**，**21 个 API 适配器**，覆盖主流国内外大模型供应商：
 
 **国际供应商**：OpenAI ChatGPT 系列（含 Azure OpenAI）、Anthropic Claude 系列（含 AWS Claude）、Google PaLM2/Gemini/Vertex AI、Mistral、Cohere、xAI、Groq、together.ai、Cloudflare Workers AI、DeepL、Ollama、Replicate、OpenRouter
 

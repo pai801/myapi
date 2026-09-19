@@ -1,0 +1,110 @@
+package router
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-contrib/sessions"
+	"github.com/gin-contrib/sessions/cookie"
+	"github.com/gin-gonic/gin"
+
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/relay/routeregistry"
+)
+
+func TestMain(m *testing.M) {
+	gin.SetMode(gin.TestMode)
+	// common.RedisEnabled 默认 true，但测试未初始化 RDB；置 false 让限流走内存实现，
+	// 否则 GlobalAPIRateLimit 会解引用 nil 的 common.RDB 而 panic。
+	common.RedisEnabled = false
+	m.Run()
+}
+
+// newTestEngine 复刻 main.go 的最小中间件装配。
+// sessions 必装：鉴权组的 AdminAuth 会调用 sessions.Default（MustGet），缺失会 panic。
+func newTestEngine() *gin.Engine {
+	r := gin.New()
+	store := cookie.NewStore([]byte("test-session-secret"))
+	r.Use(sessions.Sessions("session", store))
+	return r
+}
+
+// routeSet 收集 engine 的 "METHOD PATH" 集合，便于断言路由是否注册。
+func routeSet(r *gin.Engine) map[string]bool {
+	set := make(map[string]bool)
+	for _, ri := range r.Routes() {
+		set[ri.Method+" "+ri.Path] = true
+	}
+	return set
+}
+
+// TestChannelDescriptorsRouteRegistered 断言渠道能力清单端点已注册（它是主仓路由，非渠道专属；
+// 返回空清单由 controller 保证，见 controller/channel_descriptor_test.go）。此处同时验证新增
+// 静态路由 /api/channel/descriptors 与既有 /api/channel/:id 不冲突（SetApiRouter 不 panic）。
+func TestChannelDescriptorsRouteRegistered(t *testing.T) {
+	r := newTestEngine()
+	SetApiRouter(r)
+	if got := routeSet(r); !got["GET /api/channel/descriptors"] {
+		t.Errorf("GET /api/channel/descriptors not registered")
+	}
+}
+
+// TestEmptyRegistryYields404 模拟空注册表：不挂任何渠道路由，
+// 目标路径必须返回 404 且不 panic。
+func TestEmptyRegistryYields404(t *testing.T) {
+	r := newTestEngine()
+	apiRouter := r.Group("/api")
+	authGroup := apiRouter.Group("/channel")
+
+	mountChannelRoutes(apiRouter, authGroup, routeregistry.New().Registered())
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/ext/callback"},
+		{http.MethodPost, "/api/channel/ext/login/start"},
+		{http.MethodGet, "/api/channel/ext/login/poll"},
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s %s code=%d, want 404 (empty registry)", tc.method, tc.path, w.Code)
+		}
+	}
+}
+
+// TestMountChannelRoutesTwoPhase 用假注册方验证两阶段装配：公开 / 鉴权分别落到两个组，
+// 且注册方只描述路由，不接触 engine。
+func TestMountChannelRoutesTwoPhase(t *testing.T) {
+	r := newTestEngine()
+	apiRouter := r.Group("/api")
+	authGroup := apiRouter.Group("/channel")
+
+	fake := &fakeRegistrar{}
+	mountChannelRoutes(apiRouter, authGroup, []routeregistry.RouteRegistrar{fake})
+
+	got := routeSet(r)
+	for _, w := range []string{"GET /api/plugin/public", "POST /api/channel/plugin/auth"} {
+		if !got[w] {
+			t.Errorf("missing route %q after mount", w)
+		}
+	}
+	if !fake.publicCalled || !fake.authCalled {
+		t.Errorf("registrar methods not both invoked: public=%v auth=%v", fake.publicCalled, fake.authCalled)
+	}
+}
+
+type fakeRegistrar struct {
+	publicCalled bool
+	authCalled   bool
+}
+
+func (f *fakeRegistrar) RegisterPublicRoutes(g *gin.RouterGroup) {
+	f.publicCalled = true
+	g.GET("/plugin/public", func(c *gin.Context) { c.Status(http.StatusOK) })
+}
+
+func (f *fakeRegistrar) RegisterAuthRoutes(g *gin.RouterGroup) {
+	f.authCalled = true
+	g.POST("/plugin/auth", func(c *gin.Context) { c.Status(http.StatusOK) })
+}
