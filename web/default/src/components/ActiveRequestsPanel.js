@@ -124,7 +124,7 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
                       </Label>
                     </Table.Cell>
                     <Table.Cell>
-                      {log.model_name ? renderColorLabel(log.model_name) : ''}
+                      {log.model_name ? renderColorLabel(log.model_name.toLowerCase()) : ''}
                     </Table.Cell>
                     <Table.Cell className='hide-on-mobile'>
                       <Label basic color={log.is_stream ? 'blue' : 'grey'} size='mini'>

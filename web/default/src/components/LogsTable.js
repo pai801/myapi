@@ -42,12 +42,12 @@ const MODEL_NAME_MAX_LENGTH = 20;
 const renderModelName = (name) => {
   const shortName = getShortModelName(name);
   if (shortName.length <= MODEL_NAME_MAX_LENGTH) {
-    return renderColorLabel(shortName);
+    return renderColorLabel(shortName.toLowerCase());
   }
   return (
     <Popup
       content={name}
-      trigger={renderColorLabel(`${shortName.slice(0, MODEL_NAME_MAX_LENGTH)}...`)}
+      trigger={renderColorLabel(`${shortName.slice(0, MODEL_NAME_MAX_LENGTH)}...`.toLowerCase())}
       basic
     />
   );
