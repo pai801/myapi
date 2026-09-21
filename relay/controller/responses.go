@@ -147,6 +147,8 @@ func relayResponsesDirect(c *gin.Context, ctxMeta *metaPkg.Meta) *model.ErrorWit
 	}
 
 	resp, err := relayAdaptor.DoRequest(c, ctxMeta, bytes.NewBuffer(upstreamBody))
+	// sticky 在 DoRequest 内部改写 ctxMeta.ChannelId；返回后记录实际服务渠道供归因使用
+	recordActualChannel(c, ctxMeta)
 	if err != nil {
 		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		logger.Log.Errorf("[%s] %+v", "do request failed", err)
@@ -302,6 +304,8 @@ func relayResponsesConverted(c *gin.Context, ctxMeta *metaPkg.Meta) *model.Error
 	relayAdaptor.Init(chatMeta)
 
 	resp, err := relayAdaptor.DoRequest(c, chatMeta, chatRequestReader)
+	// sticky 在 DoRequest 内部改写 chatMeta.ChannelId；返回后记录实际服务渠道供归因使用
+	recordActualChannel(c, chatMeta)
 	if err != nil {
 		rollbackResponsesPreConsumedQuota(ctx, ctxMeta.UserId)
 		logger.Log.Errorf("[%s] %+v", "do request failed", err)

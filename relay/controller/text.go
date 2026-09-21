@@ -105,6 +105,8 @@ func RelayTextHelper(c *gin.Context) *model.ErrorWithStatusCode {
 
 	// do request
 	resp, err := adaptor.DoRequest(c, meta, requestBody)
+	// sticky 在 DoRequest 内部改写 meta.ChannelId；返回后记录实际服务渠道供归因使用
+	recordActualChannel(c, meta)
 	if err != nil {
 		// Rollback pre-consumed quota
 		if preConsumed, ok := ctx.Value(CtxKeyPreConsumedQuota).(int64); ok && preConsumed > 0 {

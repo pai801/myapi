@@ -142,6 +142,13 @@ func InitDB() {
 
 func migrateDB() error {
 	var err error
+	// 存量 SQLite 库里可能残留 decimal(10,4) 这类带逗号的列类型，会让 gorm sqlite 的
+	// AlterColumn 生成非法 DDL 并使迁移 FATAL，必须在**任何** AutoMigrate 之前先修掉：
+	// 只要排在后面，前面任何一张表先崩就根本走不到这里。见 sqlite_migrate_fix.go 的注释。
+	if err = fixSQLiteCommaTypedColumns(DB, &Channel{}, &Token{}, &User{}, &Option{},
+		&Ability{}, &Log{}, &ModelMetadata{}, &Group{}); err != nil {
+		return err
+	}
 	if err = DB.AutoMigrate(&Channel{}); err != nil {
 		return err
 	}

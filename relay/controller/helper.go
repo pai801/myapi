@@ -83,6 +83,27 @@ func wrapTTFTWriter(c *gin.Context, m *meta.Meta) {
 	c.Writer = &ttftWriter{ResponseWriter: c.Writer, meta: m, c: c}
 }
 
+// recordActualChannel 在 adaptor.DoRequest 返回后记录「实际服务的渠道」。
+// chatgptsub 等 adaptor 的 sticky 会在 SetupRequestHeader（DoRequest 内部）把 meta.ChannelId
+// 改写为会话绑定的渠道并实际打到该渠道，但不回写 ctxkey.ChannelId。归因（亲和 / 冷却 / 监控）
+// 必须以实际渠道为准，故此处写入独立键 ActualChannelId 供 controller/relay.go 读取。
+// 仅当 meta.ChannelId 为正且与选路渠道不同才写：无覆盖场景不产生额外状态，行为与改动前等价。
+func recordActualChannel(c *gin.Context, m *meta.Meta) {
+	if m == nil || m.ChannelId <= 0 {
+		return
+	}
+	selected := c.GetInt(ctxkey.ChannelId)
+	if m.ChannelId == selected {
+		return
+	}
+	c.Set(ctxkey.ActualChannelId, m.ChannelId)
+	// 同步记录实际渠道名，供失败日志使用；避免日志出现「channel #B（A的名字）」的自相矛盾。
+	// 仅在真正覆盖时写入：无覆盖时两个键都不写，保持 no-op 语义（见 controller/relay.go resolveActualChannelName）。
+	c.Set(ctxkey.ActualChannelName, m.ChannelName)
+	// 只打渠道 id，绝不打印会话 id 等敏感值。
+	logger.Log.Infof("relay: adaptor overrode selected channel #%d -> actual #%d; attribution follows actual channel", selected, m.ChannelId)
+}
+
 // getFirstTokenTime 从 context 读取流式首字耗时（ms），非流式/未记录时为 0。
 func getFirstTokenTime(ctx context.Context) int64 {
 	if v := ctx.Value(CtxKeyFirstTokenTime); v != nil {

@@ -99,7 +99,7 @@ Administrators can manage groups via the `/api/group/*` API endpoints (CRUD). Gr
 
 Channel selection is no longer simple round-robin or random — three strategies work together:
 
-**Affinity**: Remembers the last successful channel for each `(user, model)` pair and preferentially reuses it within a TTL (default 300 seconds), ensuring context consistency across multi-turn conversations.
+**Affinity**: In non-auto mode, preferentially reuses the last successful channel using a **turn → session → user** hierarchical key. The turn level reads a per-send-stable header (`X-Conversation-Request-Id` → `X-Query-Id` → `X-Root-Request-Id`; if absent, no random id is generated); these three headers are not observed being sent by mainstream coding agents, so the real benefit comes mainly from the session level. The session level reads a conversation-level header (`conversation_id` → `session_id` → `X-Conversation-Id` → `X-Session-Id` → `Session-Id` → `Thread-Id` → `X-Parent-Session-Id` → `X-Claude-Code-Session-Id` → `X-Opencode-Session` → `X-Litellm-Session-Id` → `Acp-Connection-Id` → `Acp-Session-Id`); if both levels are absent it falls back to `userId` (legacy behavior). Session identity is first taken from the request headers; when all header lookups miss, it is additionally recovered from the JSON request body (`litellm_session_id` / `session_id` / `conversation_id` / `metadata.cline_task_id`, first non-empty wins), limited to JSON POST/PUT/PATCH requests and gated by `AFFINITY_BODY_SESSION_ID` (enabled by default; set `false` to disable). The three levels use TTLs of 120 / 1800 / 300 seconds respectively (`AFFINITY_EXPIRE_SECONDS`=300 is the user level). `X-Request-Id` / `X-Client-Request-Id` vary in semantics by client (in Codex CLI, `X-Client-Request-Id` is in fact the thread id), so they cannot be assumed turn-scoped; for this reason both are never used as the turn key. Affinity effectiveness can be observed via the `AFFINITY_STATS_INTERVAL_SECONDS` summary log (each window prints the five-way distribution of turn/session/user hits, fallback, and miss, plus the miss header-name sampling); note that a hit excludes the fallback bucket (a key match whose channel is not in the candidate set and has fallen back to weighted random), otherwise the reform's effectiveness is overstated.
 
 **Cooldown**: After a channel failure, it enters a cooldown period (default 600 seconds) during which it is excluded from the candidate list, preventing traffic from being routed to a faulty channel.
 
@@ -381,7 +381,13 @@ After the system starts, log in as the `root` user for further configuration.
 | `CHANNEL_UPDATE_FREQUENCY` | Periodically update channel balances (minutes) | None (no updates) |
 | `CHANNEL_TEST_FREQUENCY` | Periodically test channel availability (minutes) | None (no tests) |
 | `CHANNEL_COOLDOWN_SECONDS` | Channel cooldown period after failure (seconds) | `600` |
-| `AFFINITY_EXPIRE_SECONDS` | User-model-channel affinity TTL (seconds) | `300` |
+| `AFFINITY_EXPIRE_SECONDS` | User-level (fallback) affinity TTL (seconds); see the two rows below for turn/session | `300` |
+| `AFFINITY_KEY_MODE` | Affinity key mode: `auto` = turn→session→user hierarchical key; `user` = legacy behavior (`(user, model)`) | `auto` |
+| `AFFINITY_TURN_EXPIRE_SECONDS` | Turn-level (per-send) affinity TTL (seconds) | `120` |
+| `AFFINITY_SESSION_EXPIRE_SECONDS` | Session-level (conversation) affinity TTL (seconds) | `1800` |
+| `AFFINITY_MAX_ENTRIES` | Affinity table capacity cap; on reaching the cap, purge expired first, then evict ~5% of earliest-expiring; a value `<= 0` is clamped to the default 20000 (no longer means unlimited) | `20000` |
+| `AFFINITY_STATS_INTERVAL_SECONDS` | Interval (seconds) for the periodic affinity hit-distribution summary log; `<= 0` disables it (when disabled: zero counting, sampling, and allocation); the log records candidate header names only and never header values | `300` |
+| `AFFINITY_BODY_SESSION_ID` | When all session headers miss, recover the session identifier from the JSON request body (`litellm_session_id` / `session_id` / `conversation_id` / `metadata.cline_task_id`, etc.); limited to JSON POST/PUT/PATCH requests; set `false` to disable | `true` (enabled) |
 | `POLLING_INTERVAL` | Request interval during batch updates/tests (seconds) | None |
 | `ENABLE_METRIC` | Enable success-rate-driven channel auto-disabling | `false` |
 | `METRIC_QUEUE_SIZE` | Success rate statistics queue size | `10` |
@@ -404,6 +410,7 @@ After the system starts, log in as the `root` user for further configuration.
 | `LOG_CLEAN_HOURS` | Log retention duration (hours) | `168` |
 | `LOG_CLEAN_BODIES_HOURS` | Request/response body retention duration (hours) | `4` |
 | `MAX_LOGGED_BODY_SIZE` | Maximum logged request body size (bytes) | `2097152` (2MB) |
+| `PANIC_LOG_BODY_MAX_BYTES` | Maximum body bytes printed in panic-recovery logs; content beyond the limit is truncated with the original total length noted; set to `0` to omit the request body entirely (only the length is logged). **Note:** this is not the same switch as `MAX_LOGGED_BODY_SIZE` — that one governs consumption logs (default 2MB), whereas this item only governs panic-recovery logs. Panic logs are often retained long-term or shared externally (e.g. in issue reports), so the default here is more conservative; set to `0` to omit the request body entirely. | `256` |
 
 **Security & Rate Limiting:**
 

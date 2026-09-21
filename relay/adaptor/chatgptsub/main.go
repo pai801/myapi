@@ -84,6 +84,10 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Request, meta *me
 		if boundID, ok := stickyManager.Get(meta.Group, sessionHash); ok && boundID != meta.ChannelId {
 			if boundChannel, err := dbmodel.GetChannelById(boundID, true); err == nil && boundChannel != nil && boundChannel.Status == dbmodel.ChannelStatusEnabled {
 				meta.ChannelId = boundChannel.Id
+				// 同步改写渠道名：否则 meta 会停留为「ChannelId=B 但 ChannelName=A的名字」的不自洽状态，
+				// 令归因（recordActualChannel 写 ActualChannelName）与成功路径 postConsumeQuota 的日志
+				// 都读到选路渠道 A 的名字。与 ChannelId 同源改写，保证实际渠道标识整体自洽。
+				meta.ChannelName = boundChannel.Name
 				meta.APIKey = boundChannel.Key
 				meta.BaseURL = boundChannel.GetBaseURL()
 				// GetRequestURL 先于本函数执行且拿不到 gin.Context，粘性解析只能在此进行；

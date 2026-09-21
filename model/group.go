@@ -8,10 +8,18 @@ import (
 
 // Group 表示一个分组，每个分组有一个 float64 倍率作为全局 ModelRatio 的乘数。
 // default 组倍率为 1.0（完全向后兼容）。
+//
+// ModelRatio 的类型**必须避免写成带逗号的类型串**（如 type:decimal(10,4)）：
+// gorm.io/driver/sqlite 的 AlterColumn 会在第一个逗号处截断列定义，生成多出一个右括号的
+// DDL，导致 parseDDL 报 "invalid DDL, unbalanced brackets"，SQLite 部署第二次启动即 FATAL。
+// 用 precision/scale 代替 type：SQLite 侧 Float 恒为 real（comma-free），
+// MySQL 侧仍是 decimal(10, 4)，语义不变。
+// default 写成 1 而不是 1.0：gorm 对 float 字段会用 DefaultValueInterface 渲染，
+// 1.0 会被渲染成 "1"，与 tag 里的 "1.0" 不相等，从而每次启动都触发一次多余的 AlterColumn。
 type Group struct {
 	Id          int     `json:"id"`
 	Name        string  `json:"name" gorm:"type:varchar(32);uniqueIndex"`
-	ModelRatio  float64 `json:"model_ratio" gorm:"type:decimal(10,4);default:1.0"`
+	ModelRatio  float64 `json:"model_ratio" gorm:"precision:10;scale:4;default:1"`
 	CreatedTime int64   `json:"created_time" gorm:"bigint"`
 }
 

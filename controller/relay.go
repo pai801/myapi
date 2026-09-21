@@ -64,24 +64,42 @@ func Relay(c *gin.Context) {
 	if requestModel == "" {
 		requestModel = "auto"
 	}
+	// 亲和 scope 由 Distribute 中间件写入。理论上不经该中间件的调用方会取不到，
+	// 兜底为 user 层（行为退化为现状，属可接受降级，不报错）。
+	rawScope, _ := c.Get(ctxkey.AffinityScope)
+	scope, ok := rawScope.(middleware.AffinityScope)
+	if !ok {
+		// 兜底 scope 的 Group 必须与 Distribute 的 tokenGroup 同源（"" → "default"），
+		// 否则同一用户的亲和键会被切成两个命名空间（见 middleware/distributor.go Distribute）。
+		group := c.GetString(ctxkey.Group)
+		if group == "" {
+			group = "default"
+		}
+		scope = middleware.AffinityScope{UserID: userId, Group: group}
+	}
 	requestId := c.GetString(helper.RequestIdKey)
 	meta := metaPkg.GetByContext(c)
 	if activeReq := buildActiveRequest(c, meta, requestId); activeReq != nil {
 		active.Global.Add(activeReq)
 		defer active.Global.Remove(requestId)
 	}
+	// 每次尝试前清空「实际渠道」记录：ActualChannelId 由 relay 路径（DoRequest 后）写入，
+	// 清空可避免上一次尝试的残留值跨尝试污染归因（见 resolveActualChannelId）。
+	c.Set(ctxkey.ActualChannelId, 0)
+	c.Set(ctxkey.ActualChannelName, "")
 	bizErr := relayHelper(c, relayMode)
 	if bizErr == nil {
-		middleware.AffinityGlobal.Set(userId, requestModel, channelId)
-		middleware.CooldownGlobal.ResetSuccess(channelId, c.GetString(ctxkey.SuggestedModel))
-		monitor.Emit(channelId, true)
+		// 归因按「实际服务渠道」：sticky 可能把请求改到另一个渠道（见 resolveActualChannelId）。
+		actualChannelId := recordSuccessAttribution(c, channelId, requestModel, scope)
+		monitor.Emit(actualChannelId, true)
 		return
 	}
 	lastFailedChannelId := channelId
-	channelName := c.GetString(ctxkey.ChannelName)
+	channelName := resolveActualChannelName(c, c.GetString(ctxkey.ChannelName))
 	group := c.GetString(ctxkey.Group)
 	failedModel := c.GetString(ctxkey.SuggestedModel)
-	go processChannelRelayError(ctx, userId, channelId, channelName, failedModel, *bizErr)
+	// 失败归因同样按「实际服务渠道」：否则可能因实际渠道 B 的失败而冷却 / 禁用选路渠道 A。
+	go processChannelRelayError(ctx, userId, resolveActualChannelId(c, channelId), channelName, failedModel, *bizErr)
 	retryTimes := config.RetryTimes
 	if !shouldRetry(c, bizErr) {
 		logger.Log.Infof("shouldRetry=false statusCode=%d requestId=%s lastFailedChannel=%d", bizErr.StatusCode, requestId, lastFailedChannelId)
@@ -92,7 +110,7 @@ func Relay(c *gin.Context) {
 	// Use the original request model (could be "auto" or specific model)
 	// to maintain proper distribution behavior during retries.
 	for i := retryTimes; i > 0; i-- {
-		channel, suggestedModel, err := middleware.SelectChannel(ctx, group, requestModel, lastFailedChannelId, userId)
+		channel, suggestedModel, err := middleware.SelectChannel(ctx, group, requestModel, lastFailedChannelId, scope)
 		if err != nil {
 			logger.Log.Errorf("DistributeForRetry failed: %+v", err)
 			break
@@ -109,19 +127,22 @@ func Relay(c *gin.Context) {
 		}
 		requestBody, err := common.GetRequestBody(c)
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
+		c.Set(ctxkey.ActualChannelId, 0) // 清空上一次尝试的实际渠道记录，避免跨尝试残留
+		c.Set(ctxkey.ActualChannelName, "")
 		bizErr = relayHelper(c, relayMode)
 		if bizErr == nil {
-			logger.Log.Infof("retry succeeded on channel #%d requestId=%s", channel.Id, requestId)
-			middleware.AffinityGlobal.Set(userId, requestModel, channel.Id)
-			middleware.CooldownGlobal.ResetSuccess(channel.Id, c.GetString(ctxkey.SuggestedModel))
+			logger.Log.Infof("retry succeeded on channel #%d requestId=%s", resolveActualChannelId(c, channel.Id), requestId)
+			// 归因按「实际服务渠道」，与首轮同口径；重试成功原不上报监控，此处保持原行为。
+			recordSuccessAttribution(c, channel.Id, requestModel, scope)
 			return
 		}
 		channelId = c.GetInt(ctxkey.ChannelId)
 		lastFailedChannelId = channelId
-		channelName = c.GetString(ctxkey.ChannelName)
+		channelName = resolveActualChannelName(c, c.GetString(ctxkey.ChannelName))
 		failedModel = c.GetString(ctxkey.SuggestedModel)
-		logger.Log.Debugf("retry failed channel #%d status=%d requestId=%s", channelId, bizErr.StatusCode, requestId)
-		go processChannelRelayError(ctx, userId, channelId, channelName, failedModel, *bizErr)
+		logger.Log.Debugf("retry failed channel #%d status=%d requestId=%s", resolveActualChannelId(c, channelId), bizErr.StatusCode, requestId)
+		// 失败归因同样按「实际服务渠道」，与首轮口径一致。
+		go processChannelRelayError(ctx, userId, resolveActualChannelId(c, channelId), channelName, failedModel, *bizErr)
 		// 本次重试已向客户端提交 SSE：继续重试会追加第二段流，必须停止（失败记账已在上方完成）。
 		if c.Writer.Written() {
 			logger.Log.Infof("retry response already committed, stop retrying requestId=%s", requestId)
@@ -140,6 +161,44 @@ func Relay(c *gin.Context) {
 		renderFinalRelayError(c, bizErr)
 		recordFailureLog(c, bizErr, channelName)
 	}
+}
+
+// resolveActualChannelId 返回归因应使用的渠道：若 relay 路径记录了 ActualChannelId
+// （adaptor 层 sticky 强制改写了实际服务渠道），以实际渠道为准；否则退化为选路渠道 selected。
+// 归因（亲和 / 冷却 / 监控）必须按实际服务渠道，否则会把成功 / 失败记到没实际服务的渠道上
+// （见 relay/controller/helper.go recordActualChannel 与 relay/adaptor/chatgptsub sticky）。
+func resolveActualChannelId(c *gin.Context, selected int) int {
+	if actual := c.GetInt(ctxkey.ActualChannelId); actual > 0 && actual != selected {
+		return actual
+	}
+	return selected
+}
+
+// resolveActualChannelName 返回失败日志应使用的渠道名：若 relay 路径记录了 ActualChannelName
+// （adaptor 层 sticky 改写了实际服务渠道），以实际渠道名为准；否则退化为 fallback（选路渠道名）。
+// 与 resolveActualChannelId 同口径：否则失败日志会出现「channel #B（A的名字）」的自相矛盾。
+func resolveActualChannelName(c *gin.Context, fallback string) string {
+	if name := c.GetString(ctxkey.ActualChannelName); name != "" {
+		return name
+	}
+	return fallback
+}
+
+// recordSuccessAttribution 记录一次成功转发的归因：亲和写入 + 冷却清零，统一按「实际服务渠道」。
+// 返回实际归因渠道，供调用方上报监控（monitor.Emit）。首轮与重试两处成功分支共用，避免归因口径分裂。
+//
+// 亲和写入全部可用层（turn + session + user），绝不能只写 keys[0]（最细层）：turn id 每轮换新，
+// 只写 turn 会让下一轮 turn 键 miss、而 session / user 层从未写过也 miss，跨轮亲和彻底断链。
+// auto 请求走 autoDistribute、从不查亲和，写入只会产生死键，故跳过（ShouldRecordAffinity）。
+func recordSuccessAttribution(c *gin.Context, selectedChannelId int, requestModel string, scope middleware.AffinityScope) int {
+	actualChannelId := resolveActualChannelId(c, selectedChannelId)
+	if middleware.ShouldRecordAffinity(requestModel) {
+		for _, key := range scope.KeysToSet(requestModel) {
+			middleware.AffinityGlobal.Set(key, actualChannelId)
+		}
+	}
+	middleware.CooldownGlobal.ResetSuccess(actualChannelId, c.GetString(ctxkey.SuggestedModel))
+	return actualChannelId
 }
 
 // renderFinalRelayError 仅在响应未提交时写最终 JSON 错误体。
@@ -246,8 +305,10 @@ func buildFailureLog(c *gin.Context, bizErr *model.ErrorWithStatusCode, channelN
 	respBody, _ := json.Marshal(bizErr.Error)
 	requestBody, _ := common.GetRequestBody(c)
 	return &dbmodel.Log{
-		UserId:        c.GetInt(ctxkey.Id),
-		ChannelId:     c.GetInt(ctxkey.ChannelId),
+		UserId: c.GetInt(ctxkey.Id),
+		// 失败日志的渠道 id 与 channelName 同口径：sticky 覆盖后按实际服务渠道 B 归因，
+		// 否则同一失败会被记到「选路渠道 A 的 id + 实际渠道 B 的名字」两个渠道上。
+		ChannelId:     resolveActualChannelId(c, c.GetInt(ctxkey.ChannelId)),
 		Quota:         0,
 		Content:       fmt.Sprintf("HTTP status: %d, error: %s", bizErr.StatusCode, bizErr.Error.Message),
 		ChannelName:   channelName,

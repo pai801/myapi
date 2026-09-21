@@ -95,11 +95,11 @@ func TestAutoDistribute(t *testing.T) {
 }
 
 func clearAffinity() {
-	AffinityGlobal.Remove(999, "gpt4turbo")
-	AffinityGlobal.Remove(999, "gpt35turbo")
+	AffinityGlobal.Remove(AffinityScope{UserID: 999}.Keys("gpt4turbo")[0])
+	AffinityGlobal.Remove(AffinityScope{UserID: 999}.Keys("gpt35turbo")[0])
 	// deepseek 系列供 canonical 等价组用例使用，affinity 以原始请求模型名为 key
-	AffinityGlobal.Remove(999, "deepseek-v4-flash")
-	AffinityGlobal.Remove(999, "deepseek-v4-flash-0731")
+	AffinityGlobal.Remove(AffinityScope{UserID: 999}.Keys("deepseek-v4-flash")[0])
+	AffinityGlobal.Remove(AffinityScope{UserID: 999}.Keys("deepseek-v4-flash-0731")[0])
 }
 
 func TestNonAutoDistributeNoAffinity(t *testing.T) {
@@ -109,7 +109,7 @@ func TestNonAutoDistributeNoAffinity(t *testing.T) {
 			{Name: "A", Id: 1, ModelsAlias: "gpt4turbo", Models: "gpt-4-turbo"},
 		}
 
-		ch, model, err := nonAutoDistribute(context.Background(), 999, "gpt4turbo", channels)
+		ch, model, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "gpt4turbo", channels)
 		So(err, ShouldBeNil)
 		So(ch.Name, ShouldEqual, "A")
 		So(ch.Id, ShouldEqual, 1)
@@ -122,13 +122,13 @@ func TestNonAutoDistributeNoAffinity(t *testing.T) {
 			{Name: "A", Id: 1, ModelsAlias: "gpt4turbo"},
 		}
 
-		_, _, err := nonAutoDistribute(context.Background(), 999, "nonexistent-model", channels)
+		_, _, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "nonexistent-model", channels)
 		So(err, ShouldNotBeNil)
 	})
 
 	Convey("nonAutoDistribute with empty channel list returns error", t, func() {
 		clearAffinity()
-		_, _, err := nonAutoDistribute(context.Background(), 999, "gpt4turbo", []*model.Channel{})
+		_, _, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "gpt4turbo", []*model.Channel{})
 		So(err, ShouldNotBeNil)
 	})
 }
@@ -136,13 +136,13 @@ func TestNonAutoDistributeNoAffinity(t *testing.T) {
 func TestNonAutoDistributeWithAffinity(t *testing.T) {
 	Convey("nonAutoDistribute respects affinity when channel is in matched set", t, func() {
 		clearAffinity()
-		AffinityGlobal.Set(999, "gpt4turbo", 2)
+		AffinityGlobal.Set(AffinityScope{UserID: 999}.Keys("gpt4turbo")[0], 2)
 		channels := []*model.Channel{
 			{Name: "A", Id: 1, ModelsAlias: "gpt4turbo", Models: "gpt-4-turbo"},
 			{Name: "B", Id: 2, ModelsAlias: "gpt4turbo", Models: "gpt-4-turbo"},
 		}
 
-		ch, model, err := nonAutoDistribute(context.Background(), 999, "gpt4turbo", channels)
+		ch, model, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "gpt4turbo", channels)
 		So(err, ShouldBeNil)
 		So(ch.Name, ShouldEqual, "B")
 		So(ch.Id, ShouldEqual, 2)
@@ -151,12 +151,12 @@ func TestNonAutoDistributeWithAffinity(t *testing.T) {
 
 	Convey("nonAutoDistribute falls back to weighted when affinity channel missing", t, func() {
 		clearAffinity()
-		AffinityGlobal.Set(999, "gpt4turbo", 99) // affinity points to channel not in the list
+		AffinityGlobal.Set(AffinityScope{UserID: 999}.Keys("gpt4turbo")[0], 99) // affinity points to channel not in the list
 		channels := []*model.Channel{
 			{Name: "A", Id: 1, ModelsAlias: "gpt4turbo", Models: "gpt-4-turbo"},
 		}
 
-		ch, model, err := nonAutoDistribute(context.Background(), 999, "gpt4turbo", channels)
+		ch, model, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "gpt4turbo", channels)
 		So(err, ShouldBeNil)
 		So(ch.Name, ShouldEqual, "A")
 		So(ch.Id, ShouldEqual, 1)
@@ -221,7 +221,7 @@ func TestMatchChannelsByAliasCanonical(t *testing.T) {
 		chA := []*model.Channel{
 			{Name: "A", Id: 1, Models: "deepseek-v4-flash-0731", ModelsAlias: "deepseekv4flash0731"},
 		}
-		_, longName, err := nonAutoDistribute(context.Background(), 999, "deepseek-v4-flash", chA)
+		_, longName, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "deepseek-v4-flash", chA)
 		So(err, ShouldBeNil)
 		So(longName, ShouldEqual, "deepseek-v4-flash-0731")
 
@@ -229,7 +229,7 @@ func TestMatchChannelsByAliasCanonical(t *testing.T) {
 		chB := []*model.Channel{
 			{Name: "B", Id: 2, Models: "deepseek-v4-flash", ModelsAlias: "deepseekv4flash"},
 		}
-		_, shortName, err := nonAutoDistribute(context.Background(), 999, "deepseek-v4-flash-0731", chB)
+		_, shortName, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "deepseek-v4-flash-0731", chB)
 		So(err, ShouldBeNil)
 		So(shortName, ShouldEqual, "deepseek-v4-flash")
 	})
@@ -272,7 +272,7 @@ func TestMatchChannelsByAliasMergesExactAndPrefix(t *testing.T) {
 			{Name: "PREFIX_HIGHER", Id: 20, Models: "gpt-4-turbo-vision-pro", ModelsAlias: "gpt4turbovisionpro", Priority: &pPrefix},
 		}
 
-		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "gpt-4-turbo-vision", channels)
+		ch, modelName, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "gpt-4-turbo-vision", channels)
 		So(err, ShouldBeNil)
 		// exact 集优先：必选 id=10，不被 prefix-only 渠道抢占
 		So(ch.Id, ShouldEqual, 10)
@@ -285,9 +285,9 @@ func TestMatchChannelsByAliasMergesExactAndPrefix(t *testing.T) {
 		channels := []*model.Channel{
 			{Name: "PREFIX_ONLY", Id: 72, Models: "gpt-4-turbo-vision-pro", ModelsAlias: "gpt4turbovisionpro"},
 		}
-		AffinityGlobal.Set(999, "gpt-4-turbo-vision", 72)
+		AffinityGlobal.Set(AffinityScope{UserID: 999}.Keys("gpt-4-turbo-vision")[0], 72)
 
-		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "gpt-4-turbo-vision", channels)
+		ch, modelName, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "gpt-4-turbo-vision", channels)
 		So(err, ShouldBeNil)
 		So(ch.Id, ShouldEqual, 72)
 		So(modelName, ShouldEqual, "gpt-4-turbo-vision-pro")
@@ -300,7 +300,7 @@ func TestMatchChannelsByAliasMergesExactAndPrefix(t *testing.T) {
 			{Name: "PREFIX_ONLY", Id: 20, Models: "gpt-4-turbo-vision-pro", ModelsAlias: "gpt4turbovisionpro"},
 		}
 
-		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "gpt-4-turbo-vision", channels)
+		ch, modelName, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "gpt-4-turbo-vision", channels)
 		So(err, ShouldBeNil)
 		So(ch.Id, ShouldEqual, 20)
 		So(modelName, ShouldEqual, "gpt-4-turbo-vision-pro")
@@ -345,7 +345,7 @@ func TestNonAutoDistributeCanonicalBeforePrefix(t *testing.T) {
 			{Name: "C", Id: 3, Models: "model-x,deepseek-v4-flash-0731", ModelsAlias: "deepseekv4flashx,deepseekv4flash0731"},
 		}
 
-		ch, modelName, err := nonAutoDistribute(context.Background(), 999, "deepseek-v4-flash", channels)
+		ch, modelName, err := nonAutoDistribute(context.Background(), AffinityScope{UserID: 999}, "deepseek-v4-flash", channels)
 		So(err, ShouldBeNil)
 		So(ch.Id, ShouldEqual, 3)
 		So(modelName, ShouldEqual, "deepseek-v4-flash-0731")

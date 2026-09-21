@@ -206,6 +206,8 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 
 	// do request
 	resp, err := adaptor.DoRequest(c, meta, requestBody)
+	// sticky 在 DoRequest 内部改写 meta.ChannelId；返回后记录实际服务渠道供归因使用
+	recordActualChannel(c, meta)
 	if err != nil {
 		rollbackImagePreConsumedQuota(ctx, meta.UserId)
 		logger.Log.Errorf("[%s] %+v", "do_request_failed", err)

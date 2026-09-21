@@ -99,7 +99,7 @@ My API は One API を基盤に大規模なリファクタリングと機能強�
 
 チャネル選択は単純なラウンドロビンやランダムではなく、3つの戦略が協調して動作します。
 
-**アフィニティ**: 各 `(ユーザー, モデル)` のペアについて前回成功したチャネルを記憶し、TTL（デフォルト 300 秒）内は同じチャネルを優先的に再利用します。マルチターン会話のコンテキスト一貫性を保つための仕組みです。
+**アフィニティ**: 非 auto モードでは、前回成功したチャネルを **turn → session → user** の階層キーで優先的に再利用します。turn 層は 1 回の送信内で一定のヘッダ（`X-Conversation-Request-Id` → `X-Query-Id` → `X-Root-Request-Id`；存在しなければランダム id は生成しない）を使用します。これら 3 つのヘッダは主要なコーディング agent では実際には送信されておらず、実質的な主な恩恵は session 層にあります。session 層は会話レベルのヘッダ（`conversation_id` → `session_id` → `X-Conversation-Id` → `X-Session-Id` → `Session-Id` → `Thread-Id` → `X-Parent-Session-Id` → `X-Claude-Code-Session-Id` → `X-Opencode-Session` → `X-Litellm-Session-Id` → `Acp-Connection-Id` → `Acp-Session-Id`）を使用し、いずれも存在しない場合は `userId` にフォールバックします（旧動作）。セッション識別子はまずリクエストヘッダから取得し、ヘッダがすべて取得できない場合は JSON リクエストボディから補完取得します（`litellm_session_id` / `session_id` / `conversation_id` / `metadata.cline_task_id` のうち最初に非空のもの；JSON の POST/PUT/PATCH のみ）。スイッチ `AFFINITY_BODY_SESSION_ID`（デフォルト有効、`false` で無効）で制御されます。3 層の TTL はそれぞれ 120 / 1800 / 300 秒です（`AFFINITY_EXPIRE_SECONDS`=300 はユーザー層）。`X-Request-Id` / `X-Client-Request-Id` の意味はクライアントによって異なり（`X-Client-Request-Id` は Codex CLI では実際には thread id）、turn 相当とは限らないため、いずれも turn キーとしては使いません。アフィニティの実効率は `AFFINITY_STATS_INTERVAL_SECONDS` サマリログで観測できます（各ウィンドウで turn/session/user の命中・fallback・miss の 5 区分分布と、未命中時のヘッダ名サンプリングを出力）。ただし命中には「キーは一致したがチャネルが候補集合になく加重ランダムにフォールバックした」fallback 区分は含まれません。これを命中に算入すると改造効果を過大評価します。
 
 **クールダウン**: チャネルが失敗すると直ちにクールダウン期間（デフォルト 600 秒）に入り、その間は候補リストから除外されます。トラフィックが障害チャネルに流れ続けるのを防ぎます。
 
@@ -381,7 +381,13 @@ graph LR
 | `CHANNEL_UPDATE_FREQUENCY` | チャネル残高の定期更新間隔（分） | なし（更新しない） |
 | `CHANNEL_TEST_FREQUENCY` | チャネル可用性の定期テスト間隔（分） | なし（テストしない） |
 | `CHANNEL_COOLDOWN_SECONDS` | チャネル失敗後のクールダウン期間（秒） | `600` |
-| `AFFINITY_EXPIRE_SECONDS` | ユーザー・モデル・チャネルのアフィニティ TTL（秒） | `300` |
+| `AFFINITY_EXPIRE_SECONDS` | ユーザー層（フォールバック）のアフィニティ TTL（秒）；turn/session 層は下の 2 行を参照 | `300` |
+| `AFFINITY_KEY_MODE` | アフィニティキーモード：`auto` = turn→session→user 階層キー；`user` = 旧動作（`(ユーザー, モデル)`）に戻す | `auto` |
+| `AFFINITY_TURN_EXPIRE_SECONDS` | turn 層（1 送信内）のアフィニティ TTL（秒） | `120` |
+| `AFFINITY_SESSION_EXPIRE_SECONDS` | session 層（会話）のアフィニティ TTL（秒） | `1800` |
+| `AFFINITY_MAX_ENTRIES` | アフィニティテーブルの容量上限。上限到達時はまず期限切れを消去し、それでも超過なら最も早く期限切れする約 5% を排除。`<= 0` の場合はデフォルトの 20000 に固定（「無制限」ではなくなる） | `20000` |
+| `AFFINITY_STATS_INTERVAL_SECONDS` | アフィニティ命中分布サマリログの出力間隔（秒）。`<= 0` で無効（無効時は計数・サンプリング・割当ともゼロ）。ログは候補ヘッダの名前のみ記録し、値は絶対に記録しない | `300` |
+| `AFFINITY_BODY_SESSION_ID` | session ヘッダがすべて取得できない場合、JSON リクエストボディからセッション識別子を補完取得する（`litellm_session_id` / `session_id` / `conversation_id` / `metadata.cline_task_id` など）。JSON の POST/PUT/PATCH のみ。`false` で無効 | `true`（有効） |
 | `POLLING_INTERVAL` | バッチ更新/テスト時のリクエスト間隔（秒） | なし |
 | `ENABLE_METRIC` | 成功率に基づくチャネル自動無効化を有効化 | `false` |
 | `METRIC_QUEUE_SIZE` | 成功率統計キューサイズ | `10` |
@@ -404,6 +410,7 @@ graph LR
 | `LOG_CLEAN_HOURS` | ログ保持期間（時間） | `168` |
 | `LOG_CLEAN_BODIES_HOURS` | リクエスト/レスポンスボディの保持期間（時間） | `4` |
 | `MAX_LOGGED_BODY_SIZE` | 記録するリクエストボディの最大サイズ（バイト） | `2097152`（2MB） |
+| `PANIC_LOG_BODY_MAX_BYTES` | panic 復帰ログに出力するリクエストボディの最大バイト数。上限を超える場合は切り詰め、元の全長を注記する。`0` にするとボディ内容は一切記録せず（長さのみ記録）。**注意**：本項目は `MAX_LOGGED_BODY_SIZE` とは別のスイッチです。後者は消費ログ（デフォルト 2MB）を制御し、本項目は panic 復帰ログのみを制御します。panic ログは長期保存されたり外部へ共有（issue への添付等）されたりすることが多いため、デフォルトはより保守的に設定されています。`0` にするとボディ内容は完全に記録されません。 | `256` |
 
 **セキュリティとレート制限:**
 

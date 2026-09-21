@@ -25,6 +25,8 @@ func RelayProxyHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	adaptor.Init(meta)
 
 	resp, err := adaptor.DoRequest(c, meta, c.Request.Body)
+	// sticky 在 DoRequest 内部改写 meta.ChannelId；返回后记录实际服务渠道供归因使用
+	recordActualChannel(c, meta)
 	if err != nil {
 		logger.Log.Errorf("[%s] %+v", "do_request_failed", err)
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)

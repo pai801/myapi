@@ -198,7 +198,7 @@ func resolveSpecificChannelModel(channel *model.Channel, requestModel string) st
 	return requestModel
 }
 
-func nonAutoDistribute(ctx context.Context, userId int, requestModel string, channels []*model.Channel) (*model.Channel, string, error) {
+func nonAutoDistribute(ctx context.Context, scope AffinityScope, requestModel string, channels []*model.Channel) (*model.Channel, string, error) {
 	exactMatches, prefixMatches, alias := matchChannelsByAlias(requestModel, channels)
 	if len(exactMatches) == 0 && len(prefixMatches) == 0 {
 		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
@@ -213,9 +213,11 @@ func nonAutoDistribute(ctx context.Context, userId int, requestModel string, cha
 
 	var ch *model.Channel
 
-	// 亲和命中优先：先在 exact 集找、再在 prefix 集找；都没有才在 primary 集内 weighted 选择
-	if affChId, ok := AffinityGlobal.Get(userId, requestModel); ok {
-		logger.Log.Debugf("nonAutoDistribute: affinity hit for user %d model %s -> channel #%d", userId, requestModel, affChId)
+	// 亲和命中优先：按 scope 的候选键（细 → 粗）依次查，先在 exact 集找、再在 prefix 集找；
+	// 都没有才在 primary 集内 weighted 选择。日志只打层级名，绝不打印原始 turn / session id。
+	affChId, hitLevel, hasAffinity := AffinityGlobal.Get(scope.Keys(requestModel))
+	if hasAffinity {
+		logger.Log.Debugf("nonAutoDistribute: affinity hit level=%s for user %d model %s -> channel #%d", hitLevel.String(), scope.UserID, requestModel, affChId)
 		for _, c := range exactMatches {
 			if c.Id == affChId {
 				ch = c
@@ -231,15 +233,29 @@ func nonAutoDistribute(ctx context.Context, userId int, requestModel string, cha
 			}
 		}
 		if ch == nil {
-			logger.Log.Debugf("nonAutoDistribute: affinity channel #%d not in matched set, falling back to weighted select", affChId)
+			logger.Log.Debugf("nonAutoDistribute: affinity channel #%d (level=%s) not in matched set, falling back to weighted select", affChId, hitLevel.String())
 		}
 	} else {
-		logger.Log.Debugf("nonAutoDistribute: no affinity for user %d model %s, using weighted select", userId, requestModel)
+		logger.Log.Debugf("nonAutoDistribute: no affinity for user %d model %s, using weighted select", scope.UserID, requestModel)
+	}
+
+	// 亲和观测埋点：三档互斥且完备，必须在 weightedRandomSelect 回落**之前**判定（此后 ch 会被兜底填充）：
+	//   - 未命中：无亲和键命中；
+	//   - 命中：亲和键命中且其渠道在候选集内被选中（亲和真正生效）；
+	//   - 回落：亲和键命中但渠道不在候选集，最终加权随机（键命中 ≠ 生效，单列以防高估）。
+	// 口径为「选路尝试次数」：controller/relay.go 重试路径每次重试都重新选路并各计一次。
+	switch {
+	case !hasAffinity:
+		affinityStatsGlobal.recordMiss(scope.reqHeaders)
+	case ch != nil:
+		affinityStatsGlobal.recordHit(hitLevel)
+	default:
+		affinityStatsGlobal.recordFallback()
 	}
 
 	if ch == nil {
 		ch = weightedRandomSelect(primary)
-		logger.Log.Debugf("nonAutoDistribute: weighted select chose channel #%d for user %d model %s", ch.Id, userId, requestModel)
+		logger.Log.Debugf("nonAutoDistribute: weighted select chose channel #%d for user %d model %s", ch.Id, scope.UserID, requestModel)
 	}
 	if ch == nil {
 		return nil, "", fmt.Errorf("no channel found for model %s", requestModel)
@@ -250,7 +266,7 @@ func nonAutoDistribute(ctx context.Context, userId int, requestModel string, cha
 	}
 	models := ch.GetModels()
 	if targedIdx < len(models) {
-		logger.Log.Debugf("nonAutoDistribute: selected channel #%d model %s for user %d request %s", ch.Id, models[targedIdx], userId, requestModel)
+		logger.Log.Debugf("nonAutoDistribute: selected channel #%d model %s for user %d request %s", ch.Id, models[targedIdx], scope.UserID, requestModel)
 		return ch, models[targedIdx], nil
 	}
 	return nil, "", fmt.Errorf("no model found for alias %s", alias)
@@ -268,6 +284,13 @@ func Distribute() func(c *gin.Context) {
 		if tokenGroup == "" {
 			tokenGroup = "default"
 		}
+
+		// 统一解析一次亲和 scope 并写入上下文：指定渠道分支虽不走 SelectChannel，
+		// 但后续 relay 成功时仍要按 KeysToSet 写入全部可用层，故无条件 Set。
+		scope := ResolveAffinityScope(c)
+		// 与 tokenGroup 同源，避免亲和键命名空间与实际选路分组分裂
+		scope.Group = tokenGroup
+		c.Set(ctxkey.AffinityScope, scope)
 
 		var channel *model.Channel
 		var requestModel string
@@ -299,7 +322,7 @@ func Distribute() func(c *gin.Context) {
 				requestModel = "auto"
 				c.Set(ctxkey.RequestModel, requestModel)
 			}
-			channel, suggestedModel, err = SelectChannel(ctx, tokenGroup, requestModel, -1, userId)
+			channel, suggestedModel, err = SelectChannel(ctx, tokenGroup, requestModel, -1, scope)
 			if err != nil {
 				abortWithMessage(c, http.StatusServiceUnavailable, err.Error())
 				return
@@ -380,18 +403,18 @@ func filterLastFailedChannel(channels []*model.Channel, lastFailedChannelId int)
 	return result
 }
 
-func SelectChannel(ctx context.Context, group, requestModel string, lastFailedChannelId int, userId int) (*model.Channel, string, error) {
+func SelectChannel(ctx context.Context, group, requestModel string, lastFailedChannelId int, scope AffinityScope) (*model.Channel, string, error) {
 	channels := model.CacheGetGroupChannels(group)
 	channels = filterCoolingChannels(channels, requestModel)
 	channels = filterLastFailedChannel(channels, lastFailedChannelId)
 	if len(channels) == 0 {
 		return nil, "", fmt.Errorf("no channels available for retry in group %s", group)
 	}
-	logger.Log.Debugf("SelectChannel: group=%s model=%s userId=%d candidates=%d", group, requestModel, userId, len(channels))
+	logger.Log.Debugf("SelectChannel: group=%s model=%s userId=%d candidates=%d", group, requestModel, scope.UserID, len(channels))
 	if requestModel == "auto" {
 		return autoDistribute(ctx, group, channels)
 	} else {
-		return nonAutoDistribute(ctx, userId, requestModel, channels)
+		return nonAutoDistribute(ctx, scope, requestModel, channels)
 	}
 }
 

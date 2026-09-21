@@ -99,7 +99,7 @@ My API 在 One API 的基础上进行了大量重构和功能增强，以下是�
 
 渠道选择不再是简单的轮询或随机，而是三层策略协同工作：
 
-**亲和性（Affinity）**：记住每个 `(用户, 模型)` 对上次成功使用的渠道，在 TTL（默认 300 秒）内优先复用同一渠道，保证多轮对话的上下文一致性。
+**亲和性（Affinity）**：非 auto 模式下按 **turn → session → user** 三级键优先复用上次成功使用的渠道。turn 层取轮级恒定头（`X-Conversation-Request-Id` → `X-Query-Id` → `X-Root-Request-Id`，取不到不生成随机 id）；这三个头在主流编程 agent 上均未见实际发送，因此真实收益主要发生在 session 层。session 层取会话级头（`conversation_id` → `session_id` → `X-Conversation-Id` → `X-Session-Id` → `Session-Id` → `Thread-Id` → `X-Parent-Session-Id` → `X-Claude-Code-Session-Id` → `X-Opencode-Session` → `X-Litellm-Session-Id` → `Acp-Connection-Id` → `Acp-Session-Id`），都无则降级 `userId` 兜底（旧行为）。会话标识优先取请求头，全部未命中时再尝试从 JSON 请求体补取（`litellm_session_id` / `session_id` / `conversation_id` / `metadata.cline_task_id`，取首个非空），仅限 JSON 的 POST/PUT/PATCH，由 `AFFINITY_BODY_SESSION_ID` 控制（默认开启，置 `false` 关闭）。三层 TTL 分别为 120 / 1800 / 300 秒（`AFFINITY_EXPIRE_SECONDS`=300 为用户层）。`X-Request-Id` / `X-Client-Request-Id` 的语义随客户端而变（`X-Client-Request-Id` 在 Codex CLI 下实为 thread id），不可假定为轮级，故一律不收作 turn 键。亲和生效率可通过 `AFFINITY_STATS_INTERVAL_SECONDS` 汇总日志观测（每窗口输出 turn/session/user 命中、fallback、miss 五档分布及未命中候选头名采样）；注意命中不含「键命中但渠道不在候选集、已回落加权随机」的 fallback 档，否则会高估改造效果。
 
 **冷却机制（Cooldown）**：渠道失败后立即进入冷却期（默认 600 秒），冷却期间被排除在候选列表之外，避免将流量持续打入故障渠道。客户端请求形态类失败（参数/格式非法等）不计入渠道健康惩罚。
 
@@ -383,7 +383,13 @@ graph LR
 | `CHANNEL_UPDATE_FREQUENCY` | 定期更新渠道余额（分钟） | 无（不更新） |
 | `CHANNEL_TEST_FREQUENCY` | 定期检查渠道可用性（分钟） | 无（不检查） |
 | `CHANNEL_COOLDOWN_SECONDS` | 渠道失败后冷却期（秒） | `600` |
-| `AFFINITY_EXPIRE_SECONDS` | 用户-模型-渠道亲和性 TTL（秒） | `300` |
+| `AFFINITY_EXPIRE_SECONDS` | 用户层（兜底）亲和性 TTL（秒）；turn/session 层见下两行 | `300` |
+| `AFFINITY_KEY_MODE` | 亲和键模式：`auto` = turn→session→user 分层键；`user` = 回退旧行为（`(用户,模型)`） | `auto` |
+| `AFFINITY_TURN_EXPIRE_SECONDS` | turn 层（轮级）亲和性 TTL（秒） | `120` |
+| `AFFINITY_SESSION_EXPIRE_SECONDS` | session 层（会话级）亲和性 TTL（秒） | `1800` |
+| `AFFINITY_MAX_ENTRIES` | 亲和表容量上限，触顶先清过期、仍超限淘汰最早过期约 5%；`<=0` 时按默认值 20000 兜底（不再表示不限） | `20000` |
+| `AFFINITY_STATS_INTERVAL_SECONDS` | 亲和命中分布统计汇总日志的输出间隔（秒）；`<=0` 关闭（关闭态零计数零采样零分配）；日志只记候选头名、绝不记头值 | `300` |
+| `AFFINITY_BODY_SESSION_ID` | session 层头全部未命中时，从 JSON 请求体补取会话标识（`litellm_session_id` / `session_id` / `conversation_id` / `metadata.cline_task_id` 等稳定字段）；仅限 JSON 的 POST/PUT/PATCH；置 `false` 关闭 | `true`（开启） |
 | `POLLING_INTERVAL` | 批量更新/测试时的请求间隔（秒） | 无 |
 | `ENABLE_METRIC` | 启用成功率驱动的渠道自动禁用 | `false` |
 | `METRIC_QUEUE_SIZE` | 成功率统计队列大小 | `10` |
@@ -406,6 +412,7 @@ graph LR
 | `LOG_CLEAN_HOURS` | 日志保留时长（小时） | `168` |
 | `LOG_CLEAN_BODIES_HOURS` | 请求/响应体保留时长（小时） | `4` |
 | `MAX_LOGGED_BODY_SIZE` | 最大记录请求体大小（字节） | `2097152`（2MB） |
+| `PANIC_LOG_BODY_MAX_BYTES` | panic 恢复日志中打印请求体的最大字节数，超出截断并标注原始总长度；设为 `0` 则完全不记录请求体内容（只记长度）。**注意**：与 `MAX_LOGGED_BODY_SIZE` 不是同一个开关——后者管消费日志（默认 2MB），本项只管 panic 恢复日志。panic 日志常被长期留存或外传，故默认更保守；设 `0` 可完全不记录请求体内容。 | `256` |
 
 **安全与限流：**
 
