@@ -247,6 +247,13 @@
         "delete": "Delete this header",
         "invalid_name": "Invalid header name \"{{name}}\": only letters, digits and these symbols are allowed: !#$%&'*+-.^_`|~",
         "duplicate_name": "Duplicate header name \"{{name}}\" (case-insensitive)"
+      },
+      "custom_config": {
+        "title": "Custom Configuration",
+        "description": "Only enter configuration keys supported by this channel. Unsupported keys have no effect. This editor owns all extension keys; saving it empty removes existing extension keys.",
+        "invalid_json": "Custom configuration must be valid JSON.",
+        "not_object": "The top level of custom configuration must be a JSON object.",
+        "conflict": "Custom configuration key \"{{key}}\" conflicts with a system or custom-request-header setting. Remove this key."
       }
     }
   },

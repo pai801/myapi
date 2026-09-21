@@ -69,6 +69,7 @@ func withStatsClock(t *testing.T, now func() time.Time) {
 func resetGlobalAffinityStats() {
 	s := affinityStatsGlobal
 	s.turnHits.Store(0)
+	s.turnDerivedHits.Store(0)
 	s.sessionHits.Store(0)
 	s.userHits.Store(0)
 	s.fallbacks.Store(0)
@@ -97,10 +98,10 @@ func TestAffinityStats_HitCountsPerLevelIndependent(t *testing.T) {
 	withStatsInterval(t, 3600)
 	s := newAffinityStats()
 
-	s.recordHit(AffinityLevelTurn)
-	s.recordHit(AffinityLevelTurn)
-	s.recordHit(AffinityLevelSession)
-	s.recordHit(AffinityLevelUser)
+	s.recordHit(AffinityLevelTurn, false)
+	s.recordHit(AffinityLevelTurn, false)
+	s.recordHit(AffinityLevelSession, false)
+	s.recordHit(AffinityLevelUser, false)
 
 	require.Equal(t, int64(2), s.turnHits.Load(), "turn 命中应计 2 次")
 	require.Equal(t, int64(1), s.sessionHits.Load(), "session 命中应计 1 次，不受 turn 计数污染")
@@ -153,11 +154,11 @@ func TestAffinityStats_ConcurrentCounting(t *testing.T) {
 			defer wg.Done()
 			switch i % 3 {
 			case 0:
-				s.recordHit(AffinityLevelTurn)
+				s.recordHit(AffinityLevelTurn, false)
 			case 1:
-				s.recordHit(AffinityLevelSession)
+				s.recordHit(AffinityLevelSession, false)
 			default:
-				s.recordHit(AffinityLevelUser)
+				s.recordHit(AffinityLevelUser, false)
 			}
 		}(i)
 	}
@@ -187,14 +188,14 @@ func TestAffinityStats_FlushResetsCountersAndLogs(t *testing.T) {
 	withStatsClock(t, func() time.Time { return fake })
 
 	s := newAffinityStats()
-	s.recordHit(AffinityLevelTurn)
-	s.recordHit(AffinityLevelSession)
+	s.recordHit(AffinityLevelTurn, false)
+	s.recordHit(AffinityLevelSession, false)
 	s.recordMiss(nil)
 	// 首个埋点只打点窗口起点，此时不应输出
 	require.NotContains(t, captured.joined(), "affinity stats", "周期未到不得输出")
 
 	fake = fake.Add(time.Second) // 到达 1s 周期
-	s.recordHit(AffinityLevelUser)
+	s.recordHit(AffinityLevelUser, false)
 
 	require.Equal(t, int64(0), s.turnHits.Load(), "输出后 turn 计数应重置为 0")
 	require.Equal(t, int64(0), s.sessionHits.Load(), "输出后 session 计数应重置为 0")
@@ -204,6 +205,7 @@ func TestAffinityStats_FlushResetsCountersAndLogs(t *testing.T) {
 	out := captured.joined()
 	require.Contains(t, out, "affinity stats", "到点应输出一行汇总")
 	require.Contains(t, out, "turn=1", "汇总应含本窗口 turn 命中数")
+	require.Contains(t, out, "turn_derived=0", "汇总应含派生 turn 独立字段，未派生时为 0")
 	require.Contains(t, out, "session=1", "汇总应含本窗口 session 命中数")
 	require.Contains(t, out, "user=1", "汇总应含本窗口 user 命中数")
 	require.Contains(t, out, "miss=1", "汇总应含本窗口 miss 数")
@@ -241,7 +243,7 @@ func TestAffinityStats_DisabledWhenIntervalNonPositive(t *testing.T) {
 
 	s := newAffinityStats()
 	// 关闭态：埋点在最入口直接返回，既不计数也不采样。
-	s.recordHit(AffinityLevelTurn)
+	s.recordHit(AffinityLevelTurn, false)
 	s.recordFallback()
 	h := http.Header{}
 	for _, name := range affinityCandidateHeaders {
@@ -274,13 +276,13 @@ func TestAffinityStats_LazyFlushOnlyAfterInterval(t *testing.T) {
 	withStatsClock(t, func() time.Time { return fake })
 
 	s := newAffinityStats()
-	s.recordHit(AffinityLevelTurn) // 初始化窗口
+	s.recordHit(AffinityLevelTurn, false) // 初始化窗口
 	fake = fake.Add(5 * time.Second)
-	s.recordHit(AffinityLevelTurn) // 未到 10s：不输出
+	s.recordHit(AffinityLevelTurn, false) // 未到 10s：不输出
 	require.Equal(t, "", captured.joined(), "周期未满不得输出")
 
 	fake = fake.Add(6 * time.Second) // 累计 11s >= 10s
-	s.recordHit(AffinityLevelTurn)
+	s.recordHit(AffinityLevelTurn, false)
 	require.Contains(t, captured.joined(), "affinity stats", "周期届满后的首个埋点应输出")
 	require.Contains(t, captured.joined(), "turn=3", "汇总应含窗口内全部 3 次 turn 命中")
 }
@@ -295,7 +297,7 @@ func TestNonAutoDistribute_RecordsAffinityStats(t *testing.T) {
 	// 命中：turn 层
 	hitScope := AffinityScope{UserID: 88888, Group: "g", TurnID: "t1", SessionID: "s1"}
 	hitKeys := hitScope.Keys(modelName)
-	require.Len(t, hitKeys, 3, "前置条件：三层键齐全")
+	require.Len(t, hitKeys, 2, "前置条件：有 session 时键序列为 turn + session")
 	AffinityGlobal.Set(hitKeys[0], 1) // turn 层指向渠道 1
 	defer AffinityGlobal.Remove(hitKeys[0])
 
@@ -337,7 +339,7 @@ func TestAffinityStats_ThreeTiersAreIndependent(t *testing.T) {
 	withStatsInterval(t, 3600)
 	s := newAffinityStats()
 
-	s.recordHit(AffinityLevelTurn)
+	s.recordHit(AffinityLevelTurn, false)
 	s.recordFallback()
 	s.recordFallback()
 	s.recordMiss(nil)
@@ -359,7 +361,7 @@ func TestNonAutoDistribute_RecordsFallbackWhenAffinityChannelNotInCandidates(t *
 	modelName := "gpt4turbofallback"
 	scope := AffinityScope{UserID: 77777, Group: "g", TurnID: "t1", SessionID: "s1"}
 	keys := scope.Keys(modelName)
-	require.Len(t, keys, 3, "前置条件：三层键齐全")
+	require.Len(t, keys, 2, "前置条件：有 session 时键序列为 turn + session")
 	// 亲和键指向渠道 999，但候选集里只有渠道 3 —— 键命中却不生效，必须回落加权随机
 	AffinityGlobal.Set(keys[0], 999)
 	defer AffinityGlobal.Remove(keys[0])
@@ -386,11 +388,11 @@ func TestAffinityStats_FlushLogsActualWindowNotConfiguredInterval(t *testing.T) 
 	withStatsClock(t, func() time.Time { return fake })
 
 	s := newAffinityStats()
-	s.recordHit(AffinityLevelTurn) // 初始化窗口起点
+	s.recordHit(AffinityLevelTurn, false) // 初始化窗口起点
 
 	// 空闲 42s 后才有下一个埋点触发 flush：实际窗口 42s，远大于配置的 5s
 	fake = fake.Add(42 * time.Second)
-	s.recordHit(AffinityLevelTurn)
+	s.recordHit(AffinityLevelTurn, false)
 
 	out := captured.joined()
 	require.Contains(t, out, "window 42s", "应输出实际窗口时长 42s")
@@ -406,11 +408,11 @@ func TestAffinityStats_FlushLogExplainsEachTier(t *testing.T) {
 	withStatsClock(t, func() time.Time { return fake })
 
 	s := newAffinityStats()
-	s.recordHit(AffinityLevelTurn)
+	s.recordHit(AffinityLevelTurn, false)
 	s.recordFallback()
 	s.recordMiss(nil)
 	fake = fake.Add(2 * time.Second)
-	s.recordHit(AffinityLevelUser) // 到点触发输出
+	s.recordHit(AffinityLevelUser, false) // 到点触发输出
 
 	out := captured.joined()
 	require.Contains(t, out, "hit{", "汇总应含命中档")
@@ -420,4 +422,110 @@ func TestAffinityStats_FlushLogExplainsEachTier(t *testing.T) {
 	require.Contains(t, out, "仅头名不记值", "汇总应写明采样只记头名")
 	require.Contains(t, out, "filterLastFailedChannel", "fallback 口径说明不得丢失")
 	require.Contains(t, out, "仅非 auto", "统计范围说明不得丢失")
+}
+
+// --- 13. 派生 turn 独立档位：真实 turn 与派生 turn 各自计数（Task 5.1/5.2 契约）---
+
+func TestAffinityStats_DerivedTurnBucket(t *testing.T) {
+	// G: 依次记录真实 turn 与派生 turn 命中 | W: recordHit | T: turnHits 与 turnDerivedHits
+	// 各自递增且 session/user/fallback/miss 不变。
+	withStatsInterval(t, 3600)
+	s := newAffinityStats()
+
+	s.recordHit(AffinityLevelTurn, false) // 真实 turn 头命中
+	s.recordHit(AffinityLevelTurn, true)  // body 派生 turn 命中
+	s.recordHit(AffinityLevelTurn, true)
+
+	require.Equal(t, int64(1), s.turnHits.Load(), "真实 turn 头命中应只计 1 次，不得被派生命中污染")
+	require.Equal(t, int64(2), s.turnDerivedHits.Load(), "派生 turn 命中应独立计 2 次")
+	require.Equal(t, int64(0), s.sessionHits.Load(), "turn 层命中不得污染 session 档")
+	require.Equal(t, int64(0), s.userHits.Load(), "turn 层命中不得污染 user 档")
+	require.Equal(t, int64(0), s.fallbacks.Load(), "命中不得计入 fallback")
+	require.Equal(t, int64(0), s.misses.Load(), "命中不得计入 miss")
+
+	// 非 turn 层忽略 derived：session/user 层不存在派生语义，绝不能进入派生档位。
+	s.recordHit(AffinityLevelSession, true)
+	s.recordHit(AffinityLevelUser, true)
+	require.Equal(t, int64(1), s.sessionHits.Load(), "session 层命中应进 session 档，忽略 derived")
+	require.Equal(t, int64(1), s.userHits.Load(), "user 层命中应进 user 档，忽略 derived")
+	require.Equal(t, int64(2), s.turnDerivedHits.Load(), "非 turn 层不得进入派生档位（六档互斥）")
+}
+
+func TestAffinityStats_FlushReportsDerivedTurnSeparately(t *testing.T) {
+	// G: 六档均有已知计数且 miss headers 含秘密值 | W: flush 固定窗口 |
+	// T: 日志含 turn_derived 独立字段、六档值正确、计数清零、仅含头名不含任何头值。
+	captured := withInfofCapture(t)
+	withStatsInterval(t, 3600)
+	s := newAffinityStats()
+
+	s.recordHit(AffinityLevelTurn, false) // turn=1
+	s.recordHit(AffinityLevelTurn, true)  // turn_derived=2
+	s.recordHit(AffinityLevelTurn, true)
+	s.recordHit(AffinityLevelSession, false) // session=1
+	s.recordHit(AffinityLevelUser, false)    // user=1
+	s.recordFallback()                       // fallback=1
+	h := http.Header{}
+	h.Set("X-Conversation-Request-Id", "SECRET-TURN-VALUE")
+	h.Set("X-Session-Id", "SECRET-SESSION-VALUE")
+	s.recordMiss(h) // miss=1，采样头名
+
+	s.flush(7)
+
+	out := captured.joined()
+	require.Contains(t, out, "window 7s", "应输出传入的窗口时长")
+	// 六档值逐一核对。
+	require.Contains(t, out, "turn=1", "turn 档计数应为 1")
+	require.Contains(t, out, "turn_derived=2", "派生 turn 档计数应为 2")
+	require.Contains(t, out, "session=1", "session 档计数应为 1")
+	require.Contains(t, out, "user=1", "user 档计数应为 1")
+	require.Contains(t, out, "fallback=1", "fallback 档计数应为 1")
+	require.Contains(t, out, "miss=1", "miss 档计数应为 1")
+	// turn_derived 必须紧跟 turn：两字段之间不得插入其他档位。
+	require.Contains(t, out, "turn=1, turn_derived=2", "turn_derived 必须固定紧跟 turn")
+	// 计数清零。
+	require.Equal(t, int64(0), s.turnHits.Load(), "flush 后 turn 计数应清零")
+	require.Equal(t, int64(0), s.turnDerivedHits.Load(), "flush 后派生 turn 计数应清零")
+	require.Equal(t, int64(0), s.sessionHits.Load(), "flush 后 session 计数应清零")
+	require.Equal(t, int64(0), s.userHits.Load(), "flush 后 user 计数应清零")
+	require.Equal(t, int64(0), s.fallbacks.Load(), "flush 后 fallback 计数应清零")
+	require.Equal(t, int64(0), s.misses.Load(), "flush 后 miss 计数应清零")
+	// 红线：只记头名，绝不记头值。
+	require.Contains(t, out, "X-Conversation-Request-Id", "汇总应出现头名")
+	require.Contains(t, out, "X-Session-Id", "汇总应出现头名")
+	require.NotContains(t, out, "SECRET-TURN-VALUE", "红线：汇总绝不能出现头值")
+	require.NotContains(t, out, "SECRET-SESSION-VALUE", "红线：汇总绝不能出现头值")
+}
+
+// --- 14. 端到端：派生 turn 命中只进派生档（Task 5.3 契约）---
+
+func TestNonAutoDistribute_RecordsDerivedTurnHit(t *testing.T) {
+	// G: 派生 turn key 映射到候选渠道且 scope.turnDerived 为 true | W: nonAutoDistribute |
+	// T: 选中该渠道并只递增 turnDerivedHits；真实 turn、fallback 与 miss 均不递增。
+	withStatsInterval(t, 3600)
+	resetGlobalAffinityStats()
+	defer resetGlobalAffinityStats()
+
+	modelName := "gpt4turboderivedstats"
+	scope := AffinityScope{
+		UserID: 66666, Group: "g", TurnID: "derived-turn", SessionID: "s1",
+		turnDerived: true,
+	}
+	keys := scope.Keys(modelName)
+	require.Len(t, keys, 2, "前置条件：有 session 时键序列为 turn + session")
+	require.Equal(t, AffinityLevelTurn, keys[0].Level, "前置条件：首个键为 turn 层")
+	AffinityGlobal.Set(keys[0], 1) // turn 层指向候选渠道 1
+	defer AffinityGlobal.Remove(keys[0])
+
+	channels := []*model.Channel{{Name: "A", Id: 1, Models: modelName, ModelsAlias: modelName}}
+	ch, _, err := nonAutoDistribute(context.Background(), scope, modelName, channels)
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+	require.Equal(t, 1, ch.Id, "应选中亲和键映射的候选渠道")
+
+	require.Equal(t, int64(1), affinityStatsGlobal.turnDerivedHits.Load(), "派生 turn 命中应进派生档")
+	require.Equal(t, int64(0), affinityStatsGlobal.turnHits.Load(), "派生命中不得混入真实 turn 档")
+	require.Equal(t, int64(0), affinityStatsGlobal.sessionHits.Load(), "派生命中不得混入 session 档")
+	require.Equal(t, int64(0), affinityStatsGlobal.userHits.Load(), "派生命中不得混入 user 档")
+	require.Equal(t, int64(0), affinityStatsGlobal.fallbacks.Load(), "真正选中不得计入 fallback")
+	require.Equal(t, int64(0), affinityStatsGlobal.misses.Load(), "命中不得计入 miss")
 }

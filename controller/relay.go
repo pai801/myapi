@@ -187,8 +187,10 @@ func resolveActualChannelName(c *gin.Context, fallback string) string {
 // recordSuccessAttribution 记录一次成功转发的归因：亲和写入 + 冷却清零，统一按「实际服务渠道」。
 // 返回实际归因渠道，供调用方上报监控（monitor.Emit）。首轮与重试两处成功分支共用，避免归因口径分裂。
 //
-// 亲和写入全部可用层（turn + session + user），绝不能只写 keys[0]（最细层）：turn id 每轮换新，
-// 只写 turn 会让下一轮 turn 键 miss、而 session / user 层从未写过也 miss，跨轮亲和彻底断链。
+// 亲和写入 KeysToSet 返回的全部可用层，绝不能只写 keys[0]（最细层）：turn id 每轮换新，
+// 只写 turn 会让下一轮 turn 键 miss、而 session（有会话时）/ user（无会话时）层从未写过也 miss，
+// 跨轮亲和彻底断链。有 session 且 AFFINITY_SESSION_EXCLUDES_USER 开启时不含 user 层（详见
+// middleware/affinity_scope.go KeysToSet）：避免 session 流量持续改写 user 键、把同用户所有会话收敛到同一渠道。
 // auto 请求走 autoDistribute、从不查亲和，写入只会产生死键，故跳过（ShouldRecordAffinity）。
 func recordSuccessAttribution(c *gin.Context, selectedChannelId int, requestModel string, scope middleware.AffinityScope) int {
 	actualChannelId := resolveActualChannelId(c, selectedChannelId)

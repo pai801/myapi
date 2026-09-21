@@ -55,6 +55,19 @@ type ChannelConfig struct {
 	Plugin            string `json:"plugin,omitempty"`
 	VertexAIProjectID string `json:"vertex_ai_project_id,omitempty"`
 	VertexAIADC       string `json:"vertex_ai_adc,omitempty"`
+	// Raw 保存 config JSON 的全量顶层键值，包含上方所有已知键，而不是仅保存未知键。
+	// 它只由 LoadConfig 填充，因 json:"-" 不参与 ChannelConfig 的 JSON 序列化。
+	// ChannelConfig 按值复制时 map 仍按引用共享，因此约定 Raw 为只读。
+	// 渠道适配器不得改写 Raw；需要修改时必须由适配器自行复制后再改。
+	//
+	// 新增 map 字段使 ChannelConfig 不再可比较：map 类型不可用 ==，任何 cfgA == cfgB 会编译失败。
+	// 引入前该结构体全为 string、可比较，这是对下游/未来代码的隐性 API 破坏。
+	//
+	// 已知不一致：middleware.SetupContextForSelectedChannel 中 Other 到
+	// APIVersion/LibraryID/Plugin 的兼容回填不写入 Raw（Raw 只反映原始 JSON，这是契约要求）。
+	// 因此同一 ChannelConfig 内可能出现 Config.APIVersion 与 Raw["api_version"] 不一致。
+	// 适配器若以 Raw 为准，须知晓该回填值不在 Raw 中。
+	Raw map[string]any `json:"-"`
 }
 
 // SimplifyModelName strips non-alphanumeric characters and lowercases the model name.
@@ -267,6 +280,17 @@ func (channel *Channel) LoadConfig() (ChannelConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
+	// 第一次解析成功后再用同一份文本形成全量键值视图；JSON null 会把 map 置为 nil，符合契约
+	var raw map[string]any
+	if rawErr := json.Unmarshal([]byte(channel.Config), &raw); rawErr != nil {
+		// 存在「第一次进结构体成功、第二次进 map[string]any 失败」的输入：
+		// 未知键的值超出 float64 范围时（如 1e400），第一次因结构体无该字段而忽略该键，
+		// 第二次报 UnmarshalTypeError 但仍会部分填充 map，导致 Raw 出现被静默降级的键值。
+		// 为保持「全有或全无」语义（Raw 键集合/值与原始 JSON 一致），失败时显式置 nil。
+		// 不向调用方返回该错误：调用方继续忽略 error，既有降级行为不变。
+		raw = nil
+	}
+	cfg.Raw = raw
 	return cfg, nil
 }
 

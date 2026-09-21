@@ -16,8 +16,10 @@ import (
 // 目的：上线后判断 turn → session → user 三级分层亲和改造是否真的生效、命中落在哪一层，
 // 以及未命中时客户端到底发了哪些候选头（据此判断还缺哪些头）。
 //
-// 计数分三档且互斥完备：命中（键命中且渠道在候选集内被选中）/ 回落（键命中但渠道不在候选集，
+// 计数分六档且互斥完备：turn 命中 / 派生 turn 命中 / session 命中 / user 命中 / 回落（键命中但渠道不在候选集，
 // 最终加权随机）/ 未命中（无键命中）。单列「回落」是因为键命中 ≠ 亲和生效，混计会高估改造效果。
+// 派生 turn 必须与真实 turn 头分档：真实 turn 头与 body 派生 turn 是两种不同来源，混在一档就无法判断
+// 「派生键是否真的轮内稳定复用」—— 这正是本次改造要验证的核心问题，也是把五档扩为六档的唯一目的。
 //
 // 约束：
 //   - 计数全部走 sync/atomic，热路径无锁，埋点开销可忽略；
@@ -25,9 +27,17 @@ import (
 //   - 不引入后台 goroutine（本项目反面教材见 relay/adaptor/chatgptsub/sticky.go 的 init() 无法停止的
 //     Cleanup goroutine）。到点输出采用「惰性检查 + CAS 抢占」，由计数埋点自身触发。
 type affinityStats struct {
-	turnHits    atomic.Int64
+	turnHits atomic.Int64
+
+	// turnDerivedHits 记录「派生 turn 命中」：turn 层键由 body 派生（非真实 turn 头）且其渠道
+	// 在候选集内被选中。与 turnHits 严格互斥 —— 同一次选路尝试只会进入其中一档，
+	// 因此单独观测即可回答「派生键是否真的轮内稳定复用」。
+	turnDerivedHits atomic.Int64
+
 	sessionHits atomic.Int64
-	userHits    atomic.Int64
+	// userHits 记录 user 层命中。注意：开启 AFFINITY_SESSION_EXCLUDES_USER（默认）后，有 session
+	// 的请求不再读写 user 键，故本档只反映无会话标识客户端（turn-only 等）的 user 层兜底命中。
+	userHits atomic.Int64
 
 	// fallbacks 记录「亲和键命中、但该渠道不在本次候选集内 → 回落加权随机」的次数。
 	// 必须与命中分开计数：键命中 ≠ 亲和生效，把此档混入命中会高估改造效果，
@@ -70,13 +80,21 @@ func affinityStatsEnabled() bool {
 
 // recordHit 记录一次亲和**真正生效**的命中：亲和键命中且其渠道在候选集内被选中。
 // 按命中层级分别计数（各层独立，互不污染）。
-func (s *affinityStats) recordHit(level AffinityLevel) {
+//
+// derived 仅在 level 为 turn 时有效：它表示该 turn 键来自 body 派生而非真实 turn 头。
+// 非 turn 层不存在派生语义，一律忽略 derived，绝不进入派生档位（保证六档互斥不变式）。
+func (s *affinityStats) recordHit(level AffinityLevel, derived bool) {
 	if !affinityStatsEnabled() {
 		return
 	}
 	switch level {
 	case AffinityLevelTurn:
-		s.turnHits.Add(1)
+		// 真实 turn 头与派生 turn 分档：混计会让「派生键是否稳定复用」无法判断。
+		if derived {
+			s.turnDerivedHits.Add(1)
+		} else {
+			s.turnHits.Add(1)
+		}
 	case AffinityLevelSession:
 		s.sessionHits.Add(1)
 	default:
@@ -148,24 +166,28 @@ func (s *affinityStats) maybeFlush() {
 
 // flush 读取并重置全部计数，输出一行汇总日志。
 //
-// 重置策略选「输出后清零」而非滚动窗口：计数键固定且数量极小（5 个计数 + 15 个头名），
+// 重置策略选「输出后清零」而非滚动窗口：计数键固定且数量极小（6 个计数 + 15 个头名），
 // 每个窗口相互独立、含义清晰；滚动窗口需要维护多桶状态，收益（平滑毛刺）对观测目的不必要。
 //
 // 每个计数器用 Swap(0) 原子「读并清零」，因此并发期间任何在 Swap 之前完成的 Add 都会被本窗口
 // 计入、不会丢失（跨计数器的快照不是同一瞬时，对分布观测可接受）。
 func (s *affinityStats) flush(windowSeconds int) {
 	turn := s.turnHits.Swap(0)
+	turnDerived := s.turnDerivedHits.Swap(0)
 	session := s.sessionHits.Swap(0)
 	user := s.userHits.Swap(0)
 	fallbacks := s.fallbacks.Swap(0)
 	misses := s.misses.Swap(0)
 
 	var b strings.Builder
-	// 窗口标签写实际时长；三档口径写清含义，不让人对着裸数字猜。
+	// 窗口标签写实际时长；六档口径写清含义，不让人对着裸数字猜。
 	b.WriteString("affinity stats (window ")
 	b.WriteString(strconv.Itoa(windowSeconds))
 	b.WriteString("s): hit{turn=")
 	b.WriteString(strconv.FormatInt(turn, 10))
+	// turn_derived 固定紧跟 turn：派生档与真实 turn 档相邻，便于一眼对照两者占比。
+	b.WriteString(", turn_derived=")
+	b.WriteString(strconv.FormatInt(turnDerived, 10))
 	b.WriteString(", session=")
 	b.WriteString(strconv.FormatInt(session, 10))
 	b.WriteString(", user=")

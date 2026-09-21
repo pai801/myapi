@@ -26,6 +26,20 @@ const MODEL_MAPPING_EXAMPLE = {
 // RFC 7230 tchar 子集：请求头名称允许字母、数字及 !#$%&'*+-.^_`|~（与后端 isValidHeaderName 对齐）。
 const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
 
+// 这些键由既有专属表单拥有（AWS/Vertex/Coze/Account ID 等），自定义配置编辑器必须排除，
+// 避免同一配置键出现两个编辑入口而产生所有权冲突。
+const SYSTEM_CONFIG_KEYS = [
+  'region',
+  'sk',
+  'ak',
+  'user_id',
+  'api_version',
+  'library_id',
+  'plugin',
+  'vertex_ai_project_id',
+  'vertex_ai_adc',
+];
+
 function type2secretPrompt(type, t) {
   switch (type) {
     case 15:
@@ -88,8 +102,15 @@ const EditChannel = () => {
   // 自定义请求头的行式编辑态：对象无法承载「多个空名行 / 重名行并存」，
   // 故 UI 用有序数组维护，加载时从 config 读取、提交时再折叠回对象写入 config。
   const [customHeaders, setCustomHeaders] = useState([{ name: '', value: '' }]);
+  // 自定义配置编辑器的格式化 JSON 文本，仅承载扩展键（系统键与 descriptor 请求头键由专属表单拥有）。
+  const [customConfigText, setCustomConfigText] = useState('');
   // config 解析失败标记：为 true 时禁止提交，防止用默认 config 静默覆盖库中原始值
   const [configLoadFailed, setConfigLoadFailed] = useState(false);
+  // 载入时被排除出编辑器的专属键名（系统键之外、由既有专属表单拥有的键，即 descriptor 请求头键）。
+  // 提交时的删除与冲突校验一律以本集合为准，而非提交时的 customHeadersKey：用户在编辑页切换渠道
+  // 类型后，原类型的专属键在载入时已被排除（用户看不到），若改按提交时的键名判定归属，这些键会
+  // 被当成扩展键静默删除。新建渠道（无载入 config）初值为空，即无「被排除的存量键」，语义不劣化。
+  const [editorExcludedKeys, setEditorExcludedKeys] = useState([]);
   // 后端下发的渠道能力清单（PRD §5.12 层1）：驱动渠道类型下拉与通用面板。
   const [descriptors, setDescriptors] = useState([]);
   // 当前所选渠道类型对应的清单（未加载 / 无对应清单时为 undefined）。
@@ -224,6 +245,35 @@ const EditChannel = () => {
                 setCustomHeaders(rows);
               }
             }
+            // 派生自定义配置编辑器文本：这里刻意使用载入时确定的 descHeadersKey，而非
+            // currentDescriptor state，以规避 React state 更新尚未完成造成的时序问题；
+            // 空请求头键不参与排除，保证存量扩展键仍进入编辑器并可原样保存。
+            // 排除集合同时记入 state 供提交阶段复用：提交时用户可能已改渠道类型，只有
+            // 「载入时排除过」的键才必须保留，否则这些不可见的键会被当作扩展键静默删除。
+            const excludedKeys = descHeadersKey !== '' ? [descHeadersKey] : [];
+            setEditorExcludedKeys(excludedKeys);
+            // 用 Object.fromEntries(Object.entries(...)) 而非逐键普通赋值：键名可能字面为
+            // __proto__，普通赋值会触发原型 setter 而不产生自有属性（静默吞键）；该构造方式
+            // 按自有属性写入，任意键名均可原样往返，且不会改动对象原型。
+            let extensionConfig = {};
+            if (
+              parsedConfig &&
+              typeof parsedConfig === 'object' &&
+              !Array.isArray(parsedConfig)
+            ) {
+              extensionConfig = Object.fromEntries(
+                Object.entries(parsedConfig).filter(
+                  ([key]) =>
+                    !SYSTEM_CONFIG_KEYS.includes(key) &&
+                    !excludedKeys.includes(key)
+                )
+              );
+            }
+            setCustomConfigText(
+              Object.keys(extensionConfig).length > 0
+                ? JSON.stringify(extensionConfig, null, 2)
+                : ''
+            );
           } catch (e) {
             // 解析失败时保留默认 config 避免页面崩溃，但必须标记失败态，
             // 否则提交时会用默认值静默覆盖库中原始 config
@@ -366,6 +416,67 @@ const EditChannel = () => {
     localInputs.group = localInputs.groups.join(',');
     // 提交前清洗自定义请求头：剔除空名条目，空对象则删除该字段，避免写入无意义配置。
     const localConfig = { ...config };
+    // 自定义配置编辑器：空白文本等价于空对象，即清空编辑器会删除全部旧扩展键。
+    const trimmedCustomConfig = customConfigText.trim();
+    let parsedCustomConfig = {};
+    if (trimmedCustomConfig !== '') {
+      try {
+        parsedCustomConfig = JSON.parse(trimmedCustomConfig);
+      } catch (e) {
+        showError(t('channel.edit.custom_config.invalid_json'));
+        return;
+      }
+    }
+    if (
+      parsedCustomConfig === null ||
+      typeof parsedCustomConfig !== 'object' ||
+      Array.isArray(parsedCustomConfig)
+    ) {
+      showError(t('channel.edit.custom_config.not_object'));
+      return;
+    }
+    // 关于 __proto__ / constructor / prototype 等特殊键名的取舍：选择「安全承载」而非「拒绝」。
+    // JSON.parse 产出的是普通对象，__proto__ 在解析结果里是自有属性，编辑器文本可完整承载并往返；
+    // 真正的丢键发生在写回环节（Object.assign / 普通赋值会触发原型 setter），因此下面一律用
+    // defineProperty 按自有属性写入。拒绝方案会与「编辑器完整拥有扩展键、清空即删除」的所有权
+    // 语义冲突，且需在载入与提交两处各自报错，代价更高；承载方案无额外 UI 文案、行为更一致。
+    const parsedCustomKeys = Object.keys(parsedCustomConfig);
+    // 编辑器不得写入的「他方拥有键」= 载入时被排除的专属键 ∪ 当前类型声明的请求头键。
+    // 取并集而非二选一：前者修复「切换类型后原专属键被静默删除/被编辑器接管」，后者保证
+    // 新建渠道（无载入 config，editorExcludedKeys 为空）时手写请求头键仍被冲突校验拦截。
+    const ownedConfigKeys = Array.from(
+      new Set([
+        ...editorExcludedKeys,
+        ...(customHeadersKey !== '' ? [customHeadersKey] : []),
+      ])
+    );
+    const conflictingKey = parsedCustomKeys.find(
+      (key) =>
+        SYSTEM_CONFIG_KEYS.includes(key) || ownedConfigKeys.includes(key)
+    );
+    if (conflictingKey !== undefined) {
+      showError(
+        t('channel.edit.custom_config.conflict', { key: conflictingKey })
+      );
+      return;
+    }
+    // 先删除旧扩展键是为了实现编辑器完整所有权和清空即删除语义：
+    // 系统键与 ownedConfigKeys 归既有专属表单所有，其余键全部由本编辑器接管。
+    Object.keys(localConfig).forEach((key) => {
+      if (SYSTEM_CONFIG_KEYS.includes(key)) return;
+      if (ownedConfigKeys.includes(key)) return;
+      delete localConfig[key];
+    });
+    // 用 defineProperty 逐键写入而非 Object.assign：键名可能字面为 __proto__，
+    // assign 会触发原型 setter 而丢弃该键（无法往返）。defineProperty 按自有属性写入。
+    parsedCustomKeys.forEach((key) => {
+      Object.defineProperty(localConfig, key, {
+        value: parsedCustomConfig[key],
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    });
     if (supportsCustomHeaders) {
       const headers = {};
       customHeaders.forEach((row) => {
@@ -610,6 +721,31 @@ const EditChannel = () => {
                 />
               </Form.Field>
             )}
+
+            {/* 自定义配置编辑器：不属于任何渠道专属能力，所有渠道类型、有无 descriptor
+                与请求头能力、创建与编辑模式下都始终渲染，用于编辑系统键之外的扩展键。 */}
+            <Form.Field>
+              <label>{t('channel.edit.custom_config.title')}</label>
+              <div
+                style={{
+                  color: '#666',
+                  fontWeight: 'normal',
+                  marginBottom: '0.6em',
+                }}
+              >
+                {t('channel.edit.custom_config.description')}
+              </div>
+              <Form.TextArea
+                name='custom_config'
+                value={customConfigText}
+                onChange={(e, { value }) => setCustomConfigText(value)}
+                style={{
+                  minHeight: 150,
+                  fontFamily: 'JetBrains Mono, Consolas',
+                }}
+                autoComplete='new-password'
+              />
+            </Form.Field>
 
             {/* Azure OpenAI specific fields */}
             {inputs.type === 3 && (

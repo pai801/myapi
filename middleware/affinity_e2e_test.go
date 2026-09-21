@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/config"
 	"github.com/pai801/myapi/common/ctxkey"
 	"github.com/pai801/myapi/model"
 	"github.com/stretchr/testify/assert"
@@ -187,18 +189,22 @@ func TestAffinityE2E_HeaderNewTurnFallsBackToSession(t *testing.T) {
 }
 
 // TestAffinityE2E_HeaderNoSessionFallsBackToUser 验证无任何 turn/session 头时回落 user 层：
-// 同一 userId 的后续请求仍命中同一渠道。
+// 同一 userId 的后续无会话请求仍命中同一渠道。
+//
+// 新语义下 user 键只由无会话标识的客户端写入（有 session 时读写都排除 user），因此本用例
+// 的写侧也必须用无会话请求建立 user 亲和：先用无头请求选路并写亲和，再用无头请求验证命中。
+// 这同时是回归保护——若 user 层对无会话客户端不再产出/写入，跨轮亲和即断链。
 func TestAffinityE2E_HeaderNoSessionFallsBackToUser(t *testing.T) {
 	h := newAffinityE2E(t)
 
-	withSession := map[string]string{
-		"X-Conversation-Request-Id": "turn-1",
-		"X-Session-Id":              "sess-1",
-	}
-	scope1, ch1 := h.request(affinityE2EUserA, withSession)
+	// 第 1 次：完全无头（无 turn / session）→ 只产出 user 兜底键 → 写亲和
+	scope1, ch1 := h.request(affinityE2EUserA, nil)
+	assert.Empty(t, scope1.TurnID, "无 turn 头时 TurnID 必须为空")
+	assert.Empty(t, scope1.SessionID, "无 session 头时 SessionID 必须为空")
+	require.Len(t, scope1.Keys(affinityE2EModel), 1, "无头时应只产出 user 兜底键")
 	recordAffinityE2E(scope1, ch1)
 
-	// 不带任何 turn / session 头：只应产出 user 兜底键
+	// 第 2 次：同样无头，重新解析 scope，必须回落 user 层命中同一渠道
 	scope2, ch2 := h.request(affinityE2EUserA, nil)
 	assert.Empty(t, scope2.TurnID, "无 turn 头时 TurnID 必须为空")
 	assert.Empty(t, scope2.SessionID, "无 session 头时 SessionID 必须为空")
@@ -327,4 +333,314 @@ func TestAffinityE2E_HeaderOverlongSessionIDStable(t *testing.T) {
 	_, level, ok := AffinityGlobal.Get(scope2.Keys(affinityE2EModel))
 	require.True(t, ok, "第二次应能查到亲和")
 	assert.Equal(t, AffinityLevelSession, level, "应命中 session 层")
+}
+
+// --- AFFINITY_SESSION_EXCLUDES_USER：读写两侧的端到端证伪 ---
+
+// TestAffinityE2E_SessionTrafficDoesNotWriteUserKey 验证有 session 的成功流量不会改写 user 键。
+//
+// 构造：先用无会话请求为 userId 建立 user 兜底亲和（指向渠道 X）；再用带 session 的请求走真实
+// 链路并选路、按生产写法写亲和。新语义下写集不含 user 层，故 user 键必须保持指向 X 不被改写。
+// 这与旧行为（每次成功把 user 键重指为最近渠道）形成直接对照。
+func TestAffinityE2E_SessionTrafficDoesNotWriteUserKey(t *testing.T) {
+	original := config.AffinitySessionExcludesUser
+	defer func() { config.AffinitySessionExcludesUser = original }()
+	config.AffinitySessionExcludesUser = "true"
+
+	h := newAffinityE2E(t)
+	const userID = 920008
+
+	// 1) 无会话请求读不到任何亲和（miss）→ 选路后写 user 兜底键。手工把该 user 键指向候选渠道 9202，
+	//    以便断言 session 流量不会改写它。
+	noSession := h.resolveBody(userID, nil, "")
+	userKeys := noSession.Keys(affinityE2EModel)
+	require.Len(t, userKeys, 1, "无会话时应只产出 user 兜底键")
+	userKey := userKeys[0]
+	AffinityGlobal.Set(userKey, 9202)
+	defer AffinityGlobal.Remove(userKey)
+
+	pre, _, ok := AffinityGlobal.Get([]AffinityKey{userKey})
+	require.True(t, ok, "前置条件：user 键已写入")
+	require.Equal(t, 9202, pre, "前置条件：user 键指向 9202")
+
+	// 2) 带 session 的请求：写集不含 user 层，user 键必须原样保留。
+	headers := map[string]string{"X-Session-Id": "sess-excludes-user"}
+	scope, ch := h.request(userID, headers)
+	require.NotEmpty(t, scope.SessionID, "前置条件：session 已解析")
+	for _, k := range scope.KeysToSet(affinityE2EModel) {
+		require.NotEqual(t, AffinityLevelUser, k.Level,
+			"有 session 时写集不得包含 user 层")
+	}
+	recordAffinityE2E(scope, ch)
+
+	post, _, ok := AffinityGlobal.Get([]AffinityKey{userKey})
+	require.True(t, ok, "user 键不得被删除")
+	assert.Equal(t, 9202, post, "session 流量成功写入后，user 键必须保持原指向不被改写")
+
+	// 3) session 键本身已写入，供后续同会话请求命中。
+	sessionHit, level, ok := AffinityGlobal.Get(scope.Keys(affinityE2EModel))
+	require.True(t, ok, "session 键应被写入")
+	assert.Equal(t, ch.Id, sessionHit, "session 键应指向本次成功渠道")
+	assert.Equal(t, AffinityLevelSession, level, "命中层级应为 session")
+}
+
+// TestAffinityE2E_NewSessionFirstRequestMissesUserBinding 验证新会话首请求不命中 user 绑定：
+// 同用户已存在 user 亲和（无会话客户端写入），换一个 session 发首请求必须 miss → 走随机散开。
+// 用真实链路 nonAutoDistribute + 计数埋点确定性判定（miss 计数 +1），不依赖随机分布。
+func TestAffinityE2E_NewSessionFirstRequestMissesUserBinding(t *testing.T) {
+	original := config.AffinitySessionExcludesUser
+	defer func() { config.AffinitySessionExcludesUser = original }()
+	config.AffinitySessionExcludesUser = "true"
+	withStatsInterval(t, 3600)
+	resetGlobalAffinityStats()
+	defer resetGlobalAffinityStats()
+
+	h := newAffinityE2E(t)
+	const userID = 920009
+
+	// 无会话请求建立 user 兜底亲和。
+	noSession := h.resolveBody(userID, nil, "")
+	noSessionKeys := noSession.Keys(affinityE2EModel)
+	require.Len(t, noSessionKeys, 1, "无会话时应只产出 user 兜底键")
+	AffinityGlobal.Set(noSessionKeys[0], 9202)
+	defer AffinityGlobal.Remove(noSessionKeys[0])
+
+	// 新 session 首请求：Keys 不含 user 层 → 必然 miss。
+	newSession := h.resolveBody(userID, map[string]string{"X-Session-Id": "sess-brand-new"}, "")
+	for _, k := range newSession.Keys(affinityE2EModel) {
+		assert.NotEqual(t, AffinityLevelUser, k.Level, "有 session 时查询键不得含 user 层")
+	}
+
+	before := readAffinityTierSnapshot()
+	ch, _, err := nonAutoDistribute(context.Background(), newSession, affinityE2EModel, affinityE2EChannels())
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+	after := readAffinityTierSnapshot()
+
+	assert.Equal(t, int64(1), after.miss-before.miss, "新会话首请求必须 miss（不命中 user 绑定）并走随机散开")
+	assert.Equal(t, int64(0), after.user-before.user, "新会话首请求不得计入 user 命中")
+}
+
+// --- Task 6.1：派生开关两态反向证伪（opencode 形态：仅 session 头 + 可派生 JSON body）---
+// affinityTierSnapshot 是六档计数的瞬时快照，用于断言「目标档递增且其余档不变」（六档互斥）。
+type affinityTierSnapshot struct {
+	turn        int64
+	turnDerived int64
+	session     int64
+	user        int64
+	fallback    int64
+	miss        int64
+}
+
+func readAffinityTierSnapshot() affinityTierSnapshot {
+	s := affinityStatsGlobal
+	return affinityTierSnapshot{
+		turn:        s.turnHits.Load(),
+		turnDerived: s.turnDerivedHits.Load(),
+		session:     s.sessionHits.Load(),
+		user:        s.userHits.Load(),
+		fallback:    s.fallbacks.Load(),
+		miss:        s.misses.Load(),
+	}
+}
+
+// removeAffinityScopeKeys 删除该 scope 的全部可用层键，保证每段断言前亲和表对该 scope 为空白。
+func removeAffinityScopeKeys(scope AffinityScope) {
+	for _, key := range scope.KeysToSet(affinityE2EModel) {
+		AffinityGlobal.Remove(key)
+	}
+}
+
+// resolveBody 以真实 JSON body + 真实请求头构造 context，走真实 ResolveAffinityScope。
+// 复用 newAffinityBodyContext 与 newAffinityE2E 的清理装置，并补上 userId / group
+// （newAffinityBodyContext 只设 body 与头，不设身份），使键命名空间与其它 e2e 用例一致。
+func (h *affinityE2E) resolveBody(userID int, headers map[string]string, body string) AffinityScope {
+	h.t.Helper()
+	c := newAffinityBodyContext(h.t, http.MethodPost, "application/json", body, headers)
+	c.Set(ctxkey.Id, userID)
+	c.Set(ctxkey.Group, affinityE2EGroup)
+	scope := ResolveAffinityScope(c)
+	h.scopes = append(h.scopes, scope)
+	return scope
+}
+
+// TestAffinityDerivedTurnID_SwitchChangesSelectedTier
+// G: 仅 session 头加可派生 JSON，分别设置关闭与开启
+// W: 连续执行 scope 解析和 nonAutoDistribute
+// T: 关闭时落 session 档，开启时落 turn_derived 档
+//
+// 两态使用**同一份**请求头与 body，仅开关不同，故档位差异纯粹来自开关。开启态额外把 turn 键
+// 映射到与 session 键不同的渠道：若实现忽略开关（恒派生）或埋点 derived 恒 false，本用例必然失败。
+func TestAffinityDerivedTurnID_SwitchChangesSelectedTier(t *testing.T) {
+	originalDerive := config.AffinityDeriveTurnID
+	defer func() { config.AffinityDeriveTurnID = originalDerive }()
+	withStatsInterval(t, 3600)
+	resetGlobalAffinityStats()
+	defer resetGlobalAffinityStats()
+
+	h := newAffinityE2E(t)
+	const userID = 920005
+	const session = "sess-switch"
+	// opencode 形态：只有 session 头 + 可派生 JSON body，没有任何 turn 头。
+	headers := map[string]string{"X-Session-Id": session}
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"switch tier probe"}]}`
+
+	// --- 关闭开关：同一形态请求必须落 session 档 ---
+	config.AffinityDeriveTurnID = "false"
+	offScope := h.resolveBody(userID, headers, body)
+	require.Empty(t, offScope.TurnID, "关闭开关时不得派生 turn id")
+	require.False(t, offScope.turnDerived, "关闭开关时 turnDerived 必须为 false")
+	removeAffinityScopeKeys(offScope)
+	offKeys := offScope.Keys(affinityE2EModel)
+	require.Equal(t, AffinityLevelSession, offKeys[0].Level, "关闭开关时首个候选键必须是 session 层")
+	AffinityGlobal.Set(offKeys[0], 9202) // 仅映射 session 键，指向候选渠道 9202
+
+	before := readAffinityTierSnapshot()
+	offCh, _, err := nonAutoDistribute(context.Background(), offScope, affinityE2EModel, affinityE2EChannels())
+	require.NoError(t, err)
+	require.NotNil(t, offCh)
+	after := readAffinityTierSnapshot()
+
+	assert.Equal(t, 9202, offCh.Id, "关闭开关时应命中 session 映射的渠道")
+	assert.Equal(t, int64(1), after.session-before.session, "关闭开关必须落 session 档")
+	assert.Equal(t, int64(0), after.turn-before.turn, "关闭开关不得进入真实 turn 档")
+	assert.Equal(t, int64(0), after.turnDerived-before.turnDerived, "关闭开关不得进入 turn_derived 档")
+	assert.Equal(t, int64(0), after.user-before.user, "关闭开关不得进入 user 档")
+	assert.Equal(t, int64(0), after.fallback-before.fallback, "命中不得计入 fallback")
+	assert.Equal(t, int64(0), after.miss-before.miss, "命中不得计入 miss")
+
+	// --- 开启开关：同一形态请求必须落 turn_derived 档 ---
+	config.AffinityDeriveTurnID = "true"
+	onScope := h.resolveBody(userID, headers, body)
+	require.NotEmpty(t, onScope.TurnID, "开启开关时必须派生出 turn id")
+	assert.Equal(t, common.DeriveTurnIDFromBody([]byte(body), session), onScope.TurnID,
+		"派生值必须与纯函数独立计算逐字一致")
+	require.True(t, onScope.turnDerived, "开启开关时 turnDerived 必须为 true")
+	removeAffinityScopeKeys(onScope)
+	onKeys := onScope.Keys(affinityE2EModel)
+	require.Equal(t, AffinityLevelTurn, onKeys[0].Level, "开启开关时首个候选键必须是 turn 层")
+	AffinityGlobal.Set(onKeys[1], 9202) // 与关闭态同一份 session 映射
+	AffinityGlobal.Set(onKeys[0], 9203) // turn 键指向不同渠道：错误落 session 档会被渠道断言抓住
+
+	before = readAffinityTierSnapshot()
+	onCh, _, err := nonAutoDistribute(context.Background(), onScope, affinityE2EModel, affinityE2EChannels())
+	require.NoError(t, err)
+	require.NotNil(t, onCh)
+	after = readAffinityTierSnapshot()
+
+	assert.Equal(t, 9203, onCh.Id, "开启开关时应命中 turn 映射的渠道（优先于 session）")
+	assert.Equal(t, int64(1), after.turnDerived-before.turnDerived, "开启开关必须落 turn_derived 档")
+	assert.Equal(t, int64(0), after.turn-before.turn, "派生命中不得混入真实 turn 档")
+	assert.Equal(t, int64(0), after.session-before.session, "turn 命中不得落入 session 档")
+	assert.Equal(t, int64(0), after.user-before.user, "turn 命中不得落入 user 档")
+	assert.Equal(t, int64(0), after.fallback-before.fallback, "命中不得计入 fallback")
+	assert.Equal(t, int64(0), after.miss-before.miss, "命中不得计入 miss")
+}
+
+// TestAffinityE2E_RealTurnHeaderRecordsTurnTierNotDerived
+// G: 真实 turn 头（X-Conversation-Request-Id）+ session 头，亲和键命中且在候选集内被选中
+// W: 真实请求头 → ResolveAffinityScope → nonAutoDistribute（复用本文件既有 e2e harness）
+// T: turn 档 +1 且 turn_derived 档保持不变（精确计数 turn=1, turnDerived=0）
+//
+// 本用例补齐 A4：派生档（turnDerived=true）已有 e2e 覆盖
+// （TestAffinityDerivedTurnID_SwitchChangesSelectedTier 的开启态），而「真实 turn 头 → turn 档」
+// 此前只有 affinity_stats_test.go 里 recordHit 的直接单元调用，未经真实头 → distributor 传递链锁定。
+// 若埋点把 scope.turnDerived 恒置 true（或真实头路径被误标为派生），本用例的 turnDerived=0 断言必然失败。
+func TestAffinityE2E_RealTurnHeaderRecordsTurnTierNotDerived(t *testing.T) {
+	withStatsInterval(t, 3600) // 开启统计但不触发输出，纯计数
+	resetGlobalAffinityStats()
+	defer resetGlobalAffinityStats()
+
+	h := newAffinityE2E(t)
+	const userID = 920007
+	headers := map[string]string{
+		"X-Conversation-Request-Id": "turn-real-stats",
+		"X-Session-Id":              "sess-real-stats",
+	}
+
+	// 第 1 次请求：建立亲和（真实头 → 真实 scope → 真实选路 → 按生产写法写亲和）。
+	scope1, ch1 := h.request(userID, headers)
+	require.Equal(t, "turn-real-stats", scope1.TurnID, "真实 turn 头必须被解析进 scope")
+	require.False(t, scope1.turnDerived, "前置条件：真实 turn 头命中时 turnDerived 必须为 false")
+	recordAffinityE2E(scope1, ch1)
+
+	// 清零首请求（无亲和 → miss）的计数，使第 2 次请求的档位断言为精确绝对值。
+	resetGlobalAffinityStats()
+
+	// 第 2 次请求：同一真实 turn 头重新解析（不复用 scope1），turn 层命中且渠道在候选集内被选中。
+	scope2, ch2 := h.request(userID, headers)
+	require.Equal(t, ch1.Id, ch2.Id, "同一真实 turn 头的第二次请求必须命中同一渠道（turn 层亲和）")
+	_, level, ok := AffinityGlobal.Get(scope2.Keys(affinityE2EModel))
+	require.True(t, ok, "第二次请求应能查到亲和")
+	require.Equal(t, AffinityLevelTurn, level, "前置条件：命中层级必须为 turn 层")
+
+	snap := readAffinityTierSnapshot()
+	assert.Equal(t, int64(1), snap.turn, "真实 turn 头命中必须精确计入 turn 档 1 次")
+	assert.Equal(t, int64(0), snap.turnDerived, "真实 turn 头命中绝不能污染 turn_derived 派生档")
+	assert.Equal(t, int64(0), snap.session, "turn 命中不得落入 session 档")
+	assert.Equal(t, int64(0), snap.user, "turn 命中不得落入 user 档")
+	assert.Equal(t, int64(0), snap.fallback, "真正选中不得计入 fallback")
+	assert.Equal(t, int64(0), snap.miss, "命中不得计入 miss")
+}
+
+// TestAffinityDerivedTurnID_UnstableTurnFallsBackToSession
+// G: 同 session 的两个请求产生不同派生 turn 值且仅 session key 已映射
+// W: nonAutoDistribute
+// T: turn miss 后命中同一 session 映射，不劣于变更前行为
+//
+// 构造：同一 session、两个不同的最后真实 user 文本（模拟历史压缩/改写导致的派生值不稳定），
+// 但亲和表只映射 session 键。派生 turn 键从不写入 → 两次选路 turn 层均 miss，回落 session 层命中，
+// 与改造前（无 turn 键）行为一致，证明派生不稳定时不会有客户端变差。
+func TestAffinityDerivedTurnID_UnstableTurnFallsBackToSession(t *testing.T) {
+	originalDerive := config.AffinityDeriveTurnID
+	defer func() { config.AffinityDeriveTurnID = originalDerive }()
+	config.AffinityDeriveTurnID = "true"
+	withStatsInterval(t, 3600)
+	resetGlobalAffinityStats()
+	defer resetGlobalAffinityStats()
+
+	h := newAffinityE2E(t)
+	const userID = 920006
+	const session = "sess-unstable"
+	headers := map[string]string{"X-Session-Id": session}
+	body1 := `{"messages":[{"role":"user","content":"question one"}]}`
+	body2 := `{"messages":[{"role":"user","content":"question two"}]}`
+
+	first := h.resolveBody(userID, headers, body1)
+	second := h.resolveBody(userID, headers, body2)
+	require.NotEmpty(t, first.TurnID, "前置条件：首个请求必须派生出非空 turn id")
+	require.NotEmpty(t, second.TurnID, "前置条件：第二个请求必须派生出非空 turn id")
+	require.NotEqual(t, first.TurnID, second.TurnID, "前置条件：两个请求的派生 turn 值必须不同（模拟不稳定）")
+	require.Equal(t, first.SessionID, second.SessionID, "前置条件：两个请求的 session 必须相同")
+
+	// 仅映射 session 键（指向候选渠道 9202）；turn 键从不写入，故派生值不稳定时必然 turn miss。
+	removeAffinityScopeKeys(first)
+	removeAffinityScopeKeys(second)
+	firstKeys := first.Keys(affinityE2EModel)
+	require.Equal(t, AffinityLevelSession, firstKeys[1].Level, "前置条件：第二个候选键为 session 层")
+	AffinityGlobal.Set(firstKeys[1], 9202)
+
+	// 请求一：派生 turn 键不存在 → turn miss → 回落命中 session 映射。
+	before := readAffinityTierSnapshot()
+	ch1, _, err := nonAutoDistribute(context.Background(), first, affinityE2EModel, affinityE2EChannels())
+	require.NoError(t, err)
+	require.NotNil(t, ch1)
+	mid := readAffinityTierSnapshot()
+	assert.Equal(t, 9202, ch1.Id, "派生 turn miss 后必须命中 session 映射")
+	assert.Equal(t, int64(1), mid.session-before.session, "第一个请求应落 session 档")
+	assert.Equal(t, int64(0), mid.turnDerived-before.turnDerived, "turn miss 不得进入派生档")
+	assert.Equal(t, int64(0), mid.turn-before.turn, "turn miss 不得进入真实 turn 档")
+
+	// 请求二：派生值已变化，turn 键仍不存在 → 仍命中同一 session 映射（不劣于变更前行为）。
+	ch2, _, err := nonAutoDistribute(context.Background(), second, affinityE2EModel, affinityE2EChannels())
+	require.NoError(t, err)
+	require.NotNil(t, ch2)
+	after := readAffinityTierSnapshot()
+	assert.Equal(t, 9202, ch2.Id, "换派生值后仍应命中同一 session 映射")
+	assert.Equal(t, int64(1), after.session-mid.session, "第二个请求应落 session 档")
+	assert.Equal(t, int64(0), after.turn-mid.turn, "不得进入真实 turn 档")
+	assert.Equal(t, int64(0), after.turnDerived-mid.turnDerived, "不得进入 turn_derived 档")
+	assert.Equal(t, int64(0), after.user-before.user, "不得落入 user 档")
+	assert.Equal(t, int64(0), after.fallback-before.fallback, "命中不得计入 fallback")
+	assert.Equal(t, int64(0), after.miss-before.miss, "命中不得计入 miss")
 }

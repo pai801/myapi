@@ -19,7 +19,7 @@ import (
 type AffinityLevel int
 
 const (
-	AffinityLevelUser    AffinityLevel = iota // 最粗，兜底（保持现状行为）
+	AffinityLevelUser    AffinityLevel = iota // 最粗，仅服务无会话标识的客户端（跨轮兜底）
 	AffinityLevelSession                      // 会话级：多轮稳定
 	AffinityLevelTurn                         // 最细，优先：一次用户发送内恒定
 )
@@ -87,6 +87,11 @@ var affinitySessionHeaders = []string{
 
 // AffinityScope 描述一次请求可用的亲和维度；某层 id 为空表示该层不可用。
 //
+// 层级产出规则（见 Keys / KeysToSet）：turn 与 session 是可选细层，user 是无会话标识时的
+// 兜底层。SessionID 非空且 AFFINITY_SESSION_EXCLUDES_USER 开启（默认）时，读写都不产出
+// user 层——有会话的客户端靠 session 层拿跨轮亲和，避免用 user 层兜底导致同一用户所有会话
+// 收敛到同一渠道；SessionID 为空（turn-only 客户端）时才产出 user 兜底，防止跨轮断链。
+//
 // 注意：本结构含 map 字段（reqHeaders），因此**不可比较** —— 不可用 `==` 判断、不可作 map key，
 // 否则编译期报错（invalid operation: ... cannot be compared）。如需按值比较请显式逐字段比。
 type AffinityScope struct {
@@ -94,6 +99,11 @@ type AffinityScope struct {
 	Group     string
 	TurnID    string // 空 = 该层不可用
 	SessionID string // 空 = 该层不可用
+
+	// turnDerived 仅表示当前非空 TurnID 来自 body 派生：真实 turn 头、空 turn id、
+	// session/user 层均为 false。仅供统计分档（区分「真实头 turn」与「派生 turn」），
+	// 不能影响 Keys / KeysToSet 的选路结果。
+	turnDerived bool
 
 	// reqHeaders 是本次请求原始头表的只读引用（不拷贝、不跨请求持有），仅供未命中时
 	// 采样「客户端实际带了哪些候选头」。保留引用而非即时计算，使采样开销只在未命中路径发生；
@@ -109,10 +119,10 @@ type AffinityKey struct {
 
 // ResolveAffinityScope 解析请求的亲和维度。
 //
-// turn / session 层优先读请求头（零成本）。仅当 session 层所有头都未命中时，
-// 才按开关与请求特征决定是否回退到请求 body 提取会话标识（见 sessionIDFromBody）——
-// 下半区主流客户端（Cline / Roo Code / Kilo Code、Responses 多轮）不在头里传会话标识，
-// 只放在 body 里。turn 层不从 body 提取：body 里没有 turn 语义的字段。
+// turn / session 层优先读请求头（零成本）。当缺 session 头或（后续）缺 turn 头时，
+// 按开关与请求特征决定是否读取请求 body：session 补取与 turn 派生共享同一次读取与解析
+// （见 readAffinityBodyPayload）—— 下半区主流客户端（Cline / Roo Code / Kilo Code、
+// Responses 多轮）不在头里传会话标识，只放在 body 里。
 //
 // 红线二：取不到 turn 时绝不生成随机 id。这与私有仓
 // myapi-server/internal/channel/buddy/headers.go:406 的 conversationRequestIDFromContext
@@ -123,16 +133,42 @@ func ResolveAffinityScope(c *gin.Context) AffinityScope {
 	if c.Request != nil {
 		hdr = c.Request.Header
 	}
+	turnID := firstNonEmptyHeader(c, affinityTurnHeaders)
 	sessionID := firstNonEmptyHeader(c, affinitySessionHeaders)
-	if sessionID == "" {
-		sessionID = sessionIDFromBody(c)
+	turnDerived := false
+
+	// 按需读取：仅当 turn 派生（缺真实 turn 头且派生开关开启）或 session body 补取
+	// （缺 session 头且补取开关开启）至少一方需要 body 时才读，两者都不需要则完全跳过，
+	// 保持既有「按需读取」的零开销路径。派生分支必须与 session 分支并列判定：
+	// session 补取被开关关闭但派生开启时仍要读，因为派生有自己的开关与守卫。
+	needBody := (turnID == "" && affinityDeriveTurnIDEnabled()) ||
+		(sessionID == "" && affinityBodySessionIDEnabled())
+	// 方法 / Content-Type 守卫在此统一把关：GET 与非 JSON 请求不读 body（含派生路径）。
+	if needBody && canReadAffinityJSONBody(c) {
+		if shared := readAffinityBodyPayload(c); shared != nil {
+			// session 提取仍受自身独立开关约束：补取关闭时即便已读 body 也不得取会话标识。
+			if sessionID == "" && affinityBodySessionIDEnabled() {
+				sessionID = sessionIDFromBody(shared.Payload)
+			}
+			// 真实 turn 头优先；派生仅在派生开关、session 锚点非空与 JSON 请求守卫
+			// 全部满足时接入（进入本分支即已通过方法与 Content-Type 守卫）。派生只消费
+			// 共享 payload，不消费 Raw，确保请求路径不发生第二次 JSON 解析。
+			if turnID == "" && sessionID != "" && affinityDeriveTurnIDEnabled() {
+				if derived := common.DeriveTurnIDFromPayload(shared.Payload, sessionID); derived != "" {
+					turnID = derived
+					turnDerived = true
+				}
+			}
+		}
 	}
+
 	return AffinityScope{
-		UserID:     c.GetInt(ctxkey.Id),
-		Group:      c.GetString(ctxkey.Group),
-		TurnID:     firstNonEmptyHeader(c, affinityTurnHeaders),
-		SessionID:  sessionID,
-		reqHeaders: hdr,
+		UserID:      c.GetInt(ctxkey.Id),
+		Group:       c.GetString(ctxkey.Group),
+		TurnID:      turnID,
+		SessionID:   sessionID,
+		turnDerived: turnDerived,
+		reqHeaders:  hdr,
 	}
 }
 
@@ -170,40 +206,78 @@ var affinityBodyMethods = map[string]bool{
 	http.MethodPatch: true,
 }
 
-// sessionIDFromBody 在 session 层请求头全部未命中时，尝试从 JSON 请求体提取会话标识。
-//
-// 触发条件（全部满足才读 body，避免对每次请求都产生读取开销）：
-//   - 应急开关未关闭（config.AffinityBodySessionID 非 "false"，容错判断）；
-//   - 请求方法属于 POST / PUT / PATCH；
-//   - Content-Type 前缀为 application/json（天然排除 multipart/form-data ——
-//     音频转写 / 图像上传的 body 既无会话标识又很大）。
-//
-// 失败一律静默降级（返回空串），绝不 abort 请求、绝不报错、绝不打印 body 内容或会话 id：
-// 亲和只是选路优化，不能因 body 形态异常而影响主流程，也不应泄漏用户数据。
-func sessionIDFromBody(c *gin.Context) string {
+// affinityBodyPayload 表示一次请求内共享的完整 body 与解析结果。
+// Raw 与 Payload 均为请求内只读引用：不得原地修改、截断或跨请求持有，
+// 生命周期不超过当前请求，也不得写入全局状态或派生缓存。
+type affinityBodyPayload struct {
+	Raw     []byte         // 完整原始 body（只读，不得原地修改）
+	Payload map[string]any // Raw 的唯一一次 JSON 反序列化结果（只读）
+}
+
+// affinityDeriveTurnIDEnabled 判定 turn 派生开关是否开启：仅当值等于 "false"
+// （忽略大小写与首尾空白）时视为关闭，其余任何取值均视为开启（容错，与
+// AFFINITY_BODY_SESSION_ID 惯例一致）。
+func affinityDeriveTurnIDEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(config.AffinityDeriveTurnID), "false")
+}
+
+// affinityBodySessionIDEnabled 判定 session body 补取开关是否开启，容错规则同上。
+func affinityBodySessionIDEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(config.AffinityBodySessionID), "false")
+}
+
+// affinitySessionExcludesUserEnabled 判定「有 session 时是否排除 user 层」开关是否开启，
+// 容错规则同上：仅当值等于 "false"（忽略大小写与首尾空白）时视为关闭，其余任何取值均视为开启。
+func affinitySessionExcludesUserEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(config.AffinitySessionExcludesUser), "false")
+}
+
+// canReadAffinityJSONBody 判断请求是否满足「读 body」的方法与 Content-Type 守卫：
+// 方法属于 POST / PUT / PATCH，且 Content-Type 前缀为 application/json（大小写不敏感，
+// 天然排除 multipart/form-data —— 音频转写 / 图像上传的 body 既无会话标识又很大）。
+// nil 请求返回 false，且在此分支下不触碰 body（避免对无请求场景产生任何读取）。
+func canReadAffinityJSONBody(c *gin.Context) bool {
 	if c == nil || c.Request == nil {
-		return ""
-	}
-	if strings.EqualFold(strings.TrimSpace(config.AffinityBodySessionID), "false") {
-		return ""
+		return false
 	}
 	if !affinityBodyMethods[c.Request.Method] {
-		return ""
+		return false
 	}
 	// HTTP 媒体类型按 RFC 大小写不敏感，故先 ToLower 再前缀匹配，
-	// 否则客户端发 Application/JSON 会静默丢掉这次 body 补取机会（降级到 user 层）。
-	if !strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json") {
-		return ""
+	// 否则客户端发 Application/JSON 会静默丢掉这次 body 读取机会（降级到 user 层）。
+	return strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json")
+}
+
+// readAffinityBodyPayload 读取并恢复完整请求体，且至多反序列化一次。
+//
+// 必须使用 common.GetRequestBodyReusable：它在读取后恢复 c.Request.Body（下游有路由
+// 直接读 c.Request.Body —— proxy.go / audio.go / text.go / image.go），并复用既有
+// ctxkey.KeyRequestBody 缓存，保证同一请求最多一次 IO。绝不截断请求体。
+//
+// 失败一律静默降级（返回 nil），绝不 abort 请求、绝不报错、绝不打印 body 内容或会话 id：
+// 亲和只是选路优化，不能因 body 形态异常而影响主流程，也不应泄漏用户数据。
+// 读取失败、空 body 或非法 JSON 均返回 nil。
+func readAffinityBodyPayload(c *gin.Context) *affinityBodyPayload {
+	if c == nil || c.Request == nil {
+		return nil
 	}
-	// 读后必须恢复 body：下游有路由直接读 c.Request.Body（proxy.go / audio.go / text.go / image.go）。
 	body, err := common.GetRequestBodyReusable(c)
 	if err != nil || len(body) == 0 {
-		return ""
+		return nil
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
+		return nil
 	}
+	return &affinityBodyPayload{Raw: body, Payload: payload}
+}
+
+// sessionIDFromBody 从只读 payload 按既有字段优先级提取并归一化会话标识。
+//
+// 本函数不再自行读取 body：开关、方法与 Content-Type 守卫由调用方（ResolveAffinityScope）
+// 统一把关，payload 由两个消费者（session 提取与 turn 派生）共享，避免重复读取与解析。
+// 缺失或类型不符一律返回空串并沿既有层级降级，绝不报错、绝不打印会话 id。
+func sessionIDFromBody(payload map[string]any) string {
 	for _, path := range affinityBodySessionIDFields {
 		if raw, ok := lookupAffinityBodyString(payload, path); ok {
 			if id := normalizeAffinityID(raw); id != "" {
@@ -256,10 +330,17 @@ func normalizeAffinityID(raw string) string {
 	return id
 }
 
-// Keys 返回由细到粗的候选键序列（turn → session → user），不可用的层不产出。
-// user 层总是产出，因此返回值至少有一个元素。
+// Keys 返回由细到粗的候选键序列（turn → session[ → user]），不可用的层不产出。
 //
-// 回退开关：AFFINITY_KEY_MODE=user 时只返回 user 层一个键（旧行为）。
+// 层级产出规则：
+//   - 回退模式 AFFINITY_KEY_MODE=user：只返回 user 层一个键（旧行为），不受其它开关影响；
+//   - SessionID 非空且未关闭 AFFINITY_SESSION_EXCLUDES_USER：产出 [turn?, session]，**不含 user 层**。
+//     有会话的客户端靠 session 层拿跨轮亲和即可；保留 user 层会让新会话首请求必然命中该用户的
+//     最近渠道、跳过随机散开，并因每次成功都改写 user 键而把同用户所有会话收敛到同一渠道；
+//   - SessionID 为空（无会话标识，含 turn-only 客户端）：产出 [turn?, user]，保留 user 兜底。
+//     turn id 每轮换新，若连 user 兜底也不产出，下一轮将整体 miss → 跨轮断链，比改造前更差。
+//
+// 因此返回值在「有 session 且开关开启」时至少一个元素（session），否则至少一个元素（user）。
 func (s AffinityScope) Keys(model string) []AffinityKey {
 	// 应急回退开关，必须容错：忽略大小写与首尾空白，避免运维误写 USER/"user " 时静默按 auto 走、开关形同虚设。
 	if strings.EqualFold(strings.TrimSpace(config.AffinityKeyMode), "user") {
@@ -284,6 +365,11 @@ func (s AffinityScope) Keys(model string) []AffinityKey {
 			Level: AffinityLevelSession,
 			Value: buildAffinityKeyValue(AffinityLevelSession, s.Group, s.UserID, model, s.SessionID),
 		})
+		// 有会话标识时读写都不产出 user 层（默认行为）：详见函数头注释与 AffinityScope 说明。
+		// 关闭 AFFINITY_SESSION_EXCLUDES_USER 即回退到旧行为，此时继续产出 user 兜底键。
+		if affinitySessionExcludesUserEnabled() {
+			return keys
+		}
 	}
 	keys = append(keys, AffinityKey{
 		Level: AffinityLevelUser,
@@ -292,18 +378,18 @@ func (s AffinityScope) Keys(model string) []AffinityKey {
 	return keys
 }
 
-// KeysToSet 返回一次成功转发后需要写入的亲和键：写入全部可用层（turn + session + user）。
+// KeysToSet 返回一次成功转发后需要写入的亲和键：与 Keys 完全一致（写你读得到的层），
+// 不复制一份逻辑，避免读写层集漂移导致「写了的读不到 / 读了的不更新」。
 //
-// 为什么必须写全部可用层，而不是只写最细可用层：细层 id 会轮换/过期，粗层若不写入就永远 miss。
+// 为什么写全部可用层而非只写最细层：细层 id 会轮换/过期，粗层若不写入就永远 miss。
 //   - turn id 按定义每轮换新：只写 turn 时，下一轮 turn 键必然 miss；
-//   - 若只写「最细层 + session 层」，turn-only 客户端（无任何 session 头）仍只有 turn 键，
-//     下一轮 turn 换新后 turn miss、user 层从未写过也 miss → 跨轮亲和整体断链，比改造前更差。
+//   - turn-only 客户端（无任何 session 标识）只有 turn 键：若连 user 兜底也不写，下一轮 turn
+//     换新后 turn miss、user 层从未写过也 miss → 跨轮亲和整体断链，比改造前更差。
 //
-// 因此写入所有可用层，让任意细层失效时都能降级命中粗层。
-//
-// 读取仍按细 → 粗（Keys），写 user 层只是兜底，不影响削热点目标：turn/session 命中优先。
-// 代价可控：相对「最细层 + session」多写至多 1 键（user 兜底）；相对原始「只写 keys[0]」多写至多 2 键，
-// 且受容量上限与分层 TTL（user 层 300s）约束。
+// 为什么有 session 时不写 user 层（默认，AFFINITY_SESSION_EXCLUDES_USER 开启）：
+// user 层是「同用户最近一次成功渠道」的粗绑定，一旦在 session 流量下持续被改写，同一 userId 的
+// 所有会话会被逐步收敛到同一渠道（热点）；而 session 层已能提供跨轮亲和，无需 user 兜底。
+// 排除 user 层后，新会话首请求必然 miss → 走加权随机散开，随后绑定自己的 session 键。
 //
 // 回退模式（AFFINITY_KEY_MODE=user）下 Keys 只产出 user 层一个键，此时也只写那一个，行为不变。
 func (s AffinityScope) KeysToSet(model string) []AffinityKey {

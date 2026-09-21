@@ -83,7 +83,8 @@ func (am *AffinityManager) Get(keys []AffinityKey) (channelId int, hitLevel Affi
 }
 
 // Set 写入单个键，TTL 按 key.Level 取。调用方（生产路径经 KeysToSet）会对同一次成功转发
-// 逐个调用 Set，写入全部可用层（turn + session + user）；本方法本身不感知层级组合。
+// 逐个调用 Set，写入全部可用层（turn + session，有 session 且开关开启时不含 user；无 session
+// 的 turn-only 客户端则含 user）；本方法本身不感知层级组合。
 func (am *AffinityManager) Set(key AffinityKey, channelId int) {
 	am.mu.Lock()
 	defer am.mu.Unlock()

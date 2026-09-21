@@ -242,8 +242,16 @@ func TestResolveAffinityScope_MalformedBodySilentlyDegrades(t *testing.T) {
 // --- 6. 开关关闭时完全不读 body ---
 
 func TestResolveAffinityScope_BodySwitchOff(t *testing.T) {
-	original := config.AffinityBodySessionID
-	defer func() { config.AffinityBodySessionID = original }()
+	originalBody := config.AffinityBodySessionID
+	originalDerive := config.AffinityDeriveTurnID
+	defer func() {
+		config.AffinityBodySessionID = originalBody
+		config.AffinityDeriveTurnID = originalDerive
+	}()
+	// 显式关闭派生开关以隔离被测行为：派生默认开启时，本用例「无 turn 头」的请求会走
+	// 派生分支独立读 body（design.md:154 已批准的覆盖面扩大），与「body 补取开关关闭」
+	// 语义无关，必须排除其干扰，否则无法断言零读取。
+	config.AffinityDeriveTurnID = "false"
 
 	body := `{"litellm_session_id":"litellm-abc"}`
 	// 关闭判断必须容错：大小写与首尾空白都应识别为关闭。
@@ -254,8 +262,8 @@ func TestResolveAffinityScope_BodySwitchOff(t *testing.T) {
 
 			scope := ResolveAffinityScope(c)
 
-			assert.Equal(t, "", scope.SessionID, "开关关闭时不得从 body 取会话标识")
-			assert.False(t, bodyCached(c), "开关关闭时不得读 body（缓存未被写入）")
+			assert.Equal(t, "", scope.SessionID, "body 补取开关关闭时不得从 body 取会话标识")
+			assert.False(t, bodyCached(c), "派生开关关闭且 body 补取开关关闭时不得读 body")
 		})
 	}
 }
@@ -288,18 +296,38 @@ func TestResolveAffinityScope_BodyLongIDNormalized(t *testing.T) {
 	assert.Len(t, scope.SessionID, 16, "超长 body 会话 id 归一化后应为 sha256 前 16 位 hex")
 }
 
-// --- 8. header 已命中时不读 body ---
+// --- 8. turn 头与 session 头均已命中时才不读 body（零开销路径）---
 
 func TestResolveAffinityScope_HeaderHitSkipsBody(t *testing.T) {
+	// 零读取路径要求「turn 头命中 且 session 头命中」：仅有 session 头而无 turn 头时，
+	// 派生分支仍会读 body（design.md:154 已批准的覆盖面扩大），故此处必须补一个真实 turn 头。
 	c := newAffinityBodyContext(t, http.MethodPost, "application/json",
 		`{"litellm_session_id":"from-body"}`, map[string]string{
-			"X-Session-Id": "from-header",
+			"X-Session-Id":              "from-header",
+			"X-Conversation-Request-Id": "turn-from-header",
 		})
 
 	scope := ResolveAffinityScope(c)
 
 	assert.Equal(t, "from-header", scope.SessionID, "header 命中时应优先取 header")
-	assert.False(t, bodyCached(c), "header 已命中时不得读 body（避免无谓开销）")
+	assert.False(t, bodyCached(c), "session 头与 turn 头均已命中时不得读 body（零开销路径）")
+}
+
+// 正向锁定新设计的覆盖面扩大：session 头已命中但 turn 头全 miss 且派生开关开启时，
+// 仍必须读取并解析 body（design.md:154），保证派生分支不被「session 已命中」提前短路。
+func TestResolveAffinityScope_SessionHeaderStillReadsBodyForDerive(t *testing.T) {
+	original := config.AffinityDeriveTurnID
+	defer func() { config.AffinityDeriveTurnID = original }()
+	config.AffinityDeriveTurnID = "true"
+
+	c := newAffinityBodyContext(t, http.MethodPost, "application/json",
+		`{"litellm_session_id":"from-body","messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"X-Session-Id": "from-header"})
+
+	scope := ResolveAffinityScope(c)
+
+	assert.Equal(t, "from-header", scope.SessionID, "session 仍应优先取 header")
+	assert.True(t, bodyCached(c), "turn 头全 miss 且派生开启时，即便 session 头已命中也必须读 body 供派生")
 }
 
 // 内容类型带参数（charset）时仍应识别为 JSON。

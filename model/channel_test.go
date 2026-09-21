@@ -62,6 +62,70 @@ func TestGetModelsAliasConcurrent(t *testing.T) {
 	})
 }
 
+func TestLoadConfig(t *testing.T) {
+	Convey("LoadConfig should expose typed fields and full raw key-value view", t, func() {
+		Convey("preserves unknown and nested values in Raw", func() {
+			c := Channel{Config: `{"custom_flag":true,"nested":{"a":"b"},"arr":[1,2],"num":3.5,"unknown_str":"hello"}`}
+			cfg, err := c.LoadConfig()
+			So(err, ShouldBeNil)
+			So(cfg.Raw["unknown_str"], ShouldEqual, "hello")
+			nested, nestedOK := cfg.Raw["nested"].(map[string]any)
+			So(nestedOK, ShouldBeTrue)
+			So(nested["a"], ShouldEqual, "b")
+			arr, arrOK := cfg.Raw["arr"].([]any)
+			So(arrOK, ShouldBeTrue)
+			So(len(arr), ShouldEqual, 2)
+			num, numOK := cfg.Raw["num"].(float64)
+			So(numOK, ShouldBeTrue)
+			So(num, ShouldEqual, 3.5)
+			flag, flagOK := cfg.Raw["custom_flag"].(bool)
+			So(flagOK, ShouldBeTrue)
+			So(flag, ShouldBeTrue)
+		})
+
+		Convey("includes known keys in Raw and typed fields", func() {
+			c := Channel{Config: `{"region":"us-east-1"}`}
+			cfg, err := c.LoadConfig()
+			So(err, ShouldBeNil)
+			So(cfg.Region, ShouldEqual, "us-east-1")
+			So(cfg.Raw["region"], ShouldEqual, "us-east-1")
+		})
+
+		Convey("keeps Raw nil for empty config", func() {
+			c := Channel{Config: ""}
+			cfg, err := c.LoadConfig()
+			So(err, ShouldBeNil)
+			So(cfg, ShouldResemble, ChannelConfig{})
+			So(cfg.Raw, ShouldBeNil)
+		})
+
+		Convey("returns an error for malformed config", func() {
+			c := Channel{Config: `{"region":`}
+			cfg, err := c.LoadConfig()
+			So(err, ShouldNotBeNil)
+			So(cfg.Raw, ShouldBeNil)
+		})
+
+		Convey("accepts null with nil Raw", func() {
+			c := Channel{Config: `null`}
+			cfg, err := c.LoadConfig()
+			So(err, ShouldBeNil)
+			So(cfg, ShouldResemble, ChannelConfig{})
+			So(cfg.Raw, ShouldBeNil)
+		})
+
+		Convey("keeps Raw nil when second parse fails on out-of-range number", func() {
+			// 1e400 超出 float64 范围：第一次解析因结构体无该键而成功，
+			// 第二次进 map 会失败并部分填充，此时必须整体丢弃 Raw 而非返回被降级的值
+			c := Channel{Config: `{"region":"x","a":1e400}`}
+			cfg, err := c.LoadConfig()
+			So(err, ShouldBeNil)
+			So(cfg.Region, ShouldEqual, "x")
+			So(cfg.Raw, ShouldBeNil)
+		})
+	})
+}
+
 // TestBatchDeleteChannelsChunked 覆盖 M5 分片删除：渠道数超过单批 500 时按片清理，
 // 验证分片循环完整执行、affected 为各片汇总、abilities 一并清理
 func TestBatchDeleteChannelsChunked(t *testing.T) {

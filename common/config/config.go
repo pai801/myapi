@@ -164,6 +164,31 @@ var AffinitySessionExpireSeconds = env.Int("AFFINITY_SESSION_EXPIRE_SECONDS", 18
 // 故关闭判断必须容错（参考 AFFINITY_KEY_MODE 的处理）。
 var AffinityBodySessionID = env.String("AFFINITY_BODY_SESSION_ID", "true")
 
+// AffinityDeriveTurnID 控制「无真实 turn 头但存在 session 锚点」时是否从请求 body
+// 确定性派生 turn id，使只有 session 头的客户端也能获得 turn 层亲和收益。
+//
+// 存字符串而非 bool，以支持容错关闭判断：仅当值等于 "false"（忽略大小写与首尾空白）时
+// 视为关闭，其余任何取值都视为开启（默认 "true"）。默认开启让客户端立即受益；关闭即一键
+// 回退到改造前的行为（turn 层空转、降级 session/user），无需回滚代码。运行期只读：仅在
+// 进程启动时由 env 注入，勿热更新。
+var AffinityDeriveTurnID = env.String("AFFINITY_DERIVE_TURN_ID", "true")
+
+// AffinitySessionExcludesUser 控制「有 session 标识时是否排除 user 层亲和」。
+//
+// 开启（默认）：session 非空时 Keys / KeysToSet 只产出 turn 与 session 键，读写都不触碰
+// user 层。原因是 user 层是「同用户最近一次成功渠道」的粗粒度绑定：新会话首请求 turn /
+// session 必 miss，若仍保留 user 键就会必然命中该用户的最近渠道，跳过随机散开；成功后再把
+// user 键重指为最近渠道并续期 TTL，会使同一 userId 下所有会话收敛到同一渠道（热点）。
+// 有 session 的客户端已能用 session 层拿到跨轮亲和，无需 user 兜底，故读写一并排除。
+// turn-only 客户端（无任何 session 标识）不受影响：仍产出并写入 user 键，保留跨轮亲和兜底。
+//
+// 存字符串而非 bool，以支持容错关闭判断：仅当值等于 "false"（忽略大小写与首尾空白）时
+// 视为关闭，其余任何取值都视为开启（默认 "true"）。这是应急开关，静默失效等于没有，故关闭
+// 判断必须容错（与 AFFINITY_BODY_SESSION_ID / AFFINITY_DERIVE_TURN_ID 惯例一致）。关闭即
+// 一键回退到旧行为（session 非空也读写 user 层），无需回滚代码。运行期只读：仅在进程启动
+// 时由 env 注入，勿热更新。
+var AffinitySessionExcludesUser = env.String("AFFINITY_SESSION_EXCLUDES_USER", "true")
+
 // DefaultAffinityMaxEntries 是亲和表容量上限的默认值。作为单一真源，同时供
 // AFFINITY_MAX_ENTRIES 的 env 默认值与 middleware.NewAffinityManager 的兜底共用，
 // 避免在两处复制魔法数字 20000。

@@ -239,16 +239,18 @@ func nonAutoDistribute(ctx context.Context, scope AffinityScope, requestModel st
 		logger.Log.Debugf("nonAutoDistribute: no affinity for user %d model %s, using weighted select", scope.UserID, requestModel)
 	}
 
-	// 亲和观测埋点：三档互斥且完备，必须在 weightedRandomSelect 回落**之前**判定（此后 ch 会被兜底填充）：
+	// 亲和观测埋点：六档互斥且完备，必须在 weightedRandomSelect 回落**之前**判定（此后 ch 会被兜底填充）：
 	//   - 未命中：无亲和键命中；
-	//   - 命中：亲和键命中且其渠道在候选集内被选中（亲和真正生效）；
+	//   - 命中：亲和键命中且其渠道在候选集内被选中（亲和真正生效），再按来源分「真实 turn 头」与
+	//     「body 派生 turn」两档（派生档独立计数，才能验证派生键是否真的轮内稳定复用）；
 	//   - 回落：亲和键命中但渠道不在候选集，最终加权随机（键命中 ≠ 生效，单列以防高估）。
 	// 口径为「选路尝试次数」：controller/relay.go 重试路径每次重试都重新选路并各计一次。
+	// scope.turnDerived 仅作为观测来源标记传入，不参与任何路由决策。
 	switch {
 	case !hasAffinity:
 		affinityStatsGlobal.recordMiss(scope.reqHeaders)
 	case ch != nil:
-		affinityStatsGlobal.recordHit(hitLevel)
+		affinityStatsGlobal.recordHit(hitLevel, scope.turnDerived)
 	default:
 		affinityStatsGlobal.recordFallback()
 	}
