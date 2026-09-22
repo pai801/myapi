@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Header,
   Icon,
   Label,
+  Popup,
   Segment,
   Table,
 } from 'semantic-ui-react';
@@ -24,6 +25,80 @@ function getColorByElapsedTime(elapsedTime) {
   return 'red';
 }
 
+const MESSAGE_MAX_LENGTH = 16;
+
+// content 有两种形态：
+//   1) 字符串：{"role":"user","content":"继续工作"}
+//   2) 分段数组：{"role":"user","content":[{"type":"text","text":"..."}, ...]}
+//     取数组内最后一个 type=text 分段的 text
+function extractContentText(content) {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    for (let i = content.length - 1; i >= 0; i--) {
+      const part = content[i];
+      if (part && part.type === 'text' && typeof part.text === 'string') {
+        return part.text.trim();
+      }
+    }
+  }
+  return '';
+}
+
+// 从请求体中取最后一条 role=user 的消息文本。
+// request_body 是原始 JSON 字符串；过大时后端会替换成 "[body too large: N bytes]"，
+// 解析失败直接返回空串。
+function extractUserMessage(requestBody) {
+  if (!requestBody) return '';
+  let parsed;
+  try {
+    parsed = JSON.parse(requestBody);
+  } catch (e) {
+    return '';
+  }
+  const messages = parsed && Array.isArray(parsed.messages) ? parsed.messages : null;
+  if (!messages) return '';
+  // 倒序找最后一条 user 消息；若它取不到文本（如纯图片分段）则继续往前找
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || msg.role !== 'user') continue;
+    const text = extractContentText(msg.content);
+    if (text) return text;
+  }
+  return '';
+}
+
+// 单元格内单行展示，超长截断；无论是否截断，hover 都浮出完整原文
+function renderMessage(text) {
+  if (!text) return '-';
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const display =
+    oneLine.length <= MESSAGE_MAX_LENGTH
+      ? oneLine
+      : `${oneLine.slice(0, MESSAGE_MAX_LENGTH)}…`;
+  return (
+    <Popup
+      content={
+        <div
+          style={{
+            whiteSpace: 'pre-wrap',
+            maxWidth: '520px',
+            maxHeight: '320px',
+            overflow: 'auto',
+          }}
+        >
+          {text}
+        </div>
+      }
+      trigger={
+        <span style={{ display: 'block', width: '100%', cursor: 'default' }}>{display}</span>
+      }
+      basic
+      hoverable
+      wide='very'
+    />
+  );
+}
+
 const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
@@ -38,6 +113,16 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasLogs]);
+
+  // 请求体只在 logs 引用变化时解析一次，避免 200ms 计时器每 tick 重复 JSON.parse
+  const messageMap = useMemo(() => {
+    const map = {};
+    (logs || []).forEach((log) => {
+      map[log.request_id] = extractUserMessage(log.request_body);
+    });
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logs]);
 
   return (
     <Segment color={hasLogs ? 'red' : 'grey'} style={{ marginBottom: '1em' }}>
@@ -58,23 +143,15 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
                 {t('log.table.time')}
               </Table.HeaderCell>
               {isAdmin() && (
-                <Table.HeaderCell className='hide-on-mobile' width={0.7}>
-                  {t('log.table.channel_id')}
-                </Table.HeaderCell>
-              )}
-              {isAdmin() && (
                 <Table.HeaderCell className='hide-on-mobile' width={1.5}>
                   {t('log.table.channel_name')}
                 </Table.HeaderCell>
               )}
-              <Table.HeaderCell width={0.8}>
-                {t('log.table.type')}
-              </Table.HeaderCell>
               <Table.HeaderCell width={3}>
                 {t('log.table.model')}
               </Table.HeaderCell>
-              <Table.HeaderCell className='hide-on-mobile' width={0.8}>
-                Stream
+              <Table.HeaderCell width={2.5}>
+                消息
               </Table.HeaderCell>
               {isAdmin() && (
                 <Table.HeaderCell className='hide-on-mobile' width={1.2}>
@@ -105,32 +182,12 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
                       {timestamp2string(log.started_at / 1000)}
                     </Table.Cell>
                     {isAdmin() && (
-                      <Table.Cell className='hide-on-mobile'>
-                        {log.channel ? (
-                          <Label basic as={Link} to={`/channel/edit/${log.channel}`}>
-                            {log.channel}
-                          </Label>
-                        ) : (
-                          ''
-                        )}
-                      </Table.Cell>
-                    )}
-                    {isAdmin() && (
                       <Table.Cell className='hide-on-mobile'>{log.channel_name || ''}</Table.Cell>
                     )}
                     <Table.Cell>
-                      <Label basic color='olive'>
-                        {t('log.type.usage')}
-                      </Label>
-                    </Table.Cell>
-                    <Table.Cell>
                       {log.model_name ? renderColorLabel(log.model_name.toLowerCase()) : ''}
                     </Table.Cell>
-                    <Table.Cell className='hide-on-mobile'>
-                      <Label basic color={log.is_stream ? 'blue' : 'grey'} size='mini'>
-                        {log.is_stream ? 'true' : 'false'}
-                      </Label>
-                    </Table.Cell>
+                    <Table.Cell>{renderMessage(messageMap[log.request_id])}</Table.Cell>
                     {isAdmin() && (
                       <Table.Cell className='hide-on-mobile'>
                         {log.username ? (
