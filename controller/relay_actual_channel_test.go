@@ -8,11 +8,15 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pai801/myapi/common"
 	"github.com/pai801/myapi/common/config"
 	"github.com/pai801/myapi/common/ctxkey"
 	"github.com/pai801/myapi/middleware"
+	dbmodel "github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/relay/model"
 	. "github.com/smartystreets/goconvey/convey"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 // TestResolveActualChannelId 锁定归因渠道选择：有 ActualChannelId（sticky 覆盖）时按实际渠道，
@@ -231,6 +235,114 @@ func TestFailureAttributionTargetsGivenChannel(t *testing.T) {
 
 		So(middleware.CooldownGlobal.IsCoolingDown(actual, modelName), ShouldBeTrue)
 		So(middleware.CooldownGlobal.IsCoolingDown(selected, modelName), ShouldBeFalse)
+	})
+}
+
+// TestResolveLastFailedChannelId 锁定重试剔除渠道的选择口径：与归因同源，sticky 覆盖时剔除
+// 实际服务渠道 B，否则退化为选路渠道 A。
+func TestResolveLastFailedChannelId(t *testing.T) {
+	Convey("resolveLastFailedChannelId 按实际服务渠道剔除", t, func() {
+		Convey("无覆盖（未记录 ActualChannelId）时剔除选路渠道", func() {
+			c, _ := gin.CreateTestContext(nil)
+			c.Set(ctxkey.ChannelId, 100)
+			So(resolveLastFailedChannelId(c, 100), ShouldEqual, 100)
+		})
+
+		Convey("sticky 覆盖时剔除实际渠道 B", func() {
+			c, _ := gin.CreateTestContext(nil)
+			c.Set(ctxkey.ChannelId, 100)
+			c.Set(ctxkey.ActualChannelId, 200)
+			So(resolveLastFailedChannelId(c, 100), ShouldEqual, 200)
+		})
+
+		Convey("ActualChannelId<=0 时退化为选路渠道", func() {
+			c, _ := gin.CreateTestContext(nil)
+			c.Set(ctxkey.ActualChannelId, 0)
+			So(resolveLastFailedChannelId(c, 100), ShouldEqual, 100)
+		})
+
+		Convey("ActualChannelId 与选路渠道相等时退化为选路渠道", func() {
+			c, _ := gin.CreateTestContext(nil)
+			c.Set(ctxkey.ActualChannelId, 100)
+			So(resolveLastFailedChannelId(c, 100), ShouldEqual, 100)
+		})
+	})
+}
+
+// TestRetryExclusionUsesActualChannel 锁定口径分裂修复的硬指标：sticky 覆盖后重试剔除的必须是
+// 实际服务渠道 B（而非选路渠道 A），并顺带验证 middleware.SelectChannel 的剔除语义确实生效。
+// 用临时 SQLite 库 + MemoryCacheEnabled=false（走 GetChannelsByGroup 直查，不污染全局渠道缓存）。
+func TestRetryExclusionUsesActualChannel(t *testing.T) {
+	oldMem := config.MemoryCacheEnabled
+	oldSQLite := common.UsingSQLite
+	oldDB := dbmodel.DB
+	config.MemoryCacheEnabled = false
+	common.UsingSQLite = true
+	defer func() {
+		config.MemoryCacheEnabled = oldMem
+		common.UsingSQLite = oldSQLite
+		dbmodel.DB = oldDB
+	}()
+
+	var err error
+	dbmodel.DB, err = gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	if err := dbmodel.DB.AutoMigrate(&dbmodel.Channel{}, &dbmodel.Ability{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	const group = "retry-excl-group"
+	// ModelsAlias 取请求模型名去分隔符后的形式，确保 SimplifyModelName 归一化后精确命中
+	const requestModel = "retry-excl-model"
+	const requestAlias = "retryexclmodel"
+	seed := func(id int, name string) {
+		ch := &dbmodel.Channel{
+			Id: id, Name: name, Status: dbmodel.ChannelStatusEnabled,
+			Group: group, Models: requestModel, ModelsAlias: requestAlias, Type: 1, Key: "sk-test",
+		}
+		if err := dbmodel.DB.Create(ch).Error; err != nil {
+			t.Fatalf("seed channel %d: %v", id, err)
+		}
+		ab := &dbmodel.Ability{Group: group, Model: requestModel, ChannelId: id, Enabled: true}
+		if err := dbmodel.DB.Create(ab).Error; err != nil {
+			t.Fatalf("seed ability %d: %v", id, err)
+		}
+	}
+
+	// 用隔离的渠道 id，避免与其它用例的冷却状态串扰
+	const selected = 7001
+	const actual = 7002
+	seed(selected, "channel-A")
+	seed(actual, "channel-B")
+	defer func() {
+		middleware.CooldownGlobal.ResetChannel(selected)
+		middleware.CooldownGlobal.ResetChannel(actual)
+	}()
+
+	scope := middleware.AffinityScope{UserID: 999, Group: group}
+
+	Convey("sticky 覆盖：剔除的是实际渠道 B", t, func() {
+		c, _ := gin.CreateTestContext(nil)
+		c.Set(ctxkey.ChannelId, selected)
+		c.Set(ctxkey.ActualChannelId, actual)
+		So(resolveLastFailedChannelId(c, selected), ShouldEqual, actual)
+
+		// 剔除 B 后 A 仍在候选集，选路应落到 A（不会选回真正失败的 B）
+		ch, _, err := middleware.SelectChannel(context.Background(), group, requestModel, actual, scope)
+		So(err, ShouldBeNil)
+		So(ch, ShouldNotBeNil)
+		So(ch.Id, ShouldEqual, selected)
+	})
+
+	Convey("B 是唯一候选时剔除 B 使选路返回 error（证明剔除语义生效）", t, func() {
+		// 清掉 A 的 ability，使 B 成为唯一候选
+		if err := dbmodel.DB.Where("channel_id = ?", selected).Delete(&dbmodel.Ability{}).Error; err != nil {
+			t.Fatalf("delete ability: %v", err)
+		}
+		_, _, err := middleware.SelectChannel(context.Background(), group, requestModel, actual, scope)
+		So(err, ShouldNotBeNil)
 	})
 }
 

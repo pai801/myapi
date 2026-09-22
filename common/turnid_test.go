@@ -172,10 +172,77 @@ func TestDeriveTurnIDFromBody(t *testing.T) {
 		assert.Equal(t, "", DeriveTurnIDFromBody([]byte(bodyBase), ""), "空 session 锚点必须降级为空串")
 	})
 
-	t.Run("payload 入口与 body 入口语义一致", func(t *testing.T) {
-		var payload map[string]any
-		require.NoError(t, json.Unmarshal([]byte(bodyAppendTool), &payload))
-		assert.Equal(t, DeriveTurnIDFromBody([]byte(bodyAppendTool), fixedSession), DeriveTurnIDFromPayload(payload, fixedSession), "两个入口对同一输入必须产出相同结果")
-		assert.Equal(t, "", DeriveTurnIDFromPayload(payload, ""), "payload 入口同样要求非空 session")
+	t.Run("同 body 重复调用结果稳定", func(t *testing.T) {
+		// 原「payload 入口与 body 入口语义一致」子测试随 DeriveTurnIDFromPayload 的删除而改写：
+		// 纯函数只剩 body 入口，改以确定性作为等价覆盖。
+		first := DeriveTurnIDFromBody([]byte(bodyAppendTool), fixedSession)
+		require.True(t, isLowerHex32(first), "对照：该 body 必须可派生")
+		assert.Equal(t, first, DeriveTurnIDFromBody([]byte(bodyAppendTool), fixedSession), "同 body 重复调用必须产出相同结果")
+	})
+}
+
+// TestDeriveTurnIDFromBody_MessagesClosedButBodyMalformed
+// G: messages 数组完整闭合、body 其余部分畸形（尾部截断 / 尾部垃圾），以及对照的数组未闭合
+// W: DeriveTurnIDFromBody
+// T: 前两种形态仍成功派生出固定值（与旧实现整体 json.Unmarshal 失败→空串的已知差异），
+// 数组未闭合形态必须返回空串（证明降级路径仍有效）
+//
+// 行为差异锁定说明：本函数刻意不做 json.Valid 预检，ArrayEach 只在 messages 缺失 / 非数组 /
+// 数组本身未闭合时报错。依赖调用方 json.Valid 预检（middleware/affinity_scope.go 的
+// readAffinityBodyPayload）拦截这些畸形输入；此处锁定行为差异，防止无声改变。
+func TestDeriveTurnIDFromBody_MessagesClosedButBodyMalformed(t *testing.T) {
+	// 下标 0、文本 "hi" 的固定派生值，用 OpenSpec 公式独立计算，不调用被测实现。
+	const wantHi = "524d1b704992d18007a06cd300002a77"
+
+	t.Run("messages 闭合但尾部畸形仍派生（已知差异）", func(t *testing.T) {
+		cases := []struct {
+			name string
+			body string
+		}{
+			{"尾部畸形截断", `{"messages":[{"role":"user","content":"hi"}],"bad":[`},
+			{"尾部垃圾", `{"messages":[{"role":"user","content":"hi"}]} garbage`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				// 前置校验：输入确为非法 JSON，证明本用例确实覆盖「畸形 body」而非合法输入。
+				require.False(t, json.Valid([]byte(tc.body)), "前置校验：该 body 必须是非法 JSON")
+				assert.Equal(t, wantHi, DeriveTurnIDFromBody([]byte(tc.body), fixedSession),
+					"messages 完整闭合时即便 body 其余部分畸形也会派生（与旧实现的已知差异，刻意锁定）")
+			})
+		}
+	})
+
+	t.Run("messages 数组未闭合时降级为空串", func(t *testing.T) {
+		// 对照：证明降级路径仍然有效，而非所有畸形输入都派生。
+		require.False(t, json.Valid([]byte(`{"messages":[`)), "前置校验：该 body 必须是非法 JSON")
+		assert.Equal(t, "", DeriveTurnIDFromBody([]byte(`{"messages":[`), fixedSession),
+			"messages 数组未闭合时 ArrayEach 报错，必须降级为空串")
+	})
+}
+
+// TestDeriveTurnIDFromBody_DuplicateKeysTakeFirst
+// G: messages 重复键、role 重复键
+// W: DeriveTurnIDFromBody
+// T: 均取第一个出现的值（与 encoding/json 取最后一个相反）
+//
+// 与 encoding/json 的已知差异，刻意锁定：jsonparser 正向扫描遇到重复键时取第一个。
+// 这是 json.Valid=true 时新旧实现的唯一语义分歧；真实客户端不产出重复键，风险低。
+func TestDeriveTurnIDFromBody_DuplicateKeysTakeFirst(t *testing.T) {
+	// 下标 0、文本 "first" 的固定派生值。
+	const wantFirst = "9769223a84a8a534e4fd2048aa4dc0df"
+
+	t.Run("messages 重复键取第一个数组", func(t *testing.T) {
+		body := `{"messages":[{"role":"user","content":"first"}],"messages":[{"role":"user","content":"second"}]}`
+		require.True(t, json.Valid([]byte(body)), "前置校验：重复键仍是合法 JSON")
+		assert.Equal(t, wantFirst, DeriveTurnIDFromBody([]byte(body), fixedSession),
+			"messages 重复键必须取第一个（encoding/json 会取最后一个 → 派生 second）")
+	})
+
+	t.Run("role 重复键取第一个值", func(t *testing.T) {
+		// 首键 user 命中 → 按下标 0、文本 "hi" 派生；若取末键 assistant 则整个消息被跳过。
+		body := `{"messages":[{"role":"user","role":"assistant","content":"hi"}]}`
+		require.True(t, json.Valid([]byte(body)), "前置校验：重复键仍是合法 JSON")
+		assert.Equal(t, "524d1b704992d18007a06cd300002a77", DeriveTurnIDFromBody([]byte(body), fixedSession),
+			"role 重复键必须取第一个 user（encoding/json 会取最后一个 assistant → 消息被跳过 → 空串）")
 	})
 }

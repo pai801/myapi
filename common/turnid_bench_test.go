@@ -33,12 +33,14 @@ func opencodeToolLoopBody(sessionID string, steps int) string {
 // BenchmarkDeriveTurnIDFromBody_ToolLoop
 // G: 固定 session 与逐步追加 tool_result 的代表性 opencode payload
 // W: 执行派生路径基准
-// T: 记录相对现状的解析开销且不改变功能代码
+// T: 记录新旧实现（jsonparser 扫描 vs encoding/json 全量解析）的开销对比
 //
-// 三个同口径子基准（同一份 12 步 payload，字节数一致）：
-//   - derive/...：派生开启后的完整路径（JSON 解析 + 派生），即本次改造新增的覆盖面；
-//   - baseline_parse_only：现状（派生关闭、仅 session body 补取）已有的 JSON 解析开销，无派生；
-//   - increment_derive_from_payload：body 已解析时派生本身的增量（middleware 复用共享 payload 的真实增量）。
+// 子基准口径（逐一对应实际 b.Run 名称）：
+//   - derive/steps=*：仅调用 DeriveTurnIDFromBody（jsonparser 扫描），**不含** json.Valid 预检；
+//     覆盖 1 / 4 / 12 / 40 步，展示派生开销随 payload 体积的增长；
+//   - baseline_parse_only：旧实现现状（encoding/json 全量解析到 map[string]any）的解析开销，作为对照；
+//   - json_valid_only：json.Valid 预检（middleware 安全红线）的独立开销，展示预检占比；
+//   - derive_from_body：预检 + jsonparser 派生全路径，与 middleware 生产路径等价。
 func BenchmarkDeriveTurnIDFromBody_ToolLoop(b *testing.B) {
 	const sessionID = "sess-bench-tool-loop"
 
@@ -58,6 +60,7 @@ func BenchmarkDeriveTurnIDFromBody_ToolLoop(b *testing.B) {
 	const baselineSteps = 12
 	baseRaw := []byte(opencodeToolLoopBody(sessionID, baselineSteps))
 
+	// 旧实现对照：encoding/json 全量解析到 map[string]any（旧 DeriveTurnIDFromBody 的第一步）。
 	b.Run(fmt.Sprintf("baseline_parse_only/bytes=%d", len(baseRaw)), func(b *testing.B) {
 		b.ReportAllocs()
 		b.SetBytes(int64(len(baseRaw)))
@@ -69,14 +72,26 @@ func BenchmarkDeriveTurnIDFromBody_ToolLoop(b *testing.B) {
 		}
 	})
 
-	var parsed map[string]any
-	if err := json.Unmarshal(baseRaw, &parsed); err != nil {
-		b.Fatal(err)
-	}
-	b.Run("increment_derive_from_payload", func(b *testing.B) {
+	// 新实现口径：json.Valid 预检（middleware 安全红线）的独立开销。
+	b.Run("json_valid_only", func(b *testing.B) {
 		b.ReportAllocs()
+		b.SetBytes(int64(len(baseRaw)))
 		for i := 0; i < b.N; i++ {
-			if got := DeriveTurnIDFromPayload(parsed, sessionID); got == "" {
+			if !json.Valid(baseRaw) {
+				b.Fatal("代表性 payload 必须是合法 JSON")
+			}
+		}
+	})
+
+	// 新实现口径：预检 + jsonparser 派生全路径（与 middleware 生产路径等价）。
+	b.Run("derive_from_body", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(baseRaw)))
+		for i := 0; i < b.N; i++ {
+			if !json.Valid(baseRaw) {
+				b.Fatal("代表性 payload 必须是合法 JSON")
+			}
+			if got := DeriveTurnIDFromBody(baseRaw, sessionID); got == "" {
 				b.Fatal("代表性 payload 必须可派生")
 			}
 		}

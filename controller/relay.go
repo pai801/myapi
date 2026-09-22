@@ -94,7 +94,8 @@ func Relay(c *gin.Context) {
 		monitor.Emit(actualChannelId, true)
 		return
 	}
-	lastFailedChannelId := channelId
+	// 剔除口径与归因口径统一为「实际服务渠道」：sticky 覆盖后首轮真正失败的是 B，剔除 B 才能避开它。
+	lastFailedChannelId := resolveLastFailedChannelId(c, channelId)
 	channelName := resolveActualChannelName(c, c.GetString(ctxkey.ChannelName))
 	group := c.GetString(ctxkey.Group)
 	failedModel := c.GetString(ctxkey.SuggestedModel)
@@ -102,7 +103,7 @@ func Relay(c *gin.Context) {
 	go processChannelRelayError(ctx, userId, resolveActualChannelId(c, channelId), channelName, failedModel, *bizErr)
 	retryTimes := config.RetryTimes
 	if !shouldRetry(c, bizErr) {
-		logger.Log.Infof("shouldRetry=false statusCode=%d requestId=%s lastFailedChannel=%d", bizErr.StatusCode, requestId, lastFailedChannelId)
+		logger.Log.Infof("shouldRetry=false statusCode=%d requestId=%s excludedChannel=%d", bizErr.StatusCode, requestId, lastFailedChannelId)
 		retryTimes = 0
 	} else {
 		logger.Log.Debugf("shouldRetry=true statusCode=%d retryTimes=%d requestId=%s", bizErr.StatusCode, retryTimes, requestId)
@@ -115,7 +116,7 @@ func Relay(c *gin.Context) {
 			logger.Log.Errorf("DistributeForRetry failed: %+v", err)
 			break
 		}
-		logger.Log.Infof("retry attempt=%d remaining=%d failedChannel=%d selectedChannel=%d model=%s requestId=%s",
+		logger.Log.Infof("retry attempt=%d remaining=%d excludedChannel=%d selectedChannel=%d model=%s requestId=%s",
 			retryTimes-i+1, i, lastFailedChannelId, channel.Id, suggestedModel, requestId)
 		middleware.SetupContextForSelectedChannel(c, channel, suggestedModel)
 		if active.Global.Get(requestId) != nil {
@@ -137,7 +138,8 @@ func Relay(c *gin.Context) {
 			return
 		}
 		channelId = c.GetInt(ctxkey.ChannelId)
-		lastFailedChannelId = channelId
+		// 同上：按本次尝试的实际服务渠道剔除，避免 sticky 覆盖后误剔选路渠道而放行真正失败的渠道。
+		lastFailedChannelId = resolveLastFailedChannelId(c, channelId)
 		channelName = resolveActualChannelName(c, c.GetString(ctxkey.ChannelName))
 		failedModel = c.GetString(ctxkey.SuggestedModel)
 		logger.Log.Debugf("retry failed channel #%d status=%d requestId=%s", resolveActualChannelId(c, channelId), bizErr.StatusCode, requestId)
@@ -150,7 +152,7 @@ func Relay(c *gin.Context) {
 		}
 	}
 	if bizErr != nil {
-		logger.Log.Infof("all retries exhausted lastFailedChannel=%d status=%d requestId=%s model=%s group=%s",
+		logger.Log.Infof("all retries exhausted excludedChannel=%d status=%d requestId=%s model=%s group=%s",
 			lastFailedChannelId, bizErr.StatusCode, requestId, requestModel, group)
 		if bizErr.StatusCode == http.StatusTooManyRequests {
 			bizErr.Error.Message = "当前分组上游负载已饱和，请稍后再试"
@@ -172,6 +174,16 @@ func resolveActualChannelId(c *gin.Context, selected int) int {
 		return actual
 	}
 	return selected
+}
+
+// resolveLastFailedChannelId 返回重试时应从候选集剔除的渠道：优先取 relay 路径记录的「实际服务渠道」，
+// 否则退化为本次尝试的「选路渠道」selected。实现与 resolveActualChannelId 同口径（见其注释）。
+//
+// 为什么不直接用 ctxkey.ChannelId：sticky 覆盖后 ctxkey.ChannelId 仍是选路渠道 A，而真正失败的是
+// 实际渠道 B。若按 A 剔除，等于放行真正失败的 B（重试可能再次落到 B，形成无效重试），
+// 同时又无理由排除了并未失败的 A。剔除口径必须与归因口径一致，统一为「实际服务渠道」。
+func resolveLastFailedChannelId(c *gin.Context, selected int) int {
+	return resolveActualChannelId(c, selected)
 }
 
 // resolveActualChannelName 返回失败日志应使用的渠道名：若 relay 路径记录了 ActualChannelName

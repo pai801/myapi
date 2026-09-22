@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,8 +97,8 @@ func TestResolveAffinityScope_SharesParsedPayload(t *testing.T) {
 	shared := readAffinityBodyPayload(c)
 	require.NotNil(t, shared, "缓存存在时应能取回共享 payload")
 	assert.Equal(t, body, string(shared.Raw), "共享 Raw 应为完整原始 body（不截断）")
-	assert.Equal(t, "sess-shared", sessionIDFromBody(shared.Payload),
-		"同一 payload 可被 session 消费者复用")
+	assert.Equal(t, "sess-shared", sessionIDFromBody(shared.Raw),
+		"同一份 Raw 可被 session 消费者复用")
 	assert.Equal(t, readsAfterResolve, reader.reads,
 		"复用共享 payload 不得再次读取底层 body（缓存命中）")
 
@@ -262,7 +263,7 @@ func TestReadAffinityBodyPayload_FailureDegrades(t *testing.T) {
 		assert.Nil(t, got, "空 body 必须返回 nil（静默降级）")
 	})
 
-	t.Run("read error restores body for downstream", func(t *testing.T) {
+	t.Run("read error degrades without faking a complete body", func(t *testing.T) {
 		gin.SetMode(gin.TestMode)
 		c := newAffinityBodyContext(t, http.MethodPost, "application/json", "", nil)
 		c.Request.Body = &errReadCloser{data: []byte(`{"session_id":"partial"}`), err: io.ErrUnexpectedEOF}
@@ -271,11 +272,13 @@ func TestReadAffinityBodyPayload_FailureDegrades(t *testing.T) {
 		require.NotPanics(t, func() { got = readAffinityBodyPayload(c) })
 		assert.Nil(t, got, "读取失败必须返回 nil（静默降级）")
 
-		// 链路可继续：body 已被恢复为已读到的部分，下游仍可读。
+		// 新语义：读取出错时绝不把「已读到的部分字节」伪装成完整 body 交给下游。
+		// 底层 reader 已 done，若实现错误地把部分内容重建成 NopCloser，下游会「成功」读到
+		// `{"session_id":"partial"}` 这段截断内容；此处断言读它必须失败（拿到 error）。
 		restored, err := io.ReadAll(c.Request.Body)
-		require.NoError(t, err)
-		assert.Equal(t, `{"session_id":"partial"}`, string(restored),
-			"读取失败后 body 必须被恢复，保证下游链路可继续")
+		require.Error(t, err, "读取失败后不得让下游成功读到被截断的部分内容")
+		assert.NotEqual(t, `{"session_id":"partial"}`, string(restored),
+			"绝不接受截断内容被当成完整 body 转发")
 	})
 
 	t.Run("invalid json degrades and keeps body", func(t *testing.T) {
@@ -880,9 +883,9 @@ func TestResolveAffinityScope_ReadsBodyOnceForBothConsumers(t *testing.T) {
 				shared := readAffinityBodyPayload(c)
 				require.NotNil(t, shared, "缓存存在时应能取回共享 payload")
 				assert.Equal(t, body, string(shared.Raw), "共享 Raw 必须为完整原始 body")
-				assert.Equal(t, sessionID, sessionIDFromBody(shared.Payload), "同一 payload 可被 session 消费者复用")
-				assert.Equal(t, wantTurnID, common.DeriveTurnIDFromPayload(shared.Payload, sessionID),
-					"同一 payload 可被 turn 消费者复用")
+				assert.Equal(t, sessionID, sessionIDFromBody(shared.Raw), "同一份 Raw 可被 session 消费者复用")
+				assert.Equal(t, wantTurnID, common.DeriveTurnIDFromBody(shared.Raw, sessionID),
+					"同一份 Raw 可被 turn 消费者复用")
 				assert.Equal(t, servedBefore, reader.servedAll, "复用共享 payload 不得再消费底层 body（缓存命中）")
 				assert.Equal(t, readsBefore, reader.reads, "复用共享 payload 不得再读取底层 reader（缓存命中）")
 
@@ -895,44 +898,58 @@ func TestResolveAffinityScope_ReadsBodyOnceForBothConsumers(t *testing.T) {
 		}
 	})
 
-	t.Run("both consumers share exactly one JSON parse", func(t *testing.T) {
-		// 为什么用分配量而非对象身份：readAffinityBodyPayload 每次调用都会重新 json.Unmarshal
-		// 并返回新 map，故「两次调用返回同一 Payload 实例」在本实现下为假，不能作为 parse-once 的
-		// 判据（见本用例对方案 B 的偏离说明）。json.Unmarshal 也无法注入计数，故改用「解析开销随
-		// payload 键数线性增长」这一等价信号：ResolveAffinityScope 的分配量必须与「仅一次读取步骤」
-		// 的基线同量级；若同一 Raw 被二次解析，分配量约翻倍。
+	t.Run("both consumers scan without per-key allocation", func(t *testing.T) {
+		// 旧实现（json.Unmarshal → map[string]any）的分配量随 payload 键数线性增长，故可用分配量
+		// 作为「是否发生全量解析」的可观测信号。新实现改为 GetRequestBodyReusable（一次全量读 + 缓存）
+		// + json.Valid（零分配）+ jsonparser 只读扫描，分配量不应随键数增长。
 		//
-		// 能力边界：该度量能检出「多出一次对同一大 body 的 JSON 解析」，但不能归因是哪个消费者多解析；
-		// 它是对 parse-once 的充分观测，而非对解析调用点的精确归因。
-		// 校准说明：下方阈值（1.5 倍正向对照、1.05+10 的上限）为经验标定值，随 Go 版本/运行时
-		// 分配行为浮动；若被测路径新增分配，须同步复核阈值，否则可能出现假失败或击杀力衰减。
-		body := affinityParseHeavyBody(800)
-		require.Greater(t, len(body), 4096, "解析密集 body 必须足够大，使解析开销压过固定开销")
+		// 断言设计（可击杀性）：
+		//   - 正向对照：json.Unmarshal 全量解析同 body 的分配量必须随键数显著增长，证明本度量对
+		//     「按 key 分配」敏感（否则阈值恒真、无击杀力）；
+		//   - 被测：ResolveAffinityScope 在小/大键数下的分配量差值必须远小于全量解析的差值 ——
+		//     若实现回退到全量解析，resolve 差值会与 unmarshal 差值同量级，本断言必然失败。
+		light := affinityParseHeavyBody(100)
+		heavy := affinityParseHeavyBody(1600)
 
-		// 单次读取步骤基线（同 body、同构造路径，固定开销与 resolve 一致，可在比值中抵消）。
-		oneReadStep := testing.AllocsPerRun(20, func() {
-			c := newAffinityBodyContext(t, http.MethodPost, "application/json", body, nil)
-			_ = readAffinityBodyPayload(c)
-		})
-		// 正向对照：读取步骤被调用两次（≈两次解析）时分配量应显著高于基线，证明阈值有击杀力。
-		twoReadSteps := testing.AllocsPerRun(20, func() {
-			c := newAffinityBodyContext(t, http.MethodPost, "application/json", body, nil)
-			_ = readAffinityBodyPayload(c)
-			_ = readAffinityBodyPayload(c)
-		})
-		// 被测：真实 ResolveAffinityScope 只应解析一次。
-		resolve := testing.AllocsPerRun(20, func() {
-			c := newAffinityBodyContext(t, http.MethodPost, "application/json", body, nil)
+		resolveLight := testing.AllocsPerRun(20, func() {
+			c := newAffinityBodyContext(t, http.MethodPost, "application/json", light, nil)
 			_ = ResolveAffinityScope(c)
 		})
+		resolveHeavy := testing.AllocsPerRun(20, func() {
+			c := newAffinityBodyContext(t, http.MethodPost, "application/json", heavy, nil)
+			_ = ResolveAffinityScope(c)
+		})
+		unmarshalLight := testing.AllocsPerRun(20, func() {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(light), &m); err != nil {
+				t.Fatal(err)
+			}
+		})
+		unmarshalHeavy := testing.AllocsPerRun(20, func() {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(heavy), &m); err != nil {
+				t.Fatal(err)
+			}
+		})
 
-		t.Logf("allocs: oneReadStep=%.0f twoReadSteps=%.0f resolve=%.0f", oneReadStep, twoReadSteps, resolve)
+		t.Logf("allocs: resolve(100)=%.0f resolve(1600)=%.0f unmarshal(100)=%.0f unmarshal(1600)=%.0f",
+			resolveLight, resolveHeavy, unmarshalLight, unmarshalHeavy)
 
-		// 正向对照必须先成立，否则「resolve 未超阈值」无意义（阈值可能松到什么都抓不到）。
-		require.Greater(t, twoReadSteps, oneReadStep*1.5,
-			"前置校验：二次解析必须显著抬高分配量，否则本度量无击杀力")
-		assert.LessOrEqual(t, resolve, oneReadStep*1.05+10,
-			"ResolveAffinityScope 不得对同一 Raw 做第二次 JSON 解析（分配量须与单次读取步骤同量级）")
+		require.Greater(t, unmarshalHeavy, unmarshalLight*2,
+			"前置校验：全量 json.Unmarshal 的分配量必须随键数显著增长，否则本度量无击杀力")
+
+		assert.Less(t, resolveHeavy-resolveLight, (unmarshalHeavy-unmarshalLight)/4,
+			"ResolveAffinityScope 不得按 payload 键数分配（回退到全量解析必然超标）")
+		// 放宽为比值断言（原 resolveHeavy <= resolveLight+10 在 -race 下间歇假失败）：
+		// resolveLight 实测 45~46、resolveHeavy 54~57，差值 10~11 恰好骑在 +10 边界上，
+		// -race -count=30 可复现失败。改用 resolveHeavy < resolveLight*1.5：
+		//   - 余量：实测比值 54/45≈1.20 ~ 57/46≈1.24，距 1.5 尚有约 26 个百分点（≈10 个分配单位）；
+		//   - 选比值而非固定 +N 的原因：分配量含读取缓冲随 body 体积增长的常数项，该常数项
+		//     随版本/体积浮动，比值口径与量级无关、更抗同向漂移；
+		//   - 击杀力：若回退到全量解析，resolveLight/Heavy 会各自叠加 unmarshal 量级
+		//     （实测 unmarshal 430/6430），比值将跃至 ~13，远超 1.5 必然失败。
+		assert.Less(t, resolveHeavy, resolveLight*1.5,
+			"resolve 分配量应基本与键数无关（比值口径，回退到全量解析必然超标）")
 	})
 
 	t.Run("negative control: prewarmed cache performs zero data reads", func(t *testing.T) {
@@ -957,9 +974,9 @@ func TestResolveAffinityScope_ReadsBodyOnceForBothConsumers(t *testing.T) {
 	})
 }
 
-// affinityParseHeavyBody 构造键数可控的合法 JSON body：键数越多，json.Unmarshal 的分配量越大，
-// 使「解析次数」成为分配量上的线性可观测信号。含 session_id 与可派生 messages，保证被测路径
-// 的两个消费者都实际消费该 payload。
+// affinityParseHeavyBody 构造键数可控的合法 JSON body：键数越多，json.Unmarshal 全量解析的分配量
+// 越大 —— 该性质被用作「是否发生全量解析」的可观测信号（见 parse 子测试的正向对照）。
+// 含 session_id 与可派生 messages，保证被测路径的两个消费者都实际消费该 body。
 func affinityParseHeavyBody(keys int) string {
 	var b strings.Builder
 	b.WriteString(`{"session_id":"sess-once","messages":[{"role":"user","content":"hello once"}]`)

@@ -391,9 +391,9 @@ func (e *errReadCloser) Read(p []byte) (int, error) {
 
 func (e *errReadCloser) Close() error { return nil }
 
-// --- 10. GetRequestBodyReusable 读取出错：恢复 body 但不写缓存 ---
+// --- 10. GetRequestBodyReusable 读取出错：不恢复部分 body、不写缓存 ---
 
-func TestGetRequestBodyReusable_ReadErrorRestoresBodyWithoutCache(t *testing.T) {
+func TestGetRequestBodyReusable_ReadErrorDoesNotRestorePartialBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	boom := errors.New("connection reset by peer")
@@ -409,9 +409,12 @@ func TestGetRequestBodyReusable_ReadErrorRestoresBodyWithoutCache(t *testing.T) 
 	_, cached := c.Get(ctxkey.KeyRequestBody)
 	assert.False(t, cached, "读取出错时不得写缓存（避免把不完整/损坏内容当成完整 body 复用）")
 
-	require.NotNil(t, c.Request.Body, "读取出错时也必须恢复 body，避免留下半损坏的 c.Request.Body")
+	// 新语义：读取出错时不得把「已读到的部分字节」包装成完整可读 body 交给下游。
+	// 底层 reader 已 done，若实现错误地把部分内容重建成 NopCloser，下游会「成功」读到
+	// `{"session_id":"partial"}` 这段被截断的内容；此处断言读它必须失败（拿到 error）。
+	require.NotNil(t, c.Request.Body, "读取出错时 c.Request.Body 不应被置 nil")
 	restored, rerr := io.ReadAll(c.Request.Body)
-	require.NoError(t, rerr)
-	assert.Equal(t, `{"session_id":"partial"}`, string(restored),
-		"恢复的 body 应为已读到的部分字节")
+	require.Error(t, rerr, "不得把部分内容伪装成完整 body 供下游成功读取")
+	assert.NotEqual(t, `{"session_id":"partial"}`, string(restored),
+		"绝不接受截断内容被当成完整 body 转发")
 }

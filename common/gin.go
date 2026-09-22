@@ -56,7 +56,13 @@ func UnmarshalBodyReusable(c *gin.Context, v any) error {
 //   - ctxkey.KeyRequestBody 已缓存 → 直接返回缓存（不重复读），并按缓存重建 c.Request.Body
 //     （缓存可能来自不恢复 body 的 GetRequestBody，此时必须重建才能保证下游读到完整 body）；
 //   - 否则全量 io.ReadAll → 写入缓存 → 重建 c.Request.Body；
-//   - 读取出错 → 返回错误，调用方自行静默降级。
+//   - 读取出错 → 返回错误且**不恢复** c.Request.Body、不写缓存：下游若继续读会读到剩余字节或
+//     直接失败，而不会读到被伪装成完整 body 的截断内容。调用方自行静默降级。
+//
+// 读取出错的取舍（刻意如此）：io.ReadAll 出错时返回的是**已读到的部分字节**。若把它重新包成
+// 可读的 NopCloser，下游（GetRequestBody / io.Copy / c.ShouldBind）会「成功」读到一段被截断的
+// body 并转发给上游，把显式读错误静默降级成数据损坏的请求。因此宁可让下游读失败/读到剩余字节，
+// 也绝不把截断内容当成完整 body 转发；同时不写缓存，避免损坏内容被后续路径当完整 body 复用。
 //
 // 刻意不做 size cap（不用 io.LimitReader）：LimitReader 会把**截断后**的 body 交给下游，
 // 属于数据损坏事故；而 cap 本身也无意义 —— 下游无论如何都会全量读 body
@@ -74,9 +80,8 @@ func GetRequestBodyReusable(c *gin.Context) ([]byte, error) {
 	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		// 读取出错时 body 已被部分消费，恢复已读到的部分（哪怕为空），避免下游拿到半损坏的 body。
-		// 刻意不写缓存：不完整/损坏的内容一旦被缓存，会被后续路径当成完整 body 复用。
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
+		// 刻意不恢复 c.Request.Body、不写缓存：io.ReadAll 已消费部分字节，重建可读 reader 只会把
+		// 截断内容伪装成完整 body 交给下游（详见函数头注释的取舍说明）。
 		return nil, err
 	}
 	_ = c.Request.Body.Close()

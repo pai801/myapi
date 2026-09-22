@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
 	"github.com/pai801/myapi/common"
 	"github.com/pai801/myapi/common/config"
@@ -120,9 +121,10 @@ type AffinityKey struct {
 // ResolveAffinityScope 解析请求的亲和维度。
 //
 // turn / session 层优先读请求头（零成本）。当缺 session 头或（后续）缺 turn 头时，
-// 按开关与请求特征决定是否读取请求 body：session 补取与 turn 派生共享同一次读取与解析
-// （见 readAffinityBodyPayload）—— 下半区主流客户端（Cline / Roo Code / Kilo Code、
-// Responses 多轮）不在头里传会话标识，只放在 body 里。
+// 按开关与请求特征决定是否读取请求 body：session 补取与 turn 派生共享同一次读取与同一份
+// Raw（见 readAffinityBodyPayload），两个消费者各自用 jsonparser 只读扫描，不产出中间 map
+// —— 下半区主流客户端（Cline / Roo Code / Kilo Code、Responses 多轮）不在头里传会话标识，
+// 只放在 body 里。
 //
 // 红线二：取不到 turn 时绝不生成随机 id。这与私有仓
 // myapi-server/internal/channel/buddy/headers.go:406 的 conversationRequestIDFromContext
@@ -148,13 +150,13 @@ func ResolveAffinityScope(c *gin.Context) AffinityScope {
 		if shared := readAffinityBodyPayload(c); shared != nil {
 			// session 提取仍受自身独立开关约束：补取关闭时即便已读 body 也不得取会话标识。
 			if sessionID == "" && affinityBodySessionIDEnabled() {
-				sessionID = sessionIDFromBody(shared.Payload)
+				sessionID = sessionIDFromBody(shared.Raw)
 			}
 			// 真实 turn 头优先；派生仅在派生开关、session 锚点非空与 JSON 请求守卫
-			// 全部满足时接入（进入本分支即已通过方法与 Content-Type 守卫）。派生只消费
-			// 共享 payload，不消费 Raw，确保请求路径不发生第二次 JSON 解析。
+			// 全部满足时接入（进入本分支即已通过方法与 Content-Type 守卫）。派生直接消费
+			// 共享 Raw，与 session 提取各自用 jsonparser 只读扫描，请求路径不发生第二次 body 读取。
 			if turnID == "" && sessionID != "" && affinityDeriveTurnIDEnabled() {
-				if derived := common.DeriveTurnIDFromPayload(shared.Payload, sessionID); derived != "" {
+				if derived := common.DeriveTurnIDFromBody(shared.Raw, sessionID); derived != "" {
 					turnID = derived
 					turnDerived = true
 				}
@@ -206,12 +208,12 @@ var affinityBodyMethods = map[string]bool{
 	http.MethodPatch: true,
 }
 
-// affinityBodyPayload 表示一次请求内共享的完整 body 与解析结果。
-// Raw 与 Payload 均为请求内只读引用：不得原地修改、截断或跨请求持有，
-// 生命周期不超过当前请求，也不得写入全局状态或派生缓存。
+// affinityBodyPayload 表示一次请求内共享的完整 body。
+// Raw 为请求内只读引用：不得原地修改、截断或跨请求持有，生命周期不超过当前请求，
+// 也不得写入全局状态或派生缓存。两个消费者（session 提取与 turn 派生）各自用 jsonparser
+// 只读扫描 Raw，不再产出中间 map。
 type affinityBodyPayload struct {
-	Raw     []byte         // 完整原始 body（只读，不得原地修改）
-	Payload map[string]any // Raw 的唯一一次 JSON 反序列化结果（只读）
+	Raw []byte // 完整原始 body（只读，不得原地修改）
 }
 
 // affinityDeriveTurnIDEnabled 判定 turn 派生开关是否开启：仅当值等于 "false"
@@ -248,7 +250,7 @@ func canReadAffinityJSONBody(c *gin.Context) bool {
 	return strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json")
 }
 
-// readAffinityBodyPayload 读取并恢复完整请求体，且至多反序列化一次。
+// readAffinityBodyPayload 读取并恢复完整请求体，且至多一次 IO。
 //
 // 必须使用 common.GetRequestBodyReusable：它在读取后恢复 c.Request.Body（下游有路由
 // 直接读 c.Request.Body —— proxy.go / audio.go / text.go / image.go），并复用既有
@@ -257,6 +259,10 @@ func canReadAffinityJSONBody(c *gin.Context) bool {
 // 失败一律静默降级（返回 nil），绝不 abort 请求、绝不报错、绝不打印 body 内容或会话 id：
 // 亲和只是选路优化，不能因 body 形态异常而影响主流程，也不应泄漏用户数据。
 // 读取失败、空 body 或非法 JSON 均返回 nil。
+//
+// json.Valid 预检是安全红线而非性能优化：jsonparser 对畸形 JSON 会部分成功（例如
+// `{"litellm_session_id":"leaked","messages":[` 仍能取出 session 值），若不预检就会从
+// 损坏/截断的请求里采集会话标识并据此选路。预检失败即拒绝，绝不从半截 JSON 提取任何标识。
 func readAffinityBodyPayload(c *gin.Context) *affinityBodyPayload {
 	if c == nil || c.Request == nil {
 		return nil
@@ -265,45 +271,28 @@ func readAffinityBodyPayload(c *gin.Context) *affinityBodyPayload {
 	if err != nil || len(body) == 0 {
 		return nil
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if !json.Valid(body) {
 		return nil
 	}
-	return &affinityBodyPayload{Raw: body, Payload: payload}
+	return &affinityBodyPayload{Raw: body}
 }
 
-// sessionIDFromBody 从只读 payload 按既有字段优先级提取并归一化会话标识。
+// sessionIDFromBody 从只读 body 按既有字段优先级提取并归一化会话标识。
 //
 // 本函数不再自行读取 body：开关、方法与 Content-Type 守卫由调用方（ResolveAffinityScope）
-// 统一把关，payload 由两个消费者（session 提取与 turn 派生）共享，避免重复读取与解析。
+// 统一把关，body 由两个消费者（session 提取与 turn 派生）共享，避免重复读取。
 // 缺失或类型不符一律返回空串并沿既有层级降级，绝不报错、绝不打印会话 id。
-func sessionIDFromBody(payload map[string]any) string {
+func sessionIDFromBody(body []byte) string {
 	for _, path := range affinityBodySessionIDFields {
-		if raw, ok := lookupAffinityBodyString(payload, path); ok {
-			if id := normalizeAffinityID(raw); id != "" {
-				return id
-			}
+		raw, err := jsonparser.GetString(body, path...)
+		if err != nil {
+			continue
+		}
+		if id := normalizeAffinityID(raw); id != "" {
+			return id
 		}
 	}
 	return ""
-}
-
-// lookupAffinityBodyString 沿 path 逐层取字符串字段；任一中间层缺失、非对象或类型不符
-// 均返回 ("", false)，由调用方继续尝试下一优先级字段（容错，绝不报错）。
-func lookupAffinityBodyString(payload map[string]any, path []string) (string, bool) {
-	var cur any = payload
-	for _, key := range path {
-		obj, ok := cur.(map[string]any)
-		if !ok {
-			return "", false
-		}
-		cur, ok = obj[key]
-		if !ok {
-			return "", false
-		}
-	}
-	s, ok := cur.(string)
-	return s, ok
 }
 
 // firstNonEmptyHeader 按给定顺序返回首个归一化后非空的头值。
