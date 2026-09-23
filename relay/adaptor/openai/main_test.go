@@ -18,6 +18,7 @@ import (
 	"github.com/pai801/myapi/relay/model"
 	"github.com/pai801/myapi/relay/relaymode"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/tidwall/gjson"
 )
 
 func TestBuildStreamResponseBody(t *testing.T) {
@@ -2738,6 +2739,173 @@ func classifyC1Legacy(outcome c1LegacyOutcome) string {
 }
 
 // =============================================================================
+// 模块 C1 单次扫描改造 / Task 2：choice 与 message 层折叠语义锁定
+//
+// 这两个测试把 choice / message 层的选值与校验语义（first-wins 重复键、大小写变体 last-wins、
+// nullPolicy、被跳过/被覆盖值的 deepValidate、以及声明顺序错误优先级）固定为可观测行为。
+// Task 2 是「语义等价」重构，故测试期望值先于迁移代码给出；迁移前后都必须通过。
+// =============================================================================
+
+// c1ExtractOutcome 汇总 extractTextResponse 的可观测结果，供折叠语义表驱动用例断言。
+type c1ExtractOutcome struct {
+	contents []string
+	errText  string
+}
+
+// c1Extract 调用 extractTextResponse 并把结果归一为 c1ExtractOutcome。
+func c1Extract(t *testing.T, body string) c1ExtractOutcome {
+	t.Helper()
+	result, err := extractTextResponse([]byte(body))
+	if err != nil {
+		return c1ExtractOutcome{errText: err.Error()}
+	}
+	return c1ExtractOutcome{contents: result.ChoiceContents}
+}
+
+// assertC1Outcome 断言成功/失败分类、choice 文本、以及错误文本中字段标签的出现/缺席。
+func assertC1Outcome(t *testing.T, body string, got c1ExtractOutcome, wantContents []string, wantErrContains, wantErrAbsent []string) {
+	t.Helper()
+	if len(wantErrContains) > 0 {
+		if got.errText == "" {
+			t.Fatalf("期望提取失败，got contents=%q (body=%s)", got.contents, body)
+		}
+		for _, want := range wantErrContains {
+			if !strings.Contains(got.errText, want) {
+				t.Fatalf("错误文本缺少 %q: got %q (body=%s)", want, got.errText, body)
+			}
+		}
+		for _, absent := range wantErrAbsent {
+			if strings.Contains(got.errText, absent) {
+				t.Fatalf("错误文本不应包含 %q（字段优先级错误）: got %q (body=%s)", absent, got.errText, body)
+			}
+		}
+		return
+	}
+	if got.errText != "" {
+		t.Fatalf("期望提取成功，got err=%q (body=%s)", got.errText, body)
+	}
+	if !reflect.DeepEqual(got.contents, wantContents) {
+		t.Fatalf("choice 文本不一致: want=%q got=%q (body=%s)", wantContents, got.contents, body)
+	}
+}
+
+// TestExtractTextResponseChoiceFoldSemantics 锁定 choice 层（index/finish_reason/message）的
+// 选值与校验语义，以及 index->finish_reason->message 错误优先级。
+//
+// G: index/finish_reason/message 的同名重复、大小写变体、null 覆盖、被跳过坏值及跨字段同时出错表 |
+// W: extractTextResponse | T: first/last-wins、nullPolicy、deepValidate 与声明顺序错误优先级和改造前一致。
+func TestExtractTextResponseChoiceFoldSemantics(t *testing.T) {
+	cases := []struct {
+		name            string
+		body            string
+		wantContents    []string
+		wantErrContains []string
+		wantErrAbsent   []string
+	}{
+		// ---- index：int，nullResetsToZero ----
+		{name: "index_same_key_duplicate_first_wins", body: `{"choices":[{"index":0,"index":1,"message":{"content":"a"}}]}`, wantContents: []string{"a"}},
+		{name: "index_case_variant_last_wins", body: `{"choices":[{"INDEX":0,"index":1,"message":{"content":"a"}}]}`, wantContents: []string{"a"}},
+		{name: "index_null_resets_to_zero", body: `{"choices":[{"index":0,"index":null,"message":{"content":"a"}}]}`, wantContents: []string{"a"}},
+		{name: "index_bad_value_errors", body: `{"choices":[{"index":"x","message":{"content":"a"}}]}`, wantErrContains: []string{"choices.index"}},
+
+		// ---- finish_reason：string，nullIsNoOp ----
+		{name: "finish_reason_bad_value_errors", body: `{"choices":[{"index":0,"finish_reason":5,"message":{"content":"a"}}]}`, wantErrContains: []string{"choices.finish_reason"}},
+		{name: "finish_reason_case_variant_bad_overwrites", body: `{"choices":[{"finish_reason":"stop","FINISH_REASON":5,"message":{"content":"a"}}]}`, wantErrContains: []string{"choices.finish_reason"}},
+		{name: "finish_reason_null_is_noop", body: `{"choices":[{"finish_reason":null,"finish_reason":"stop","message":{"content":"a"}}]}`, wantContents: []string{"a"}},
+
+		// ---- message：object，nullResetsToZero ----
+		{name: "message_same_key_duplicate_first_wins", body: `{"choices":[{"message":{"content":"first"},"message":{"content":"second"}}]}`, wantContents: []string{"first"}},
+		{name: "message_case_variant_last_wins", body: `{"choices":[{"message":{"content":"first"},"MESSAGE":{"content":"second"}}]}`, wantContents: []string{"second"}},
+		{name: "message_null_resets_to_zero", body: `{"choices":[{"message":{"content":"a"},"message":null}]}`, wantContents: []string{""}},
+		{name: "message_null_then_value", body: `{"choices":[{"message":null,"message":{"content":"a"}}]}`, wantContents: []string{"a"}},
+		{name: "message_bad_value_errors", body: `{"choices":[{"message":5}]}`, wantErrContains: []string{"choices.message"}},
+		{name: "message_skipped_bad_nested_deep_validated", body: `{"choices":[{"message":{"content":"ok"},"message":{"content":1e400}}]}`, wantErrContains: []string{"choices.message", "message.content"}},
+
+		// ---- 跨字段同时出错：声明顺序 index -> finish_reason -> message ----
+		{name: "priority_index_over_finish_reason_and_message", body: `{"choices":[{"index":"x","finish_reason":5,"message":5}]}`, wantErrContains: []string{"choices.index"}, wantErrAbsent: []string{"choices.finish_reason", "choices.message"}},
+		{name: "priority_finish_reason_over_message", body: `{"choices":[{"finish_reason":5,"message":5}]}`, wantErrContains: []string{"choices.finish_reason"}, wantErrAbsent: []string{"choices.message"}},
+
+		// ---- 数组元素顺序：第二个 choice 出错时返回该元素错误 ----
+		{name: "second_choice_error", body: `{"choices":[{"message":{"content":"a"}},{"message":{"content":"b"},"index":"x"}]}`, wantErrContains: []string{"choices.index"}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := c1Extract(t, tc.body)
+			assertC1Outcome(t, tc.body, got, tc.wantContents, tc.wantErrContains, tc.wantErrAbsent)
+		})
+	}
+}
+
+// TestExtractTextResponseMessageFoldSemantics 锁定 message 层（role/refusal/name/tool_call_id/
+// content/reasoning_content/tool_calls）的选值与校验语义及声明顺序错误优先级。
+//
+// G: role/content/tool_calls 等同名重复、大小写变体、null、被覆盖嵌套坏值及多字段同时出错表 |
+// W: extractTextResponse | T: 文本、错误分类/文本及 role->refusal->name->tool_call_id->
+// content->reasoning_content->tool_calls 优先级和改造前一致。
+func TestExtractTextResponseMessageFoldSemantics(t *testing.T) {
+	// wrapMessage 把 message 对象 JSON 包进一个合法的 chat 响应体。
+	wrapMessage := func(messageJSON string) string {
+		return `{"choices":[{"index":0,"message":` + messageJSON + `,"finish_reason":"stop"}]}`
+	}
+
+	cases := []struct {
+		name            string
+		messageJSON     string
+		wantContents    []string
+		wantErrContains []string
+		wantErrAbsent   []string
+	}{
+		// ---- content：any，nullResetsToZero ----
+		{name: "content_same_key_duplicate_first_wins", messageJSON: `{"content":"a","content":"b"}`, wantContents: []string{"a"}},
+		{name: "content_case_variant_last_wins", messageJSON: `{"content":"a","CONTENT":"b"}`, wantContents: []string{"b"}},
+		{name: "content_null_resets_to_zero", messageJSON: `{"content":"a","content":null}`, wantContents: []string{""}},
+		{name: "content_null_then_value", messageJSON: `{"content":null,"content":"b"}`, wantContents: []string{"b"}},
+		// content 数组仅拼接对象元素中 type=="text" 的字符串 text；裸字符串/数字元素被忽略。
+		{name: "content_array_text_parts", messageJSON: `{"content":["x",{"type":"text","text":"y"},5]}`, wantContents: []string{"y"}},
+
+		// ---- string 字段的大小写/重复/null ----
+		{name: "role_same_key_duplicate_skipped_bad_value", messageJSON: `{"role":"assistant","role":5,"content":"a"}`, wantErrContains: []string{"message.role"}},
+		{name: "role_case_variant_bad_overwrites", messageJSON: `{"role":"assistant","ROLE":5,"content":"a"}`, wantErrContains: []string{"message.role"}},
+		{name: "role_null_is_noop", messageJSON: `{"role":null,"content":"a"}`, wantContents: []string{"a"}},
+		{name: "role_null_is_noop_before_value", messageJSON: `{"role":null,"role":"assistant","content":"a"}`, wantContents: []string{"a"}},
+
+		// ---- 单字段类型错误 ----
+		{name: "refusal_bad_value_errors", messageJSON: `{"refusal":5,"content":"a"}`, wantErrContains: []string{"message.refusal"}},
+		{name: "name_bad_value_errors", messageJSON: `{"name":5}`, wantErrContains: []string{"message.name"}},
+		{name: "tool_call_id_bad_value_errors", messageJSON: `{"tool_call_id":5}`, wantErrContains: []string{"message.tool_call_id"}},
+		{name: "content_unrepresentable_number_errors", messageJSON: `{"content":1e400}`, wantErrContains: []string{"message.content"}},
+		{name: "reasoning_content_unrepresentable_number_errors", messageJSON: `{"reasoning_content":1e400}`, wantErrContains: []string{"message.reasoning_content"}},
+		{name: "tool_calls_bad_value_errors", messageJSON: `{"tool_calls":5}`, wantErrContains: []string{"message.tool_calls"}},
+
+		// ---- tool_calls：大小写变体、被覆盖坏值、嵌套 function 错误 ----
+		{name: "tool_calls_case_variant_bad_overwrites", messageJSON: `{"content":"a","tool_calls":[],"TOOL_CALLS":5}`, wantErrContains: []string{"message.tool_calls"}},
+		// 被覆盖的坏数组走 deepValidate：数组元素内被覆盖的坏 function 再走 validateFunctionFields。
+		{name: "tool_calls_covered_bad_nested_deep_validated", messageJSON: `{"content":"ok","tool_calls":[{"function":{"name":5},"FUNCTION":{"name":"ok"}}],"TOOL_CALLS":[]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function.name"}},
+		// 既有语义（须保持）：胜出 tool_calls 元素的 function 仅做浅层对象校验，不递归校验其字段。
+		{name: "tool_calls_winner_function_fields_shallow_only", messageJSON: `{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":5}}]}`, wantContents: []string{"a"}},
+
+		// ---- 跨字段同时出错：声明顺序 role->refusal->name->tool_call_id->content->reasoning_content->tool_calls ----
+		{name: "priority_role_over_content_and_tool_calls", messageJSON: `{"role":5,"content":1e400,"tool_calls":5}`, wantErrContains: []string{"message.role"}, wantErrAbsent: []string{"message.content", "message.tool_calls"}},
+		{name: "priority_refusal_over_content", messageJSON: `{"refusal":5,"content":1e400}`, wantErrContains: []string{"message.refusal"}, wantErrAbsent: []string{"message.content"}},
+		{name: "priority_name_over_tool_call_id_and_content", messageJSON: `{"name":5,"tool_call_id":5,"content":1e400}`, wantErrContains: []string{"message.name"}, wantErrAbsent: []string{"message.tool_call_id", "message.content"}},
+		{name: "priority_tool_call_id_over_content", messageJSON: `{"tool_call_id":5,"content":1e400}`, wantErrContains: []string{"message.tool_call_id"}, wantErrAbsent: []string{"message.content"}},
+		{name: "priority_content_over_reasoning_content", messageJSON: `{"content":1e400,"reasoning_content":1e400}`, wantErrContains: []string{"message.content"}, wantErrAbsent: []string{"message.reasoning_content"}},
+		{name: "priority_reasoning_content_over_tool_calls", messageJSON: `{"reasoning_content":1e400,"tool_calls":5}`, wantErrContains: []string{"message.reasoning_content"}, wantErrAbsent: []string{"message.tool_calls"}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			body := wrapMessage(tc.messageJSON)
+			got := c1Extract(t, body)
+			assertC1Outcome(t, body, got, tc.wantContents, tc.wantErrContains, tc.wantErrAbsent)
+		})
+	}
+}
+
+// =============================================================================
 // 任务 7.1（reviewer advisory）：C1 openai.Handler 入口级断言
 //
 // 5.1 矩阵只覆盖 extractTextResponse 纯函数；入口 Handler 的
@@ -3076,8 +3244,16 @@ func benchmarkC1ManyChoiceLargeResponse() []byte {
 //   - 331B 小响应、13KB 单 choice、96KB 40-choice；
 //   - 每个规模给出 before（encoding/json → SlimTextResponse）与 after（extractTextResponse）。
 //
-// 测量证据：after 的 ns/op 高于 before（根因 json.Valid 全量扫描 + gjson.ParseBytes 内部整份拷贝），
-// 但 B/op 与 allocs/op 显著下降。该回归在 7.3 报告中如实记录为 documented measurement evidence。
+// 测量证据（订正）：C1 ns/op 回归的真正根因是 choice/message 对象的重复全量扫描——改造前每个目标键
+// 各自调用一次 foldMatch，而每次 foldMatch 都对同一对象执行一遍 gjson.Result.ForEach；40-choice
+// 样本合计约 443 次遍历。改造后由 foldCollect 单次遍历同时收集全部目标，遍历次数降至约 81 次，
+// 96KB/40-choice 的 ns/op 已优于 before_typed_decode。
+//
+// 另有两项非主因成本：入口 json.Valid 全量扫描（约 24%）是等价性所需的固定成本（用于捕获 trailing
+// garbage 与文档后段畸形），必须保留；gjson.ParseBytes 的内部整份拷贝（约 1%）不是 ns 回归主因，
+// 契约 §2.B 已裁定保留。在 96KB/40-choice 验收规模上，三项指标（ns/op、B/op、allocs/op）均不劣于
+// before_typed_decode 基线；仅 single_choice_13KB 的 B/op 略高于基线，由上述 json.Valid 全量扫描与
+// gjson.ParseBytes 内部整份拷贝这两个保留项导致，非本次优化目标。
 func BenchmarkJsonParserHotPathNonStreamUsageSizes(b *testing.B) {
 	sizes := []struct {
 		name string
@@ -3110,5 +3286,535 @@ func BenchmarkJsonParserHotPathNonStreamUsageSizes(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// BenchmarkFoldCollectC1Objects 对比典型 choice/message 对象在 C1 语义下的两种折叠方式：
+//   - fold_match_per_target：模拟改造前行为——对每个目标键各调用一次 foldMatch，而每次 foldMatch
+//     都对同一对象执行一遍 gjson.Result.ForEach（对象遍历次数 = 目标数）；
+//   - fold_collect_single_pass：改造后行为——一次 foldCollect 单次遍历同时收集全部目标。
+//
+// 归因要点：两条路径的 allocs/op 均应为 0（foldMatch 与 foldCollect 自身都不产生堆分配），
+// 故改造前的 ns/op 回归来自对象遍历次数（CPU）而非分配；foldCollect 也不会引入新的 B/op，
+// 端到端 B/op 差异只来自 json.Valid 与 gjson.ParseBytes 的固定成本。
+//
+// 该微基准只用于机制归因，端到端 BenchmarkJsonParserHotPathNonStreamUsageSizes 的三项指标
+// （ns/op、B/op、allocs/op）才是验收依据。
+func BenchmarkFoldCollectC1Objects(b *testing.B) {
+	// 典型 choice 对象：与 C1 parseTextResponseChoiceContent 的 3 目标一致。
+	choiceBody := []byte(`{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hello"}}`)
+	choiceTargets := []foldTarget{
+		{key: "index", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "finish_reason", policy: nullIsNoOp, validate: validateString},
+		{key: "message", policy: nullResetsToZero, validate: validateObject, deepValidate: validateTextResponseMessage},
+	}
+
+	// 典型 message 对象：与 C1 parseTextResponseMessageContent 的 7 目标一致（含 tool_calls 递归）。
+	messageBody := []byte(`{"role":"assistant","refusal":null,"name":"tool","tool_call_id":"call_1","content":"hello","reasoning_content":"think","tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]}`)
+	messageTargets := []foldTarget{
+		{key: "role", policy: nullIsNoOp, validate: validateString},
+		{key: "refusal", policy: nullIsNoOp, validate: validateString},
+		{key: "name", policy: nullIsNoOp, validate: validateString},
+		{key: "tool_call_id", policy: nullIsNoOp, validate: validateString},
+		{key: "content", policy: nullResetsToZero, validate: validateAny},
+		{key: "reasoning_content", policy: nullResetsToZero, validate: validateAny},
+		{key: "tool_calls", policy: nullResetsToZero, validate: validateArray, deepValidate: validateTextResponseToolCalls},
+	}
+
+	// selections 缓冲在 b.N 循环外预分配：测量的是折叠原语自身，不含基准代码的分配。
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+
+	// run 对同一 root 分别执行逐目标 foldMatch 与单次 foldCollect，保持两者输入完全一致。
+	run := func(b *testing.B, body []byte, targets []foldTarget, perTarget bool) {
+		root := gjson.ParseBytes(body)
+		selections := selectionsBuf[:len(targets)]
+		b.ReportAllocs()
+		b.ResetTimer()
+		if perTarget {
+			for i := 0; i < b.N; i++ {
+				// 直接调用单目标原语 foldMatch，逐目标各扫描一遍对象（模拟改造前行为），
+				// 不复制其逻辑，确保对照真实反映原语开销。
+				for j := range targets {
+					if _, _, err := foldMatch(root, targets[j].key, targets[j].policy, targets[j].validate, targets[j].deepValidate); err != nil {
+						b.Fatalf("foldMatch(%s) failed: %v", targets[j].key, err)
+					}
+				}
+			}
+			return
+		}
+		for i := 0; i < b.N; i++ {
+			if err := foldCollect(root, targets, selections); err != nil {
+				b.Fatalf("foldCollect failed: %v", err)
+			}
+		}
+	}
+
+	b.Run("choice_object/fold_match_per_target", func(b *testing.B) {
+		run(b, choiceBody, choiceTargets, true)
+	})
+	b.Run("choice_object/fold_collect_single_pass", func(b *testing.B) {
+		run(b, choiceBody, choiceTargets, false)
+	})
+	b.Run("message_object/fold_match_per_target", func(b *testing.B) {
+		run(b, messageBody, messageTargets, true)
+	})
+	b.Run("message_object/fold_collect_single_pass", func(b *testing.B) {
+		run(b, messageBody, messageTargets, false)
+	})
+}
+
+// =============================================================================
+// 模块 C1 单次扫描改造 / Task 1：多目标折叠原语（foldCollect）对照测试
+//
+// 对照方式：对同一 JSON 对象，逐个 target 调用既有 foldMatch 得到参照结论
+// （selected / found / 错误文本），再调用 foldCollect 一次性收集，断言两者完全一致。
+// 参照实现必须直接调用 foldMatch，不得复制其逻辑，否则对照失去意义。
+// =============================================================================
+
+// foldCollectTestDeepRole 是供对照测试复用的 deepValidate：把匹配值递归校验为「role 为 string」
+// 的对象目标类型；非对象或 role 非 string 即报错。用于触发 foldMatch/foldCollect 的 deepValidate 路径。
+func foldCollectTestDeepRole(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	return validateString(value.Get("role"))
+}
+
+// foldSelectionEqual 比较两个 foldSelection 是否逐位相同（值 Raw/Type 与存在性）。
+func foldSelectionEqual(a, b foldSelection) bool {
+	return a.found == b.found && a.selected.Type == b.selected.Type && a.selected.Raw == b.selected.Raw
+}
+
+// foldErrEqual 比较两个错误是否等价（同为 nil 或错误文本相同）。
+func foldErrEqual(a, b error) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Error() == b.Error()
+}
+
+// foldCollectReference 逐个 target 调用 foldMatch 得到参照结论，并按声明顺序确定首个错误，
+// 与契约 3.1 的多目标错误裁决一致。
+func foldCollectReference(root gjson.Result, targets []foldTarget) ([]foldSelection, error) {
+	selections := make([]foldSelection, len(targets))
+	var firstErr error
+	for i, target := range targets {
+		selected, found, err := foldMatch(root, target.key, target.policy, target.validate, target.deepValidate)
+		if err != nil {
+			// foldMatch 出错时返回零值 Result 与 found=false，此处保持同一结论。
+			selections[i] = foldSelection{}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		selections[i] = foldSelection{selected: selected, found: found}
+	}
+	return selections, firstErr
+}
+
+// TestFoldCollectMatchesFoldMatch 对同一对象逐目标比较 selected、found 与错误文本。
+//
+// G: 构造确定性对象覆盖 exact/EqualFold 变体、同字节重复键、大小写变体、两种 nullPolicy、
+// deepValidate 触发、多 target 混合、非对象根与空对象 | W: 分别调用逐个 foldMatch 与 foldCollect |
+// T: 每个 target 的 selected、found、错误文本及按声明顺序的首错完全相同。
+func TestFoldCollectMatchesFoldMatch(t *testing.T) {
+	stringTarget := func(key string) foldTarget {
+		return foldTarget{key: key, policy: nullIsNoOp, validate: validateString}
+	}
+	intTarget := func(key string) foldTarget {
+		return foldTarget{key: key, policy: nullResetsToZero, validate: validateExactInt}
+	}
+	roleObjectTarget := func(key string) foldTarget {
+		return foldTarget{key: key, policy: nullResetsToZero, validate: validateObject, deepValidate: foldCollectTestDeepRole}
+	}
+
+	cases := []struct {
+		name    string
+		body    string
+		targets []foldTarget
+	}{
+		{
+			name:    "normal_selection",
+			body:    `{"a":"x","b":5}`,
+			targets: []foldTarget{stringTarget("a"), intTarget("b")},
+		},
+		{
+			name:    "exact_then_fold_variant_last_wins",
+			body:    `{"ID":"x","Id":"y","id":"z"}`,
+			targets: []foldTarget{stringTarget("id")},
+		},
+		{
+			name:    "same_byte_duplicate_first_wins",
+			body:    `{"id":"1","id":"2"}`,
+			targets: []foldTarget{stringTarget("id")},
+		},
+		{
+			name:    "null_is_noop_then_value",
+			body:    `{"a":null,"a":"x"}`,
+			targets: []foldTarget{stringTarget("a")},
+		},
+		{
+			name:    "null_is_noop_after_value",
+			body:    `{"a":"x","A":null}`,
+			targets: []foldTarget{stringTarget("a")},
+		},
+		{
+			name:    "null_is_noop_does_not_occupy_winning_key",
+			body:    `{"a":null,"a":"first","A":"second"}`,
+			targets: []foldTarget{stringTarget("a")},
+		},
+		{
+			name:    "null_resets_to_zero_after_value",
+			body:    `{"a":1,"a":null}`,
+			targets: []foldTarget{intTarget("a")},
+		},
+		{
+			name:    "null_resets_then_value",
+			body:    `{"a":null,"a":1}`,
+			targets: []foldTarget{intTarget("a")},
+		},
+		{
+			name:    "null_reset_then_same_key_overwrites",
+			body:    `{"a":1,"a":null,"a":2}`,
+			targets: []foldTarget{intTarget("a")},
+		},
+		{
+			name:    "deep_validate_skipped_value",
+			body:    `{"m":{"role":"a"},"m":{"role":5}}`,
+			targets: []foldTarget{roleObjectTarget("m")},
+		},
+		{
+			name:    "deep_validate_covered_old_value",
+			body:    `{"m":{"role":5},"M":{"role":"a"}}`,
+			targets: []foldTarget{roleObjectTarget("m")},
+		},
+		{
+			name:    "deep_validate_null_covers_old_value",
+			body:    `{"m":{"role":5},"m":null}`,
+			targets: []foldTarget{roleObjectTarget("m")},
+		},
+		{
+			name:    "multi_target_mixed",
+			body:    `{"a":"x","A":null,"b":null,"c":{"role":"ok"},"C":{"role":7}}`,
+			targets: []foldTarget{stringTarget("a"), intTarget("b"), roleObjectTarget("c")},
+		},
+		{
+			name:    "multi_target_missing_keys",
+			body:    `{"unrelated":1}`,
+			targets: []foldTarget{stringTarget("a"), intTarget("b"), roleObjectTarget("c")},
+		},
+		{
+			name:    "type_mismatch_string_target",
+			body:    `{"a":5}`,
+			targets: []foldTarget{stringTarget("a")},
+		},
+		{
+			name:    "skipped_bad_value_first_wins",
+			body:    `{"a":5,"a":"ok"}`,
+			targets: []foldTarget{stringTarget("a")},
+		},
+		{
+			name:    "non_object_root_array",
+			body:    `[]`,
+			targets: []foldTarget{stringTarget("a"), intTarget("b")},
+		},
+		{
+			name:    "non_object_root_null",
+			body:    `null`,
+			targets: []foldTarget{stringTarget("a")},
+		},
+		{
+			name:    "non_object_root_number",
+			body:    `5`,
+			targets: []foldTarget{stringTarget("a")},
+		},
+		{
+			name:    "empty_object",
+			body:    `{}`,
+			targets: []foldTarget{stringTarget("a"), intTarget("b")},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			root := gjson.Parse(tc.body)
+			expected, expectedErr := foldCollectReference(root, tc.targets)
+
+			var selectionsBuf [foldCollectMaxTargets]foldSelection
+			selections := selectionsBuf[:len(tc.targets)]
+			err := foldCollect(root, tc.targets, selections)
+
+			if !foldErrEqual(err, expectedErr) {
+				t.Fatalf("错误不一致: foldCollect=%v, 逐个 foldMatch 参照=%v (body=%s)", err, expectedErr, tc.body)
+			}
+			if len(selections) != len(expected) {
+				t.Fatalf("selection 数量不一致: foldCollect=%d, 参照=%d (body=%s)", len(selections), len(expected), tc.body)
+			}
+			for i := range expected {
+				if !foldSelectionEqual(selections[i], expected[i]) {
+					t.Fatalf("target %q 选值不一致: foldCollect={found:%v raw:%q type:%v}, 参照={found:%v raw:%q type:%v} (body=%s)",
+						tc.targets[i].key,
+						selections[i].found, selections[i].selected.Raw, selections[i].selected.Type,
+						expected[i].found, expected[i].selected.Raw, expected[i].selected.Type,
+						tc.body)
+				}
+			}
+		})
+	}
+
+	// 组合枚举：由成员片段穷举 0..3 个成员的对象，覆盖 exact/EqualFold/同字节重复/大小写变体/null
+	// 的任意交错，逐对象对照 foldCollect 与逐个 foldMatch。该子测试以确定性穷举放大等价证据。
+	t.Run("exhaustive_member_combinations", func(t *testing.T) {
+		members := []string{
+			`"a":"s"`, `"a":1`, `"a":null`, `"a":{"role":"r"}`, `"a":{"role":1}`,
+			`"A":"t"`, `"A":null`, `"A":3`,
+			`"b":2`, `"b":null`, `"b":"u"`,
+		}
+		targets := []foldTarget{
+			{key: "a", policy: nullIsNoOp, validate: validateString},
+			{key: "b", policy: nullResetsToZero, validate: validateExactInt},
+			{key: "c", policy: nullResetsToZero, validate: validateObject, deepValidate: foldCollectTestDeepRole},
+		}
+		checked := 0
+		var bodies []string
+		bodies = append(bodies, "{}")
+		for _, m1 := range members {
+			bodies = append(bodies, "{"+m1+"}")
+			for _, m2 := range members {
+				bodies = append(bodies, "{"+m1+","+m2+"}")
+				for _, m3 := range members {
+					bodies = append(bodies, "{"+m1+","+m2+","+m3+"}")
+				}
+			}
+		}
+		for _, body := range bodies {
+			root := gjson.Parse(body)
+			expected, expectedErr := foldCollectReference(root, targets)
+			var selectionsBuf [foldCollectMaxTargets]foldSelection
+			selections := selectionsBuf[:len(targets)]
+			err := foldCollect(root, targets, selections)
+			if !foldErrEqual(err, expectedErr) {
+				t.Fatalf("错误不一致: foldCollect=%v, 参照=%v (body=%s)", err, expectedErr, body)
+			}
+			for i := range expected {
+				if !foldSelectionEqual(selections[i], expected[i]) {
+					t.Fatalf("target %q 选值不一致: foldCollect={found:%v raw:%q}, 参照={found:%v raw:%q} (body=%s)",
+						targets[i].key,
+						selections[i].found, selections[i].selected.Raw,
+						expected[i].found, expected[i].selected.Raw,
+						body)
+				}
+			}
+			checked++
+		}
+		if checked == 0 {
+			t.Fatalf("组合枚举未产生任何样本")
+		}
+		t.Logf("组合枚举对照通过，共 %d 个对象", checked)
+	})
+}
+
+// TestFoldCollectTargetOrderErrorPriority 锁定声明顺序优先于 JSON 文档顺序。
+//
+// G: 后声明 target 的坏值先出现在文档中、先声明 target 的坏值后出现 | W: foldCollect |
+// T: 返回先声明 target 的错误（错误优先级是声明顺序而非文档顺序）。
+//
+// 两个 target 使用不同 validate，使错误文本可区分，从而真正锁定「返回哪一个 target 的错误」，
+// 而非仅比较两段相同文本。
+func TestFoldCollectTargetOrderErrorPriority(t *testing.T) {
+	// 声明顺序 first -> second；first 校验 int（坏值报 "expected integer"），
+	// second 校验 string（坏值报 "expected string"）。
+	targets := []foldTarget{
+		{key: "first", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "second", policy: nullIsNoOp, validate: validateString},
+	}
+
+	t.Run("later_declared_bad_value_appears_first_in_document", func(t *testing.T) {
+		// 文档序：second（后声明）的坏值在前，first（先声明）的坏值在后。
+		body := `{"second":7,"first":"bad"}`
+		root := gjson.Parse(body)
+		_, _, expectedFirstErr := foldMatch(root, "first", nullResetsToZero, validateExactInt, nil)
+		_, _, expectedSecondErr := foldMatch(root, "second", nullIsNoOp, validateString, nil)
+		if expectedFirstErr == nil || expectedSecondErr == nil {
+			t.Fatalf("两侧参照都应报错: first=%v second=%v (body=%s)", expectedFirstErr, expectedSecondErr, body)
+		}
+		if expectedFirstErr.Error() == expectedSecondErr.Error() {
+			t.Fatalf("样本失效：两个 target 错误文本必须可区分, got %q", expectedFirstErr.Error())
+		}
+		err := foldCollect(root, targets, make([]foldSelection, len(targets)))
+		if err == nil {
+			t.Fatalf("期望返回错误，got nil (body=%s)", body)
+		}
+		// 必须返回先声明 target（first）的错误，而非文档中先出现的 second 错误。
+		if err.Error() != expectedFirstErr.Error() {
+			t.Fatalf("错误优先级应为声明顺序: want=%q (first), got=%q (body=%s)", expectedFirstErr.Error(), err.Error(), body)
+		}
+		if err.Error() == expectedSecondErr.Error() {
+			t.Fatalf("误按文档顺序返回了后声明 target 的错误: %q (body=%s)", err.Error(), body)
+		}
+	})
+
+	// 反向对照：文档顺序与声明顺序一致时，结论同样由声明顺序决定（先声明者先出错）。
+	t.Run("declared_order_equals_document_order", func(t *testing.T) {
+		body := `{"first":"bad","second":7}`
+		root := gjson.Parse(body)
+		_, _, expectedFirstErr := foldMatch(root, "first", nullResetsToZero, validateExactInt, nil)
+		err := foldCollect(root, targets, make([]foldSelection, len(targets)))
+		if err == nil || expectedFirstErr == nil {
+			t.Fatalf("期望两侧均报错: collect=%v reference=%v", err, expectedFirstErr)
+		}
+		if err.Error() != expectedFirstErr.Error() {
+			t.Fatalf("want=%q got=%q (body=%s)", expectedFirstErr.Error(), err.Error(), body)
+		}
+	})
+
+	// 仅后声明 target 出错时，返回该 target 的错误。
+	t.Run("only_later_target_bad", func(t *testing.T) {
+		body := `{"first":1,"second":7}`
+		root := gjson.Parse(body)
+		_, _, expectedSecondErr := foldMatch(root, "second", nullIsNoOp, validateString, nil)
+		if expectedSecondErr == nil {
+			t.Fatalf("参照 foldMatch(second) 应报错，测试样本失效 (body=%s)", body)
+		}
+		err := foldCollect(root, targets, make([]foldSelection, len(targets)))
+		if err == nil {
+			t.Fatalf("期望返回错误，got nil (body=%s)", body)
+		}
+		if err.Error() != expectedSecondErr.Error() {
+			t.Fatalf("want=%q got=%q (body=%s)", expectedSecondErr.Error(), err.Error(), body)
+		}
+	})
+}
+
+// TestFoldCollectDeepValidatesSkippedValues 锁定所有非胜出匹配值的递归校验。
+//
+// G: first-wins 跳过值、大小写覆盖旧值、null 覆盖旧值三种场景中，被跳过/被覆盖值各含嵌套类型错误 |
+// W: foldCollect | T: 返回与逐个 foldMatch 相同的 deepValidate 错误。
+func TestFoldCollectDeepValidatesSkippedValues(t *testing.T) {
+	target := foldTarget{key: "m", policy: nullResetsToZero, validate: validateObject, deepValidate: foldCollectTestDeepRole}
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		// first-wins：第二个同字节键被跳过，其嵌套 role 类型错误必须被 deepValidate 捕获。
+		{name: "first_wins_skipped_value", body: `{"m":{"role":"a"},"m":{"role":5}}`},
+		// 大小写变体覆盖：旧胜出值被覆盖，其嵌套 role 类型错误必须被 deepValidate 捕获。
+		{name: "case_variant_covers_old_value", body: `{"m":{"role":5},"M":{"role":"a"}}`},
+		// null 覆盖：旧胜出值被 null 覆盖，其嵌套 role 类型错误必须被 deepValidate 捕获。
+		{name: "null_covers_old_value", body: `{"m":{"role":5},"m":null}`},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			root := gjson.Parse(tc.body)
+			_, _, expectedErr := foldMatch(root, target.key, target.policy, target.validate, target.deepValidate)
+
+			err := foldCollect(root, []foldTarget{target}, make([]foldSelection, 1))
+
+			if expectedErr == nil {
+				t.Fatalf("参照 foldMatch 应因 deepValidate 报错，测试样本失效 (body=%s)", tc.body)
+			}
+			if err == nil {
+				t.Fatalf("foldCollect 应返回 deepValidate 错误，got nil (body=%s)", tc.body)
+			}
+			if err.Error() != expectedErr.Error() {
+				t.Fatalf("deepValidate 错误不一致: want=%q got=%q (body=%s)", expectedErr.Error(), err.Error(), tc.body)
+			}
+		})
+	}
+
+	// 停止位置：胜出值自身也浅层不合法，同时被跳过/被覆盖值存在 deepValidate 错误时，
+	// 必须返回先触发的 deepValidate 错误（foldMatch 的停止位置），而非最终胜出值的浅校验错误。
+	t.Run("skipped_error_precedes_winner_validate", func(t *testing.T) {
+		// validate=validateString（浅层），deepValidate=foldCollectTestDeepRole（递归到对象）。
+		// 胜出值 {"role":"a"} 对 validateString 不合法（"expected string, got JSON"）；
+		// first-wins 跳过的 7 对 deepValidate 不合法（"expected object, got Number"）。
+		// foldMatch 在遇到跳过值时即停止，故应返回后者。
+		stoppingTarget := foldTarget{key: "m", policy: nullResetsToZero, validate: validateString, deepValidate: foldCollectTestDeepRole}
+		cases := []struct {
+			name string
+			body string
+		}{
+			{name: "first_wins_skipped_value", body: `{"m":{"role":"a"},"m":7}`},
+			{name: "case_variant_covers_old_value", body: `{"m":{"role":"a"},"M":7}`},
+		}
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				root := gjson.Parse(tc.body)
+				_, _, expectedErr := foldMatch(root, stoppingTarget.key, stoppingTarget.policy, stoppingTarget.validate, stoppingTarget.deepValidate)
+				err := foldCollect(root, []foldTarget{stoppingTarget}, make([]foldSelection, 1))
+				if expectedErr == nil || err == nil {
+					t.Fatalf("两侧都应报错: collect=%v reference=%v (body=%s)", err, expectedErr, tc.body)
+				}
+				if err.Error() != expectedErr.Error() {
+					t.Fatalf("停止位置错误: want=%q got=%q (body=%s)", expectedErr.Error(), err.Error(), tc.body)
+				}
+			})
+		}
+	})
+}
+
+// TestFoldCollectZeroExtraAllocs 锁定 foldCollect 每次调用零额外堆分配且不随成员数增长。
+//
+// G: 固定目标集（含 message 的 7 目标上界情形），分别构造 1 个与 64 个成员的成功路径对象 |
+// W: testing.AllocsPerRun 调用 foldCollect，selections 为调用方预分配的栈上定长数组 |
+// T: 两个规模下 allocs/op 均为 0，且不随成员数增长。
+func TestFoldCollectZeroExtraAllocs(t *testing.T) {
+	// 目标集与 C1 message 的 7 目标一致（覆盖 string/any/array 与 deepValidate），
+	// 使该测试同时锁定目标数上界附近的分配行为。
+	targets := []foldTarget{
+		{key: "role", policy: nullIsNoOp, validate: validateString},
+		{key: "refusal", policy: nullIsNoOp, validate: validateString},
+		{key: "name", policy: nullIsNoOp, validate: validateString},
+		{key: "tool_call_id", policy: nullIsNoOp, validate: validateString},
+		{key: "content", policy: nullResetsToZero, validate: validateAny},
+		{key: "reasoning_content", policy: nullResetsToZero, validate: validateAny},
+		{key: "tool_calls", policy: nullResetsToZero, validate: validateArray, deepValidate: validateTextResponseToolCalls},
+	}
+	if len(targets) > foldCollectMaxTargets {
+		t.Fatalf("测试目标数 %d 超过 foldCollectMaxTargets=%d", len(targets), foldCollectMaxTargets)
+	}
+
+	buildBody := func(members int) string {
+		var builder strings.Builder
+		builder.WriteString(`{"role":"assistant","content":"hello"`)
+		for i := 0; i < members; i++ {
+			fmt.Fprintf(&builder, `,"k%d":%d`, i, i)
+		}
+		builder.WriteString("}")
+		return builder.String()
+	}
+
+	// selections 缓冲在闭包外预分配：测试的是 foldCollect 自身的分配，不含测试代码的分配。
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
+
+	measure := func(members int) float64 {
+		root := gjson.Parse(buildBody(members))
+		return testing.AllocsPerRun(200, func() {
+			if err := foldCollect(root, targets, selections); err != nil {
+				panic(err)
+			}
+		})
+	}
+
+	small := measure(1)
+	large := measure(64)
+	if small != 0 {
+		t.Fatalf("1 成员对象：期望 foldCollect 零额外堆分配，got allocs/op=%v", small)
+	}
+	if large != 0 {
+		t.Fatalf("64 成员对象：期望 foldCollect 零额外堆分配，got allocs/op=%v", large)
+	}
+	if large > small {
+		t.Fatalf("分配随成员数增长：1 成员=%v, 64 成员=%v", small, large)
 	}
 }

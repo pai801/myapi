@@ -773,6 +773,164 @@ func foldMatch(root gjson.Result, target string, policy nullPolicy, validate fun
 	return selected, found, nil
 }
 
+// foldTarget 描述一次对象扫描中的一个目标键及其既有 foldMatch 语义。
+// 它是只读配置：key 必须在 strings.EqualFold 意义下互不相同（C1 调用点均为编译期固定目标集合）。
+type foldTarget struct {
+	key          string
+	policy       nullPolicy
+	validate     func(gjson.Result) error
+	deepValidate func(gjson.Result) error
+}
+
+// foldSelection 保存一个目标键完成折叠后的选值状态。
+// selected 与 foldMatch 的返回值逐位一致；目标出错时 selected 为零值 Result、found 为 false。
+type foldSelection struct {
+	selected gjson.Result
+	found    bool
+}
+
+// foldCollectMaxTargets 是多目标折叠原语支持的目标数上界：C1 最大目标数为 message 的 7，取 8 留余量。
+const foldCollectMaxTargets = 8
+
+// foldCollect 单次遍历对象，按声明顺序把每个目标的 foldMatch 等价结果写入调用方提供的 selections；
+// 任一错误按目标声明顺序优先返回。
+//
+// 前置条件（调用点均为编译期常量，无需运行时守卫）：
+//
+//   - len(selections) == len(targets)；
+//   - 0 <= len(targets) <= foldCollectMaxTargets。
+//
+// selections 由调用方提供：C1 调用点传入栈上定长数组的切片
+// （如 var buf [foldCollectMaxTargets]foldSelection; foldCollect(root, targets, buf[:len(targets)])），
+// 使本函数不产生额外堆分配。调用方可在循环中复用一个定长缓冲；本函数对 [0, len(targets))
+// 的每个下标都会写入（非对象根写零值，正常路径写最终 selection），因此复用缓冲不会被旧值污染。
+//
+// 非对象根：selections 全部置零并返回 nil，与逐个 foldMatch 等价。
+// 若 len(targets) > foldCollectMaxTargets 则 panic：这是编译期即可知的编程错误（C1 全部调用点固定 ≤7），
+// 不属于输入数据可触发的运行时错误。
+//
+// 语义与「对每个 target 逐个调用 foldMatch」完全等价：每个目标独立维护选值（exact-then-fold 匹配、
+// first-wins 重复键、大小写变体 last-wins、nullPolicy）与首个错误，扫描结束后按 targets 声明顺序
+// 裁决全局首错。对象只遍历一次，时间 O(members × targets)，辅助空间 O(targets)，不保存出现次数相关的
+// 无界切片。
+func foldCollect(root gjson.Result, targets []foldTarget, selections []foldSelection) error {
+	if len(targets) > foldCollectMaxTargets {
+		panic("foldCollect: len(targets) exceeds foldCollectMaxTargets")
+	}
+	// foldState 是单个目标的折叠状态：与 foldMatch 的局部变量一一对应，另加首个错误。
+	// 辅助空间仅随目标数增长，不随对象成员数累积；使用栈上定长数组避免堆分配。
+	type foldState struct {
+		selected   gjson.Result
+		found      bool
+		winningKey string
+		err        error
+	}
+	var statesBuf [foldCollectMaxTargets]foldState
+	states := statesBuf[:len(targets)]
+
+	if !root.IsObject() {
+		// 非对象根：与逐个 foldMatch 一致，全部置零且不报错。
+		for i := range targets {
+			selections[i] = foldSelection{}
+		}
+		return nil
+	}
+
+	root.ForEach(func(key, value gjson.Result) bool {
+		for i := range targets {
+			target := &targets[i]
+			// 先精确匹配（快路径），失败再回退 Unicode 简单折叠匹配。
+			if key.Str != target.key && !strings.EqualFold(key.Str, target.key) {
+				continue
+			}
+			state := &states[i]
+			// 该目标已因先前错误停止：与单独调用 foldMatch 的停止位置一致，后续成员不再影响它。
+			if state.err != nil {
+				continue
+			}
+			// validateOther 校验「不参与取值」的匹配键（被 first-wins/last-wins 跳过的键，以及被
+			// 大小写变体或显式 null 覆盖的旧胜出键）：优先递归到目标类型（deepValidate），否则浅层校验。
+			validateOther := func(value gjson.Result) error {
+				if target.deepValidate != nil {
+					return target.deepValidate(value)
+				}
+				if target.validate != nil {
+					return target.validate(value)
+				}
+				return nil
+			}
+			if value.Type == gjson.Null && target.policy == nullIsNoOp {
+				// string 目标字段：null 是无操作——不产出值、不占用 first-wins 键位、不阻断后续覆盖。
+				if validateErr := validateOther(value); validateErr != nil {
+					state.err = validateErr
+				}
+				continue
+			}
+			if value.Type == gjson.Null {
+				// 非 string 目标字段：null 参与文档序 last-wins，覆盖为零值，且不占用 first-wins 键位。
+				if state.found {
+					// 旧胜出键被 null 覆盖：仍须递归校验。
+					if validateErr := validateOther(state.selected); validateErr != nil {
+						state.err = validateErr
+						continue
+					}
+				}
+				state.selected = value
+				state.found = true
+				state.winningKey = ""
+				continue
+			}
+			// 字节（解码后）完全相同的重复键：first-wins；仍须递归校验。
+			if state.winningKey != "" && state.winningKey == key.Str {
+				if validateErr := validateOther(value); validateErr != nil {
+					state.err = validateErr
+				}
+				continue
+			}
+			if state.found {
+				// 大小写变体覆盖旧胜出键：旧值不再参与取值，仍须递归校验。
+				if validateErr := validateOther(state.selected); validateErr != nil {
+					state.err = validateErr
+					continue
+				}
+			}
+			state.winningKey = key.Str
+			state.selected = value
+			state.found = true
+		}
+		return true
+	})
+
+	// 扫描结束后对每个目标执行胜出值的浅层校验（与 foldMatch 尾部一致）；
+	// 扫描阶段已出错的目标不再执行，从而保持「跳过/被覆盖值错误优先于最终胜出值错误」的停止位置。
+	for i := range targets {
+		state := &states[i]
+		if state.err != nil {
+			continue
+		}
+		if state.found && targets[i].validate != nil {
+			if validateErr := targets[i].validate(state.selected); validateErr != nil {
+				state.err = validateErr
+			}
+		}
+	}
+
+	// 按目标声明顺序确定全局首错；出错目标返回零值 selection（对齐 foldMatch 出错时的返回值）。
+	for i := range targets {
+		if states[i].err != nil {
+			selections[i] = foldSelection{}
+			continue
+		}
+		selections[i] = foldSelection{selected: states[i].selected, found: states[i].found}
+	}
+	for i := range targets {
+		if states[i].err != nil {
+			return states[i].err
+		}
+	}
+	return nil
+}
+
 // validateString 校验匹配键为非 null 的 JSON string（对齐 encoding/json 对 Go string 字段的严格性）。
 func validateString(value gjson.Result) error {
 	if value.Type != gjson.Null && value.Type != gjson.String {
@@ -1335,12 +1493,35 @@ func extractTextResponse(responseBody []byte) (result textResponseExtraction, er
 		return textResponseExtraction{}, fmt.Errorf("chat response root must be an object, got %s", root.Type)
 	}
 
-	errorResult, hasError, errorErr := foldObjectValidated(root, "error", validateTextResponseError)
-	if errorErr != nil {
-		return textResponseExtraction{}, fmt.Errorf("error: %w", errorErr)
+	// 单次 foldCollect 收集顶层 error(对象)/usage(对象)/choices(数组)：声明顺序锁定
+	// error -> usage -> choices 的错误优先级，gjson 对象只遍历一次（契约 3.3 root）。
+	rootTargets := []foldTarget{
+		{key: "error", policy: nullResetsToZero, validate: validateObject, deepValidate: validateTextResponseError},
+		{key: "usage", policy: nullResetsToZero, validate: validateObject, deepValidate: validateTextResponseUsage},
+		{key: "choices", policy: nullResetsToZero, validate: validateArray, deepValidate: validateTextResponseChoices},
 	}
-	if hasError {
-		parsed, parseErr := parseTextResponseError(errorResult)
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(rootTargets)]
+	collectErr := foldCollect(root, rootTargets, selections)
+	// foldCollect 只返回聚合首错，无法区分字段，也无法与「胜出值的解析错误」交错。仅错误路径用逐目标
+	// foldMatch 回放定位首个出错目标（成功路径不额外扫描），从而按既有顺序与包装文案返回。
+	errIdx := -1
+	if collectErr != nil {
+		for i := range rootTargets {
+			if _, _, e := foldMatch(root, rootTargets[i].key, rootTargets[i].policy, rootTargets[i].validate, rootTargets[i].deepValidate); e != nil {
+				errIdx = i
+				break
+			}
+		}
+	}
+
+	// error 阶段：foldCollect 的深层校验/胜出值解析错误都包装为 "error: ..."。
+	if errIdx == 0 {
+		return textResponseExtraction{}, fmt.Errorf("error: %w", collectErr)
+	}
+	errorSel := selections[0]
+	if errorSel.found && errorSel.selected.Type != gjson.Null {
+		parsed, parseErr := parseTextResponseError(errorSel.selected)
 		if parseErr != nil {
 			return textResponseExtraction{}, fmt.Errorf("error: %w", parseErr)
 		}
@@ -1352,26 +1533,28 @@ func extractTextResponse(responseBody []byte) (result textResponseExtraction, er
 		}
 	}
 
-	usageResult, hasUsage, usageErr := foldObjectValidated(root, "usage", validateTextResponseUsage)
-	if usageErr != nil {
-		return textResponseExtraction{}, fmt.Errorf("usage: %w", usageErr)
+	// usage 阶段：深层校验错误包装为 "usage: ..."；胜出值解析错误沿用既有「不额外包装」行为。
+	if errIdx == 1 {
+		return textResponseExtraction{}, fmt.Errorf("usage: %w", collectErr)
 	}
-	if hasUsage {
-		parsedUsage, parseErr := parseTextResponseUsage(usageResult)
+	usageSel := selections[1]
+	if usageSel.found && usageSel.selected.Type != gjson.Null {
+		parsedUsage, parseErr := parseTextResponseUsage(usageSel.selected)
 		if parseErr != nil {
 			return textResponseExtraction{}, parseErr
 		}
 		result.Usage = parsedUsage
 	}
 
-	choices, hasChoices, choicesErr := foldArrayValidated(root, "choices", validateTextResponseChoices)
-	if choicesErr != nil {
-		return textResponseExtraction{}, fmt.Errorf("choices: %w", choicesErr)
+	// choices 阶段：深层校验错误包装为 "choices: ..."；元素解析错误沿用既有「不额外包装」行为。
+	if errIdx == 2 {
+		return textResponseExtraction{}, fmt.Errorf("choices: %w", collectErr)
 	}
-	if hasChoices {
-		for _, element := range choices.Array() {
-			// foldArrayValidated 仅对「被跳过的匹配键」递归校验到目标类型；胜出键的完整递归校验
-			// 由调用方完成（与 extractCompletionsStreamText 同一约定），故此处显式解析每个 choice。
+	choicesSel := selections[2]
+	if choicesSel.found && choicesSel.selected.Type != gjson.Null {
+		for _, element := range choicesSel.selected.Array() {
+			// foldCollect 仅对「被跳过的匹配键」递归校验到目标类型；胜出键的完整递归校验由调用方
+			// 完成（与 extractCompletionsStreamText 同一约定），故此处显式解析每个 choice。
 			content, choiceErr := parseTextResponseChoiceContent(element)
 			if choiceErr != nil {
 				return textResponseExtraction{}, choiceErr
@@ -1384,6 +1567,9 @@ func extractTextResponse(responseBody []byte) (result textResponseExtraction, er
 
 // parseTextResponseChoiceContent 完整校验一个 choice 并按 model.Message.StringContent 的语义
 // 产出其 content 文本：非对象元素报错（null 元素产出空串，对齐旧 typed 切片零值）。
+//
+// 单次 foldCollect 收集 index/finish_reason/message（契约 3.3 choice）；胜出 message 由
+// parseTextResponseMessageContent 单次扫描完成校验并取回 content，不再二次 foldAny。
 func parseTextResponseChoiceContent(element gjson.Result) (string, error) {
 	if element.Type == gjson.Null {
 		return "", nil
@@ -1391,32 +1577,41 @@ func parseTextResponseChoiceContent(element gjson.Result) (string, error) {
 	if !element.IsObject() {
 		return "", fmt.Errorf("choices element: expected object or null, got %s", element.Type)
 	}
-	if _, err := foldInt(element, "index"); err != nil {
-		return "", fmt.Errorf("choices.index: %w", err)
+	targets := []foldTarget{
+		{key: "index", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "finish_reason", policy: nullIsNoOp, validate: validateString},
+		{key: "message", policy: nullResetsToZero, validate: validateObject, deepValidate: validateTextResponseMessage},
 	}
-	if _, err := foldString(element, "finish_reason"); err != nil {
-		return "", fmt.Errorf("choices.finish_reason: %w", err)
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
+	collectErr := foldCollect(element, targets, selections)
+	if collectErr != nil {
+		fields := [...]string{"index", "finish_reason", "message"}
+		for i := range targets {
+			if _, _, e := foldMatch(element, targets[i].key, targets[i].policy, targets[i].validate, targets[i].deepValidate); e != nil {
+				return "", fmt.Errorf("choices.%s: %w", fields[i], e)
+			}
+		}
+		return "", collectErr
 	}
-	messageResult, hasMessage, messageErr := foldObjectValidated(element, "message", validateTextResponseMessage)
-	if messageErr != nil {
-		return "", fmt.Errorf("choices.message: %w", messageErr)
-	}
-	if !hasMessage {
+	messageSel := selections[2]
+	if !messageSel.found || messageSel.selected.Type == gjson.Null {
 		return "", nil
 	}
-	// foldObjectValidated 仅对「被跳过的匹配键」递归校验；胜出 message 由调用方完整校验。
-	if err := validateTextResponseMessage(messageResult); err != nil {
+	// foldCollect 仅对「被跳过的匹配键」递归校验；胜出 message 由 parseTextResponseMessageContent
+	// 完整校验并同时返回已折叠的 content（单次扫描）。
+	contentResult, err := parseTextResponseMessageContent(messageSel.selected)
+	if err != nil {
 		return "", err
-	}
-	contentResult, _, contentErr := foldAny(messageResult, "content")
-	if contentErr != nil {
-		return "", fmt.Errorf("choices.message.content: %w", contentErr)
 	}
 	return contentResultToText(contentResult), nil
 }
 
 // validateTextResponseError 校验 error 目标类型（model.Error）：null 合法；非对象或
 // message/type/param 非 string、code 含超出 float64 范围的数字即报错。
+//
+// 字段校验复用 parseTextResponseError（其字段校验/文案与旧实现逐字一致），从而单次 foldCollect
+// 完成 message/type/param/code 的校验。
 func validateTextResponseError(value gjson.Result) error {
 	if value.Type == gjson.Null {
 		return nil
@@ -1424,53 +1619,78 @@ func validateTextResponseError(value gjson.Result) error {
 	if !value.IsObject() {
 		return fmt.Errorf("expected object, got %s", value.Type)
 	}
-	for _, field := range []string{"message", "type", "param"} {
-		if _, err := foldString(value, field); err != nil {
-			return fmt.Errorf("error.%s: %w", field, err)
-		}
-	}
-	if _, _, err := foldAny(value, "code"); err != nil {
-		return fmt.Errorf("error.code: %w", err)
-	}
-	return nil
+	_, err := parseTextResponseError(value)
+	return err
 }
 
 // parseTextResponseError 把已确认的 JSON 对象解析为 model.Error。
+//
+// 单次 foldCollect 收集 message/type/param(string, nullIsNoOp)/code(any, nullResetsToZero)；
+// 声明顺序锁定 message -> type -> param -> code 的错误优先级（契约 3.3 error）。
 func parseTextResponseError(value gjson.Result) (model.Error, error) {
+	targets := []foldTarget{
+		{key: "message", policy: nullIsNoOp, validate: validateString},
+		{key: "type", policy: nullIsNoOp, validate: validateString},
+		{key: "param", policy: nullIsNoOp, validate: validateString},
+		{key: "code", policy: nullResetsToZero, validate: validateAny},
+	}
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
+	collectErr := foldCollect(value, targets, selections)
+	if collectErr != nil {
+		fields := [...]string{"message", "type", "param", "code"}
+		for i := range targets {
+			if _, _, e := foldMatch(value, targets[i].key, targets[i].policy, targets[i].validate, targets[i].deepValidate); e != nil {
+				return model.Error{}, fmt.Errorf("error.%s: %w", fields[i], e)
+			}
+		}
+		return model.Error{}, collectErr
+	}
 	parsed := model.Error{}
-	var err error
-	if parsed.Message, err = foldString(value, "message"); err != nil {
-		return parsed, fmt.Errorf("error.message: %w", err)
+	if selections[0].found {
+		parsed.Message = selections[0].selected.String()
 	}
-	if parsed.Type, err = foldString(value, "type"); err != nil {
-		return parsed, fmt.Errorf("error.type: %w", err)
+	if selections[1].found {
+		parsed.Type = selections[1].selected.String()
 	}
-	if parsed.Param, err = foldString(value, "param"); err != nil {
-		return parsed, fmt.Errorf("error.param: %w", err)
+	if selections[2].found {
+		parsed.Param = selections[2].selected.String()
 	}
-	code, _, codeErr := foldAny(value, "code")
-	if codeErr != nil {
-		return parsed, fmt.Errorf("error.code: %w", codeErr)
-	}
-	if code.Exists() && code.Type != gjson.Null {
-		parsed.Code = code.Value()
+	if selections[3].found && selections[3].selected.Type != gjson.Null {
+		parsed.Code = selections[3].selected.Value()
 	}
 	return parsed, nil
 }
 
 // parseTextResponseUsage 严格解析三个 basis、宽容解析 details：details 不可解析视为缺失。
+//
+// 单次 foldCollect 收集三个 basis（int, nullResetsToZero, validateExactInt）；胜出 basis 的最终
+// int64 解析仍需显式完成（foldCollect 只做折叠与浅校验，不负责 ParseInt）。details 由 tolerant*
+// 各自单次扫描获取，保持宽容降级。
 func parseTextResponseUsage(usageResult gjson.Result) (model.Usage, error) {
 	parsed := model.Usage{}
-	var err error
-	if parsed.PromptTokens, err = foldInt(usageResult, "prompt_tokens"); err != nil {
-		return parsed, fmt.Errorf("usage.prompt_tokens: %w", err)
+	targets := []foldTarget{
+		{key: "prompt_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "completion_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "total_tokens", policy: nullResetsToZero, validate: validateExactInt},
 	}
-	if parsed.CompletionTokens, err = foldInt(usageResult, "completion_tokens"); err != nil {
-		return parsed, fmt.Errorf("usage.completion_tokens: %w", err)
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
+	collectErr := foldCollect(usageResult, targets, selections)
+	if collectErr != nil {
+		fields := [...]string{"prompt_tokens", "completion_tokens", "total_tokens"}
+		for i := range targets {
+			if _, _, e := foldMatch(usageResult, targets[i].key, targets[i].policy, targets[i].validate, targets[i].deepValidate); e != nil {
+				return parsed, fmt.Errorf("usage.%s: %w", fields[i], e)
+			}
+		}
+		return parsed, collectErr
 	}
-	if parsed.TotalTokens, err = foldInt(usageResult, "total_tokens"); err != nil {
-		return parsed, fmt.Errorf("usage.total_tokens: %w", err)
-	}
+	// 胜出 basis 的最终解析：缺失/null/出错（selection 归零）均为 0；胜出值已由 validateExactInt
+	// 保证是精确十进制 int64，故 Int() 与 strconv.ParseInt(Raw,10,64) 等价。
+	parsed.PromptTokens = int(selections[0].selected.Int())
+	parsed.CompletionTokens = int(selections[1].selected.Int())
+	parsed.TotalTokens = int(selections[2].selected.Int())
 	parsed.PromptTokensDetails = tolerantPromptTokensDetails(usageResult)
 	parsed.CompletionTokensDetails = tolerantCompletionTokensDetails(usageResult)
 	return parsed, nil
@@ -1486,29 +1706,31 @@ func validateTextResponseUsage(usageResult gjson.Result) error {
 
 // tolerantPromptTokensDetails 宽容读取 prompt_tokens_details：非对象/null/缺失 → nil；
 // 对象内任一 int 子字段不可解析 → 该子字段按零值（视为缺失），不失败。
+//
+// 对象内 5 个 int 子字段由单次 foldCollect 取得；聚合错误被忽略，出错子字段的 selection 归零
+// 即实现「逐字段降级」。
 func tolerantPromptTokensDetails(usageResult gjson.Result) *model.PromptTokensDetails {
 	detailsResult, ok, err := foldObjectValidated(usageResult, "prompt_tokens_details", nil)
 	if err != nil || !ok {
 		return nil
 	}
 	details := &model.PromptTokensDetails{}
-	var value int
-	var fieldErr error
-	if value, fieldErr = foldInt(detailsResult, "cached_tokens"); fieldErr == nil {
-		details.CachedTokens = value
+	targets := []foldTarget{
+		{key: "cached_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "cache_write_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "audio_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "text_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "image_tokens", policy: nullResetsToZero, validate: validateExactInt},
 	}
-	if value, fieldErr = foldInt(detailsResult, "cache_write_tokens"); fieldErr == nil {
-		details.CacheWriteTokens = value
-	}
-	if value, fieldErr = foldInt(detailsResult, "audio_tokens"); fieldErr == nil {
-		details.AudioTokens = value
-	}
-	if value, fieldErr = foldInt(detailsResult, "text_tokens"); fieldErr == nil {
-		details.TextTokens = value
-	}
-	if value, fieldErr = foldInt(detailsResult, "image_tokens"); fieldErr == nil {
-		details.ImageTokens = value
-	}
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
+	foldCollect(detailsResult, targets, selections)
+	// 逐字段降级：缺失/null/出错（selection 归零）均为 0；胜出值已由 validateExactInt 保证精确。
+	details.CachedTokens = int(selections[0].selected.Int())
+	details.CacheWriteTokens = int(selections[1].selected.Int())
+	details.AudioTokens = int(selections[2].selected.Int())
+	details.TextTokens = int(selections[3].selected.Int())
+	details.ImageTokens = int(selections[4].selected.Int())
 	return details
 }
 
@@ -1519,23 +1741,21 @@ func tolerantCompletionTokensDetails(usageResult gjson.Result) *model.Completion
 		return nil
 	}
 	details := &model.CompletionTokensDetails{}
-	var value int
-	var fieldErr error
-	if value, fieldErr = foldInt(detailsResult, "reasoning_tokens"); fieldErr == nil {
-		details.ReasoningTokens = value
+	targets := []foldTarget{
+		{key: "reasoning_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "accepted_prediction_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "rejected_prediction_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "audio_tokens", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "text_tokens", policy: nullResetsToZero, validate: validateExactInt},
 	}
-	if value, fieldErr = foldInt(detailsResult, "accepted_prediction_tokens"); fieldErr == nil {
-		details.AcceptedPredictionTokens = value
-	}
-	if value, fieldErr = foldInt(detailsResult, "rejected_prediction_tokens"); fieldErr == nil {
-		details.RejectedPredictionTokens = value
-	}
-	if value, fieldErr = foldInt(detailsResult, "audio_tokens"); fieldErr == nil {
-		details.AudioTokens = value
-	}
-	if value, fieldErr = foldInt(detailsResult, "text_tokens"); fieldErr == nil {
-		details.TextTokens = value
-	}
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
+	foldCollect(detailsResult, targets, selections)
+	details.ReasoningTokens = int(selections[0].selected.Int())
+	details.AcceptedPredictionTokens = int(selections[1].selected.Int())
+	details.RejectedPredictionTokens = int(selections[2].selected.Int())
+	details.AudioTokens = int(selections[3].selected.Int())
+	details.TextTokens = int(selections[4].selected.Int())
 	return details
 }
 
@@ -1564,41 +1784,75 @@ func validateTextResponseChoices(value gjson.Result) error {
 
 // validateTextResponseChoice 校验 index(int)/finish_reason(string)/message(model.Message)，
 // 用于 choices 数组中「被跳过的匹配键」的递归校验。
+//
+// 单次 foldCollect 收集 index/finish_reason/message；声明顺序锁定错误优先级（契约 3.3 choice）。
+// 与旧实现一致，胜出 message 仅做浅层对象校验，其字段的完整校验由调用方完成。
 func validateTextResponseChoice(element gjson.Result) error {
-	if _, err := foldInt(element, "index"); err != nil {
-		return fmt.Errorf("choices.index: %w", err)
+	targets := []foldTarget{
+		{key: "index", policy: nullResetsToZero, validate: validateExactInt},
+		{key: "finish_reason", policy: nullIsNoOp, validate: validateString},
+		{key: "message", policy: nullResetsToZero, validate: validateObject, deepValidate: validateTextResponseMessage},
 	}
-	if _, err := foldString(element, "finish_reason"); err != nil {
-		return fmt.Errorf("choices.finish_reason: %w", err)
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	collectErr := foldCollect(element, targets, selectionsBuf[:len(targets)])
+	if collectErr == nil {
+		return nil
 	}
-	if _, _, err := foldObjectValidated(element, "message", validateTextResponseMessage); err != nil {
-		return fmt.Errorf("choices.message: %w", err)
+	fields := [...]string{"index", "finish_reason", "message"}
+	for i := range targets {
+		if _, _, e := foldMatch(element, targets[i].key, targets[i].policy, targets[i].validate, targets[i].deepValidate); e != nil {
+			return fmt.Errorf("choices.%s: %w", fields[i], e)
+		}
 	}
-	return nil
+	return fmt.Errorf("choices.message: %w", collectErr)
+}
+
+// parseTextResponseMessageContent 单次扫描并完整校验 message，同时返回已折叠的 content 结果。
+//
+// 单次 foldCollect 收集 role/refusal/name/tool_call_id(string, nullIsNoOp)/content/reasoning_content
+// (any, nullResetsToZero)/tool_calls(array, nullResetsToZero, deepValidate=validateTextResponseToolCalls)；
+// 声明顺序锁定 role -> refusal -> name -> tool_call_id -> content -> reasoning_content -> tool_calls
+// 的错误优先级（契约 3.3 message）。返回的 content 即 foldAny(message,"content") 的等价选值。
+func parseTextResponseMessageContent(value gjson.Result) (gjson.Result, error) {
+	targets := []foldTarget{
+		{key: "role", policy: nullIsNoOp, validate: validateString},
+		{key: "refusal", policy: nullIsNoOp, validate: validateString},
+		{key: "name", policy: nullIsNoOp, validate: validateString},
+		{key: "tool_call_id", policy: nullIsNoOp, validate: validateString},
+		{key: "content", policy: nullResetsToZero, validate: validateAny},
+		{key: "reasoning_content", policy: nullResetsToZero, validate: validateAny},
+		{key: "tool_calls", policy: nullResetsToZero, validate: validateArray, deepValidate: validateTextResponseToolCalls},
+	}
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
+	collectErr := foldCollect(value, targets, selections)
+	if collectErr != nil {
+		fields := [...]string{"role", "refusal", "name", "tool_call_id", "content", "reasoning_content", "tool_calls"}
+		for i := range targets {
+			if _, _, e := foldMatch(value, targets[i].key, targets[i].policy, targets[i].validate, targets[i].deepValidate); e != nil {
+				return gjson.Result{}, fmt.Errorf("message.%s: %w", fields[i], e)
+			}
+		}
+		return gjson.Result{}, collectErr
+	}
+	return selections[4].selected, nil
 }
 
 // validateTextResponseMessage 校验 model.Message 目标类型：role/refusal/name/tool_call_id 为
 // string（refusal/name 为 *string，null 视为零值），content/reasoning_content 为 any，
-// tool_calls 递归校验为 []model.Tool。
+// tool_calls 递归校验为 []model.Tool。复用 parseTextResponseMessageContent 并丢弃 content，
+// 从而对胜出 message 只扫描一次。
 func validateTextResponseMessage(value gjson.Result) error {
-	for _, field := range []string{"role", "refusal", "name", "tool_call_id"} {
-		if _, err := foldString(value, field); err != nil {
-			return fmt.Errorf("message.%s: %w", field, err)
-		}
-	}
-	for _, field := range []string{"content", "reasoning_content"} {
-		if _, _, err := foldAny(value, field); err != nil {
-			return fmt.Errorf("message.%s: %w", field, err)
-		}
-	}
-	if _, _, err := foldArrayValidated(value, "tool_calls", validateTextResponseToolCalls); err != nil {
-		return fmt.Errorf("message.tool_calls: %w", err)
-	}
-	return nil
+	_, err := parseTextResponseMessageContent(value)
+	return err
 }
 
 // validateTextResponseToolCalls 把匹配值递归校验为 []model.Tool：null 合法；非数组、
 // 非对象元素或任一 tool 字段无法解析即报错。
+//
+// 每个元素单次 foldCollect 收集 id/type/function；声明顺序锁定错误优先级（契约 3.3 tool call）。
+// 与旧实现一致，胜出 function 仅做浅层对象校验，其字段的完整校验由 validateTextResponseFunctionFields
+// 在「被跳过的 function 值」路径上完成。
 func validateTextResponseToolCalls(value gjson.Result) error {
 	if value.Type == gjson.Null {
 		return nil
@@ -1606,6 +1860,14 @@ func validateTextResponseToolCalls(value gjson.Result) error {
 	if !value.IsArray() {
 		return fmt.Errorf("expected array, got %s", value.Type)
 	}
+	targets := []foldTarget{
+		{key: "id", policy: nullIsNoOp, validate: validateString},
+		{key: "type", policy: nullIsNoOp, validate: validateString},
+		{key: "function", policy: nullResetsToZero, validate: validateObject, deepValidate: validateTextResponseFunctionFields},
+	}
+	// 逐元素循环复用一个栈上定长缓冲：foldCollect 每轮都会写满 [0,len(targets))，复用安全。
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	selections := selectionsBuf[:len(targets)]
 	for _, element := range value.Array() {
 		if element.Type == gjson.Null {
 			continue
@@ -1613,17 +1875,47 @@ func validateTextResponseToolCalls(value gjson.Result) error {
 		if !element.IsObject() {
 			return fmt.Errorf("tool_calls element: expected object or null, got %s", element.Type)
 		}
-		if _, err := foldString(element, "id"); err != nil {
-			return fmt.Errorf("tool_calls.id: %w", err)
+		collectErr := foldCollect(element, targets, selections)
+		if collectErr == nil {
+			continue
 		}
-		if _, err := foldString(element, "type"); err != nil {
-			return fmt.Errorf("tool_calls.type: %w", err)
+		fields := [...]string{"id", "type", "function"}
+		for i := range targets {
+			if _, _, e := foldMatch(element, targets[i].key, targets[i].policy, targets[i].validate, targets[i].deepValidate); e != nil {
+				return fmt.Errorf("tool_calls.%s: %w", fields[i], e)
+			}
 		}
-		if _, _, err := foldObjectValidated(element, "function", validateFunctionFields); err != nil {
-			return fmt.Errorf("tool_calls.function: %w", err)
-		}
+		return fmt.Errorf("tool_calls.function: %w", collectErr)
 	}
 	return nil
+}
+
+// validateTextResponseFunctionFields 校验 C1 tool call function（model.Function）：name/description
+// 为 Go string，strict 为 *bool，arguments/parameters 为 any。独立于流式路径共享的
+// validateFunctionFields，避免迁移影响模块 B；错误文案与其保持一致。
+//
+// 单次 foldCollect 收集 name/description(string, nullIsNoOp)/strict(bool, nullResetsToZero)/
+// arguments/parameters(any, nullResetsToZero)；声明顺序锁定错误优先级（契约 3.3 function）。
+func validateTextResponseFunctionFields(value gjson.Result) error {
+	targets := []foldTarget{
+		{key: "name", policy: nullIsNoOp, validate: validateString},
+		{key: "description", policy: nullIsNoOp, validate: validateString},
+		{key: "strict", policy: nullResetsToZero, validate: validateBool},
+		{key: "arguments", policy: nullResetsToZero, validate: validateAny},
+		{key: "parameters", policy: nullResetsToZero, validate: validateAny},
+	}
+	var selectionsBuf [foldCollectMaxTargets]foldSelection
+	collectErr := foldCollect(value, targets, selectionsBuf[:len(targets)])
+	if collectErr == nil {
+		return nil
+	}
+	fields := [...]string{"name", "description", "strict", "arguments", "parameters"}
+	for i := range targets {
+		if _, _, e := foldMatch(value, targets[i].key, targets[i].policy, targets[i].validate, targets[i].deepValidate); e != nil {
+			return fmt.Errorf("tool_calls.function.%s: %w", fields[i], e)
+		}
+	}
+	return fmt.Errorf("tool_calls.function.arguments: %w", collectErr)
 }
 
 // contentResultToText 复刻 model.Message.StringContent 的字符串化语义：string 直接返回；
