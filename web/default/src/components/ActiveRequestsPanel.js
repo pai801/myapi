@@ -13,6 +13,7 @@ import {
   timestamp2string,
 } from '../helpers';
 import { renderColorLabel } from '../helpers/render';
+import { extractUserMessage } from '../helpers/liveRequestMessage';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
@@ -26,46 +27,6 @@ function getColorByElapsedTime(elapsedTime) {
 }
 
 const MESSAGE_MAX_LENGTH = 16;
-
-// content 有两种形态：
-//   1) 字符串：{"role":"user","content":"继续工作"}
-//   2) 分段数组：{"role":"user","content":[{"type":"text","text":"..."}, ...]}
-//     取数组内最后一个 type=text 分段的 text
-function extractContentText(content) {
-  if (typeof content === 'string') return content.trim();
-  if (Array.isArray(content)) {
-    for (let i = content.length - 1; i >= 0; i--) {
-      const part = content[i];
-      if (part && part.type === 'text' && typeof part.text === 'string') {
-        return part.text.trim();
-      }
-    }
-  }
-  return '';
-}
-
-// 从请求体中取最后一条 role=user 的消息文本。
-// request_body 是原始 JSON 字符串；过大时后端会替换成 "[body too large: N bytes]"，
-// 解析失败直接返回空串。
-function extractUserMessage(requestBody) {
-  if (!requestBody) return '';
-  let parsed;
-  try {
-    parsed = JSON.parse(requestBody);
-  } catch (e) {
-    return '';
-  }
-  const messages = parsed && Array.isArray(parsed.messages) ? parsed.messages : null;
-  if (!messages) return '';
-  // 倒序找最后一条 user 消息；若它取不到文本（如纯图片分段）则继续往前找
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (!msg || msg.role !== 'user') continue;
-    const text = extractContentText(msg.content);
-    if (text) return text;
-  }
-  return '';
-}
 
 // 单元格内单行展示，超长截断；无论是否截断，hover 都浮出完整原文
 function renderMessage(text) {
