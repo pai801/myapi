@@ -3,7 +3,6 @@ package middleware
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -250,28 +249,59 @@ func canReadAffinityJSONBody(c *gin.Context) bool {
 	return strings.HasPrefix(strings.ToLower(c.Request.Header.Get("Content-Type")), "application/json")
 }
 
-// readAffinityBodyPayload 读取并恢复完整请求体，且至多一次 IO。
+// readAffinityBodyPayload 读取并恢复完整请求体，且至多一次 IO；body 的 well-formedness
+// 结论与 TokenAuth 共享，同一份字节绝不重复判定。
 //
 // 必须使用 common.GetRequestBodyReusable：它在读取后恢复 c.Request.Body（下游有路由
 // 直接读 c.Request.Body —— proxy.go / audio.go / text.go / image.go），并复用既有
 // ctxkey.KeyRequestBody 缓存，保证同一请求最多一次 IO。绝不截断请求体。
 //
-// 失败一律静默降级（返回 nil），绝不 abort 请求、绝不报错、绝不打印 body 内容或会话 id：
-// 亲和只是选路优化，不能因 body 形态异常而影响主流程，也不应泄漏用户数据。
-// 读取失败、空 body 或非法 JSON 均返回 nil。
+// 共享缓存的读写顺序（生产中间件链为 RelayPanicRecover → TokenAuth → TokenModelMapping
+// → Distribute，本函数由 Distribute 内经 ResolveAffinityScope 调用，运行在 TokenAuth 的
+// getRequestModel 之后，故两者读的是同一份缓存字节）：
+//   - 优先调用 ctxkey.GetRequestBodyMetadata；ok=true 时该结论对同一份缓存字节权威
+//     （含 WellFormed=false），直接采信，绝不再对同一份字节重跑 json.Valid —— 否则同一
+//     body 的 well-formedness 会被计算两次，正是本次改造要消除的重复。
+//   - 缓存缺失才自行构建：调用同包 buildRequestBodyMetadata(body) 得到完整 metadata
+//     （well-formedness / model / stream），以具体值写入 ctxkey.KeyRequestBodyMetadata，
+//     供下游 detectStreamFromBody 与 responses 入口复用；本函数因此同时是缓存生产者。
+//     空 body 也会走到这里并写入 WellFormed=false 的零值缓存，使下游无需重复判定。
 //
 // json.Valid 预检是安全红线而非性能优化：jsonparser 对畸形 JSON 会部分成功（例如
 // `{"litellm_session_id":"leaked","messages":[` 仍能取出 session 值），若不预检就会从
-// 损坏/截断的请求里采集会话标识并据此选路。预检失败即拒绝，绝不从半截 JSON 提取任何标识。
+// 损坏/截断的请求里采集会话标识并据此选路。预检（或采信等价的权威结论）失败即拒绝，
+// 绝不从半截 JSON 提取任何标识。
+//
+// 失败一律静默降级（返回 nil），绝不 abort 请求、绝不报错、绝不打印 body 内容或会话 id：
+// 亲和只是选路优化，不能因 body 形态异常而影响主流程，也不应泄漏用户数据。
+// 读取失败、空 body 或畸形 JSON 均返回 nil。
 func readAffinityBodyPayload(c *gin.Context) *affinityBodyPayload {
 	if c == nil || c.Request == nil {
 		return nil
 	}
+
+	// 缓存命中：采信权威的 WellFormed 结论，不重跑 json.Valid。body 仍经
+	// GetRequestBodyReusable 取，命中 ctxkey.KeyRequestBody 缓存时不产生第二次 IO。
+	if metadata, ok := ctxkey.GetRequestBodyMetadata(c); ok {
+		if !metadata.WellFormed {
+			return nil
+		}
+		body, err := common.GetRequestBodyReusable(c)
+		if err != nil || len(body) == 0 {
+			return nil
+		}
+		return &affinityBodyPayload{Raw: body}
+	}
+
+	// 缓存缺失：读取后自行构建完整 metadata 并写回共享缓存，再据其 WellFormed 决定返回值。
+	// 读取失败不写缓存（避免把损坏内容当结论发布），直接静默降级。
 	body, err := common.GetRequestBodyReusable(c)
-	if err != nil || len(body) == 0 {
+	if err != nil {
 		return nil
 	}
-	if !json.Valid(body) {
+	metadata := buildRequestBodyMetadata(body)
+	c.Set(ctxkey.KeyRequestBodyMetadata, metadata)
+	if !metadata.WellFormed {
 		return nil
 	}
 	return &affinityBodyPayload{Raw: body}

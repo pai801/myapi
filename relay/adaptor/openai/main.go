@@ -4,21 +4,24 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/pai801/myapi/common/render"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pai801/myapi/common"
-	"github.com/pai801/myapi/common/conv"
 	"github.com/pai801/myapi/common/ctxkey"
 	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/relay/constant"
 	"github.com/pai801/myapi/relay/model"
 	"github.com/pai801/myapi/relay/relaymode"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -57,36 +60,30 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 		switch relayMode {
 		case relaymode.ChatCompletions:
 			payload := data[dataPrefixLength:]
-			var streamResponse ChatCompletionsStreamResponse
-			err := json.Unmarshal([]byte(payload), &streamResponse)
+			result, err := chatAccumulator.addPayload([]byte(payload))
 			if err != nil {
 				logger.Log.Errorf("error unmarshalling stream response: " + err.Error())
 				render.StringData(c, data) // if error happened, pass the data to client
 				continue                   // just ignore the error
 			}
-			chatAccumulator.addPayload([]byte(payload))
-			if len(streamResponse.Choices) == 0 && streamResponse.Usage == nil {
+			if result.ChoiceCount == 0 && result.Usage == nil {
 				// but for empty choice and no usage, we should not pass it to client, this is for azure
 				continue // just ignore empty choice
 			}
 			render.StringData(c, data)
-			for _, choice := range streamResponse.Choices {
-				responseText += conv.AsString(choice.Delta.Content)
-			}
-			if streamResponse.Usage != nil {
-				usage = streamResponse.Usage
+			responseText += result.ResponseText
+			if result.Usage != nil {
+				usage = result.Usage
 			}
 		case relaymode.Completions:
+			// 转发必须先于解析：解析失败只影响文本累加，不影响已转发的字节。
 			render.StringData(c, data)
-			var streamResponse CompletionsStreamResponse
-			err := json.Unmarshal([]byte(data[dataPrefixLength:]), &streamResponse)
+			text, err := extractCompletionsStreamText([]byte(data[dataPrefixLength:]))
 			if err != nil {
 				logger.Log.Errorf("error unmarshalling stream response: " + err.Error())
 				continue
 			}
-			for _, choice := range streamResponse.Choices {
-				responseText += choice.Text
-			}
+			responseText += text
 		}
 	}
 
@@ -145,52 +142,471 @@ func newChatStreamAccumulator() *chatStreamAccumulator {
 	return &chatStreamAccumulator{choices: make(map[int]*chatStreamChoiceAccumulator)}
 }
 
-func (a *chatStreamAccumulator) addPayload(payload []byte) {
-	var raw map[string]any
-	if err := json.Unmarshal(payload, &raw); err != nil {
-		return
+// chatStreamPayloadResult is the consumer-visible observation from one valid chat stream frame.
+type chatStreamPayloadResult struct {
+	ResponseText string
+	Usage        *model.Usage
+	ChoiceCount  int
+}
+
+// addPayload validates and observes one chat frame while updating the accumulator once; malformed or contract-invalid frames return an error without producing derived values.
+func (a *chatStreamAccumulator) addPayload(payload []byte) (result chatStreamPayloadResult, err error) {
+	if !json.Valid(payload) {
+		return chatStreamPayloadResult{}, fmt.Errorf("chat stream frame is not valid JSON")
 	}
-	a.captureTopLevel(raw)
-	if usage, ok := raw["usage"].(map[string]any); ok {
-		a.usage = usage
+	root := gjson.ParseBytes(payload)
+	if root.Type == gjson.Null {
+		// data: null 维持现状：不转发、不累积，且不产出任何派生值。
+		return chatStreamPayloadResult{}, nil
 	}
-	choices, ok := raw["choices"].([]any)
-	if !ok {
-		return
+	if !root.IsObject() {
+		return chatStreamPayloadResult{}, fmt.Errorf("chat stream frame root must be an object, got %s", root.Type)
 	}
-	for _, choiceValue := range choices {
-		choiceMap, ok := choiceValue.(map[string]any)
-		if !ok {
+	frame, err := parseChatStreamFrame(root)
+	if err != nil {
+		return chatStreamPayloadResult{}, err
+	}
+	if hasUnrepresentableNumber(root) {
+		// 旧实现的两步语义：typed 解码成功（文本与 usage 已提取）后，map 解码因超出
+		// float64 范围的数字（如 1e400）失败，该帧「不累积但保留派生值」。此处仅跳过
+		// 累积，仍返回 frame.result()，以保持 StreamHandler 的文本/usage 与改造前一致。
+		return frame.result(), nil
+	}
+	// 原子性：完整校验（并完成派生值提取）通过后，才一次性写入累积器。
+	a.applyFrame(frame)
+	return frame.result(), nil
+}
+
+// extractCompletionsStreamText validates one completions frame and returns concatenated
+// choice text in document order; missing choices return an empty string, while malformed
+// JSON or a type-invalid choices/choices[].text value returns an error so the caller
+// keeps its existing skip-and-forward behavior.
+//
+// 类型化字段严格（对齐旧 typed 解码的 `json.Unmarshal` 到 CompletionsStreamResponse）：
+// `choices` 必须是数组，`choices[].text` / `choices[].finish_reason` 存在时必须为 string。
+//
+// 键匹配为 exact-then-fold 大小写不敏感，与 `encoding/json` struct 解码对齐；重复键 first-wins
+// 为 sanctioned 差异（详见 foldMatch）。库间差异：`encoding/json` 把字符串中的非法 UTF-8 净化为
+// U+FFFD，而 `gjson` 保留原始字节，此处不做修正。
+func extractCompletionsStreamText(payload []byte) (responseText string, err error) {
+	if !json.Valid(payload) {
+		return "", fmt.Errorf("completions stream frame is not valid JSON")
+	}
+	root := gjson.ParseBytes(payload)
+	if root.Type == gjson.Null {
+		// data: null 维持旧 typed 行为：Unmarshal 成功且 Choices 为 nil，累加空串。
+		return "", nil
+	}
+	if !root.IsObject() {
+		return "", fmt.Errorf("completions stream frame root must be an object, got %s", root.Type)
+	}
+	choices, hasChoices, err := foldArrayValidated(root, "choices", validateCompletionsChoices)
+	if err != nil {
+		return "", fmt.Errorf("choices: %w", err)
+	}
+	if !hasChoices {
+		return "", nil
+	}
+	var sb strings.Builder
+	for _, element := range choices.Array() {
+		if element.Type == gjson.Null {
+			// typed 切片元素为 null 时该元素解出零值 struct（text 为空串），贡献空串。
 			continue
 		}
-		index := intFromAny(choiceMap["index"])
-		choice := a.choice(index)
-		if finishReason, exists := choiceMap["finish_reason"]; exists && finishReason != nil {
-			choice.finishReason = finishReason
+		if !element.IsObject() {
+			return "", fmt.Errorf("choices element: expected object or null, got %s", element.Type)
 		}
-		delta, ok := choiceMap["delta"].(map[string]any)
-		if !ok {
-			continue
+		text, textErr := foldString(element, "text")
+		if textErr != nil {
+			return "", fmt.Errorf("choices.text: %w", textErr)
 		}
-		choice.addDelta(delta)
+		// finish_reason 为 typed string：仅校验（含大小写变体与重复键），不参与文本累加。
+		if _, finishErr := foldString(element, "finish_reason"); finishErr != nil {
+			return "", fmt.Errorf("choices.finish_reason: %w", finishErr)
+		}
+		sb.WriteString(text)
+	}
+	return sb.String(), nil
+}
+
+// chatStreamFrame 承载单帧「校验 + 提取」的中间结果；校验失败时不得触碰累积器。
+type chatStreamFrame struct {
+	id                string
+	object            string
+	created           int64
+	model             string
+	systemFingerprint string
+	usageMap          map[string]any
+	usage             *model.Usage
+	choices           []chatStreamFrameChoice
+	choiceCount       int
+	responseText      string
+}
+
+type chatStreamFrameChoice struct {
+	index        int
+	finishReason any
+	hasFinish    bool
+	delta        *chatStreamFrameDelta
+}
+
+type chatStreamFrameDelta struct {
+	role            string
+	content         string
+	hasFunctionCall bool
+	functionName    string
+	functionArgs    string
+	toolCalls       []chatStreamFrameToolCall
+}
+
+type chatStreamFrameToolCall struct {
+	index    int
+	id       string
+	typeName string
+	function chatStreamFrameFunction
+}
+
+type chatStreamFrameFunction struct {
+	name      string
+	arguments string
+}
+
+func (frame *chatStreamFrame) result() chatStreamPayloadResult {
+	return chatStreamPayloadResult{
+		ResponseText: frame.responseText,
+		Usage:        frame.usage,
+		ChoiceCount:  frame.choiceCount,
 	}
 }
 
-func (a *chatStreamAccumulator) captureTopLevel(raw map[string]any) {
-	if value, ok := raw["id"].(string); ok && value != "" {
-		a.id = value
+// parseChatStreamFrame 单次扫描提取顶层元数据与 choices。类型化字段严格（存在且类型不符即报错），
+// 非类型化字段沿用累积器的既有宽松 map 语义，使转发决策与累积状态在同一帧上保持一致。
+//
+// 所有帧字段的键匹配均为 exact-then-fold 大小写不敏感，与 encoding/json struct 解码对齐；
+// 重复键 first-wins 为 sanctioned 差异（详见 foldMatch）。
+// 库间差异：encoding/json 把字符串中的非法 UTF-8 净化为 U+FFFD，gjson 保留原始字节，此处不做修正。
+//
+// 类型校验覆盖所有匹配键（含被 first-wins 跳过的重复键）：例如
+// `{"usage":{"prompt_tokens":5,"prompt_tokens":1e400}}` 与 `{"id":"x","id":1e400}` 中，被跳过的
+// 重复键类型不符即整帧失败（与旧 typed 解码 last-wins 的整帧失败结论一致）。该行为由
+// TestChatStreamAccumulatorDuplicateKeysFirstWins 与 TestChatStreamCaseVariantCoexistenceAndDuplicates 锁定。
+func parseChatStreamFrame(root gjson.Result) (*chatStreamFrame, error) {
+	frame := &chatStreamFrame{}
+	var err error
+	if frame.id, err = foldString(root, "id"); err != nil {
+		return nil, fmt.Errorf("id: %w", err)
 	}
-	if value, ok := raw["object"].(string); ok && value != "" {
-		a.object = value
+	if frame.object, err = foldString(root, "object"); err != nil {
+		return nil, fmt.Errorf("object: %w", err)
 	}
-	if value := int64FromAny(raw["created"]); value != 0 {
-		a.created = value
+	if frame.created, err = foldInt64(root, "created"); err != nil {
+		return nil, fmt.Errorf("created: %w", err)
 	}
-	if value, ok := raw["model"].(string); ok && value != "" {
-		a.model = value
+	if frame.model, err = foldString(root, "model"); err != nil {
+		return nil, fmt.Errorf("model: %w", err)
 	}
-	if value, ok := raw["system_fingerprint"].(string); ok && value != "" {
-		a.systemFingerprint = value
+	// system_fingerprint 非 typed 字段（旧 ChatCompletionsStreamResponse 未声明）：宽松——
+	// 仅 JSON string 时捕获，其余类型忽略且不报错，与旧 map 路径 (raw["system_fingerprint"].(string)) 一致。
+	frame.systemFingerprint = foldLooseString(root, "system_fingerprint")
+
+	usageResult, hasUsage, usageErr := foldObjectValidated(root, "usage", validateChatStreamUsage)
+	if usageErr != nil {
+		return nil, fmt.Errorf("usage: %w", usageErr)
+	}
+	if hasUsage {
+		usageMap, ok := usageResult.Value().(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("usage: expected object")
+		}
+		builtUsage, buildErr := buildChatStreamUsage(usageResult)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		frame.usageMap = usageMap
+		frame.usage = builtUsage
+	}
+
+	choicesResult, hasChoices, choicesErr := foldArrayValidated(root, "choices", validateChatStreamChoices)
+	if choicesErr != nil {
+		return nil, fmt.Errorf("choices: %w", choicesErr)
+	}
+	if hasChoices {
+		elements := choicesResult.Array()
+		frame.choiceCount = len(elements)
+		for _, element := range elements {
+			if element.Type == gjson.Null {
+				continue
+			}
+			if !element.IsObject() {
+				return nil, fmt.Errorf("choices element: expected object or null, got %s", element.Type)
+			}
+			choice, choiceErr := parseChatStreamChoice(element)
+			if choiceErr != nil {
+				return nil, choiceErr
+			}
+			frame.choices = append(frame.choices, choice)
+			if choice.delta != nil {
+				frame.responseText += choice.delta.content
+			}
+		}
+	}
+	return frame, nil
+}
+
+func parseChatStreamChoice(element gjson.Result) (chatStreamFrameChoice, error) {
+	choice := chatStreamFrameChoice{}
+	var err error
+	if choice.index, err = foldInt(element, "index"); err != nil {
+		return choice, fmt.Errorf("choices.index: %w", err)
+	}
+	finishReason, hasFinish, finishErr := foldNullableString(element, "finish_reason")
+	if finishErr != nil {
+		return choice, fmt.Errorf("choices.finish_reason: %w", finishErr)
+	}
+	if hasFinish {
+		choice.finishReason = finishReason
+		choice.hasFinish = true
+	}
+	deltaResult, hasDelta, deltaErr := foldObjectValidated(element, "delta", validateChatStreamDelta)
+	if deltaErr != nil {
+		return choice, fmt.Errorf("choices.delta: %w", deltaErr)
+	}
+	if hasDelta {
+		delta, parseErr := parseChatStreamDelta(deltaResult)
+		if parseErr != nil {
+			return choice, parseErr
+		}
+		choice.delta = delta
+	}
+	return choice, nil
+}
+
+func parseChatStreamDelta(deltaResult gjson.Result) (*chatStreamFrameDelta, error) {
+	delta := &chatStreamFrameDelta{}
+	var err error
+	if delta.role, err = foldString(deltaResult, "role"); err != nil {
+		return nil, fmt.Errorf("choices.delta.role: %w", err)
+	}
+	// refusal/name/tool_call_id 为 typed 字段（model.Message 中分别为 *string/*string/string），
+	// 旧 typed 解码会校验类型；此处仅校验、不捕获（累积器不使用它们）。
+	if _, err = foldString(deltaResult, "refusal"); err != nil {
+		return nil, fmt.Errorf("choices.delta.refusal: %w", err)
+	}
+	if _, err = foldString(deltaResult, "name"); err != nil {
+		return nil, fmt.Errorf("choices.delta.name: %w", err)
+	}
+	if _, err = foldString(deltaResult, "tool_call_id"); err != nil {
+		return nil, fmt.Errorf("choices.delta.tool_call_id: %w", err)
+	}
+	// content 为 typed any 字段（model.Message.Content）：仅 String 参与累积与文本产出，
+	// 其余类型贡献空串（对齐 conv.AsString 语义）；但含超出 float64 范围的数字时，
+	// 旧 typed 解码到 any 会失败并整帧拒绝，故须显式报错以保持等价。
+	content, _, contentErr := foldAny(deltaResult, "content")
+	if contentErr != nil {
+		return nil, fmt.Errorf("choices.delta.content: %w", contentErr)
+	}
+	if content.Type == gjson.String {
+		delta.content = content.String()
+	}
+	// reasoning_content 同为 typed any 字段（model.Message.ReasoningContent），规则同上。
+	if _, _, reasoningErr := foldAny(deltaResult, "reasoning_content"); reasoningErr != nil {
+		return nil, fmt.Errorf("choices.delta.reasoning_content: %w", reasoningErr)
+	}
+	// function_call 为任意类型：非 Object 被忽略；legacy 字段走宽松 map 语义（非 String 忽略），
+	// 与 tool_call.function 的严格 name 规则不同——后者在 typed Message 中受 string 约束。
+	if functionCall, ok := foldLooseObject(deltaResult, "function_call"); ok {
+		delta.hasFunctionCall = true
+		delta.functionName = looseStringValue(foldLooseResult(functionCall, "name"))
+		delta.functionArgs = looseStringValue(foldLooseResult(functionCall, "arguments"))
+	}
+	toolCalls, hasToolCalls, toolCallsErr := foldArrayValidated(deltaResult, "tool_calls", validateChatStreamToolCalls)
+	if toolCallsErr != nil {
+		return nil, fmt.Errorf("choices.delta.tool_calls: %w", toolCallsErr)
+	}
+	if hasToolCalls {
+		for _, element := range toolCalls.Array() {
+			if element.Type == gjson.Null {
+				continue
+			}
+			if !element.IsObject() {
+				return nil, fmt.Errorf("choices.delta.tool_calls element: expected object or null, got %s", element.Type)
+			}
+			toolCall, toolCallErr := parseChatStreamToolCall(element)
+			if toolCallErr != nil {
+				return nil, toolCallErr
+			}
+			delta.toolCalls = append(delta.toolCalls, toolCall)
+		}
+	}
+	return delta, nil
+}
+
+func parseChatStreamToolCall(element gjson.Result) (chatStreamFrameToolCall, error) {
+	// index 为非类型化字段：Number 截断为 int，非 Number 或非有限数取 0，不报错。
+	toolCall := chatStreamFrameToolCall{index: foldLooseInt(element, "index")}
+	var err error
+	if toolCall.id, err = foldString(element, "id"); err != nil {
+		return toolCall, fmt.Errorf("tool_calls.id: %w", err)
+	}
+	if toolCall.typeName, err = foldString(element, "type"); err != nil {
+		return toolCall, fmt.Errorf("tool_calls.type: %w", err)
+	}
+	functionResult, hasFunction, functionErr := foldObjectValidated(element, "function", validateChatStreamFunction)
+	if functionErr != nil {
+		return toolCall, fmt.Errorf("tool_calls.function: %w", functionErr)
+	}
+	if hasFunction {
+		if toolCall.function.name, err = foldString(functionResult, "name"); err != nil {
+			return toolCall, fmt.Errorf("tool_calls.function.name: %w", err)
+		}
+		// description (string) 与 strict (*bool) 为 typed 字段（model.Function），仅校验不捕获。
+		if _, err = foldString(functionResult, "description"); err != nil {
+			return toolCall, fmt.Errorf("tool_calls.function.description: %w", err)
+		}
+		if err = foldBool(functionResult, "strict"); err != nil {
+			return toolCall, fmt.Errorf("tool_calls.function.strict: %w", err)
+		}
+		// arguments / parameters 为 typed any 字段（model.Function.Arguments/Parameters）：
+		// 仅 String 参与累积；含超出 float64 范围的数字时旧 typed 解码会整帧失败，须显式报错。
+		arguments, _, argumentsErr := foldAny(functionResult, "arguments")
+		if argumentsErr != nil {
+			return toolCall, fmt.Errorf("tool_calls.function.arguments: %w", argumentsErr)
+		}
+		if _, _, parametersErr := foldAny(functionResult, "parameters"); parametersErr != nil {
+			return toolCall, fmt.Errorf("tool_calls.function.parameters: %w", parametersErr)
+		}
+		toolCall.function.arguments = looseStringValue(arguments)
+	}
+	return toolCall, nil
+}
+
+// buildChatStreamUsage 构造返回给消费者的 *model.Usage。三个 basis 严格（精确 int64）；
+// details 与旧 typed 路径一致：缺失/null 视为 nil 指针，非 Object 或已知 int 字段类型不符即报错。
+// 说明：detail 类型不符时整帧拒绝，与旧 typed 路径一致，保留旧计费行为（不扣费）。
+// 键匹配为 exact-then-fold 大小写不敏感，与 encoding/json struct 解码对齐；重复键 first-wins
+// 为 sanctioned 差异（详见 foldMatch）。
+// 非胜出的匹配键（大小写变体、被 first-wins 跳过的重复键）由 deepValidate 递归校验到目标类型
+// （契约 4.2 Step 4）。
+func buildChatStreamUsage(usageResult gjson.Result) (*model.Usage, error) {
+	usage := &model.Usage{}
+	var err error
+	if usage.PromptTokens, err = foldInt(usageResult, "prompt_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.prompt_tokens: %w", err)
+	}
+	if usage.CompletionTokens, err = foldInt(usageResult, "completion_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.completion_tokens: %w", err)
+	}
+	if usage.TotalTokens, err = foldInt(usageResult, "total_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.total_tokens: %w", err)
+	}
+	if usage.PromptTokensDetails, err = buildPromptTokensDetails(usageResult); err != nil {
+		return nil, err
+	}
+	if usage.CompletionTokensDetails, err = buildCompletionTokensDetails(usageResult); err != nil {
+		return nil, err
+	}
+	return usage, nil
+}
+
+// buildPromptTokensDetails 提取 *model.PromptTokensDetails：缺失/null 返回 nil；非胜出匹配键
+// 递归校验到 *model.PromptTokensDetails。
+func buildPromptTokensDetails(usageResult gjson.Result) (*model.PromptTokensDetails, error) {
+	result, ok, err := foldObjectValidated(usageResult, "prompt_tokens_details", validatePromptTokensDetails)
+	if err != nil {
+		return nil, fmt.Errorf("usage.prompt_tokens_details: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	return parsePromptTokensDetails(result)
+}
+
+// parsePromptTokensDetails 把已确认的 JSON 对象解析为 *model.PromptTokensDetails。
+func parsePromptTokensDetails(result gjson.Result) (*model.PromptTokensDetails, error) {
+	details := &model.PromptTokensDetails{}
+	var err error
+	if details.CachedTokens, err = foldInt(result, "cached_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.prompt_tokens_details.cached_tokens: %w", err)
+	}
+	if details.CacheWriteTokens, err = foldInt(result, "cache_write_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.prompt_tokens_details.cache_write_tokens: %w", err)
+	}
+	if details.AudioTokens, err = foldInt(result, "audio_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.prompt_tokens_details.audio_tokens: %w", err)
+	}
+	if details.TextTokens, err = foldInt(result, "text_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.prompt_tokens_details.text_tokens: %w", err)
+	}
+	if details.ImageTokens, err = foldInt(result, "image_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.prompt_tokens_details.image_tokens: %w", err)
+	}
+	return details, nil
+}
+
+// buildCompletionTokensDetails 提取 *model.CompletionTokensDetails：缺失/null 返回 nil；非胜出
+// 匹配键递归校验到 *model.CompletionTokensDetails。
+func buildCompletionTokensDetails(usageResult gjson.Result) (*model.CompletionTokensDetails, error) {
+	result, ok, err := foldObjectValidated(usageResult, "completion_tokens_details", validateCompletionTokensDetails)
+	if err != nil {
+		return nil, fmt.Errorf("usage.completion_tokens_details: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	return parseCompletionTokensDetails(result)
+}
+
+// parseCompletionTokensDetails 把已确认的 JSON 对象解析为 *model.CompletionTokensDetails。
+func parseCompletionTokensDetails(result gjson.Result) (*model.CompletionTokensDetails, error) {
+	details := &model.CompletionTokensDetails{}
+	var err error
+	if details.ReasoningTokens, err = foldInt(result, "reasoning_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.completion_tokens_details.reasoning_tokens: %w", err)
+	}
+	if details.AcceptedPredictionTokens, err = foldInt(result, "accepted_prediction_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.completion_tokens_details.accepted_prediction_tokens: %w", err)
+	}
+	if details.RejectedPredictionTokens, err = foldInt(result, "rejected_prediction_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.completion_tokens_details.rejected_prediction_tokens: %w", err)
+	}
+	if details.AudioTokens, err = foldInt(result, "audio_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.completion_tokens_details.audio_tokens: %w", err)
+	}
+	if details.TextTokens, err = foldInt(result, "text_tokens"); err != nil {
+		return nil, fmt.Errorf("usage.completion_tokens_details.text_tokens: %w", err)
+	}
+	return details, nil
+}
+
+// applyFrame 把已完整校验的帧一次性写入累积器；其字段语义与旧 map 实现逐条等价。
+func (a *chatStreamAccumulator) applyFrame(frame *chatStreamFrame) {
+	if frame.id != "" {
+		a.id = frame.id
+	}
+	if frame.object != "" {
+		a.object = frame.object
+	}
+	if frame.created != 0 {
+		a.created = frame.created
+	}
+	if frame.model != "" {
+		a.model = frame.model
+	}
+	if frame.systemFingerprint != "" {
+		a.systemFingerprint = frame.systemFingerprint
+	}
+	if frame.usageMap != nil {
+		a.usage = frame.usageMap
+	}
+	for _, choiceFrame := range frame.choices {
+		choice := a.choice(choiceFrame.index)
+		if choiceFrame.hasFinish {
+			choice.finishReason = choiceFrame.finishReason
+		}
+		if choiceFrame.delta == nil {
+			continue
+		}
+		choice.applyDelta(choiceFrame.delta)
 	}
 }
 
@@ -203,57 +619,533 @@ func (a *chatStreamAccumulator) choice(index int) *chatStreamChoiceAccumulator {
 	return choice
 }
 
-func (c *chatStreamChoiceAccumulator) addDelta(delta map[string]any) {
-	if roleValue, ok := delta["role"].(string); ok && roleValue != "" {
-		c.role = roleValue
+func (c *chatStreamChoiceAccumulator) applyDelta(delta *chatStreamFrameDelta) {
+	if delta.role != "" {
+		c.role = delta.role
 	}
-	if contentValue, ok := delta["content"].(string); ok {
-		c.content += contentValue
-	}
-	if functionCall, ok := delta["function_call"].(map[string]any); ok {
+	c.content += delta.content
+	if delta.hasFunctionCall {
 		if c.functionCall == nil {
 			c.functionCall = &chatStreamFunctionCallAccumulator{}
 		}
-		c.functionCall.add(functionCall)
+		if delta.functionName != "" {
+			c.functionCall.name = delta.functionName
+		}
+		c.functionCall.arguments += delta.functionArgs
 	}
-	toolCalls, ok := delta["tool_calls"].([]any)
-	if !ok {
-		return
-	}
-	for _, toolCallValue := range toolCalls {
-		toolCallMap, ok := toolCallValue.(map[string]any)
+	for _, toolCallFrame := range delta.toolCalls {
+		toolCall, ok := c.toolCalls[toolCallFrame.index]
 		if !ok {
+			toolCall = &chatStreamToolCallAccumulator{index: toolCallFrame.index}
+			c.toolCalls[toolCallFrame.index] = toolCall
+		}
+		if toolCallFrame.id != "" {
+			toolCall.id = toolCallFrame.id
+		}
+		if toolCallFrame.typeName != "" {
+			toolCall.typeValue = toolCallFrame.typeName
+		}
+		if toolCallFrame.function.name != "" {
+			toolCall.function.name = toolCallFrame.function.name
+		}
+		toolCall.function.arguments += toolCallFrame.function.arguments
+	}
+}
+
+// nullPolicy 描述「匹配键的值为显式 JSON null」时如何影响取值，按目标 Go 字段类型区分
+// （契约 4.2 Step 3 / 4.4 Step 2）：
+//
+//   - nullIsNoOp：string 目标字段（Go `string`）。null 是无操作——既不产出值，也不占用
+//     first-wins 键位，且不阻断后续匹配键的 last-wins 覆盖（`{"type":"a","TYPE":null}` → "a"）。
+//   - nullResetsToZero：非 string 目标字段（object / array / int / bool / 浮点 / 指针）。
+//     null 参与文档序 last-wins：若 null 是文档中最后一个匹配键，目标字段覆盖为零值
+//     （nil / 0 / false）；该规则同样适用于嵌套字段（如 `choices[].index` 是 int、`usage` 是对象、
+//     `finish_reason` 是 *string）。
+//
+// 与 `encoding/json` 的对照说明：`encoding/json` 对非指针标量（int/bool/float/string）的 null 一律
+// 无操作，对指针/切片/映射/接口的 null 置 nil。改造前的累积产物由「typed 解码 + map 累积」两步
+// 产生，两步对 null 的结论并不一致（map 路径对重复键取 last-wins，null 覆盖为 nil → 零值）。
+// 契约 4.2 选定「非 string 一律零值」这一统一口径，使单次扫描同时服务转发/文本/usage 与累积 body；
+// 对 usage/choices/finish_reason 等指针与容器字段该口径与 typed 解码一致，对 int 标量
+// （如 created/index）则与改造前的 map 累积路径一致。该差异由
+// TestChatStreamNullDestinationTypeRules 的对照探针显式记录。
+type nullPolicy int
+
+const (
+	// nullIsNoOp：string 目标字段的 null 无操作。
+	nullIsNoOp nullPolicy = iota
+	// nullResetsToZero：非 string 目标字段的 null 参与 last-wins 并覆盖为零值。
+	nullResetsToZero
+)
+
+// foldMatch 在 root 对象中按 exact-then-fold 语义查找 target 键，并返回被选中的值。
+//
+// 键匹配为 exact-then-fold 大小写不敏感，与 `encoding/json` struct 解码对齐：先精确匹配，失败回退
+// Unicode 简单折叠匹配（`strings.EqualFold`，等价于 `encoding/json` 的 foldName），故 `id`/`Id`/
+// `ID`、转义拼写（`{"\u0069d":...}` 解码为 `id`）都会命中。库间差异：`encoding/json` 把字符串中的
+// 非法 UTF-8 净化为 U+FFFD，而 `gjson` 保留原始字节，此处不做修正。
+//
+// 值选取与 `encoding/json` 对齐：大小写变体之间按文档序 last-wins（`{"id":"a","ID":"b"}` → "b"）。
+// 显式 `null` 的语义按 policy 区分（见 nullPolicy）：string 目标字段的 null 是无操作，不产出值、
+// 不占用 first-wins 键位、不阻断后续覆盖；非 string 目标字段的 null 参与 last-wins 并覆盖为零值。
+//
+// 与 `encoding/json` 的已知差异（契约 AC-9 声明的 sanctioned exception）：字节完全相同的重复键
+// （以及转义与字面拼写解码后相同的键）取「第一个」（first-wins），而 `encoding/json` 取「最后一个」
+// （last-wins）。该差异由 TestChatStreamAccumulatorDuplicateKeysFirstWins 锁定。非 string 目标的
+// 显式 null 不占用 first-wins 键位，故后续同名键仍可覆盖（`{"created":1,"created":null}` → 0）。
+//
+// 类型校验覆盖所有匹配键（含被 first-wins/last-wins 跳过的键，契约 4.2 Step 4）：胜出键由调用方
+// 按目标类型完整解析（validate 在此仅做浅层类型校验），其余匹配键走 deepValidate 递归到目标类型；
+// 任一匹配键无法解析到目标类型即整体失败，对齐 `encoding/json` 的递归校验语义。所有校验函数
+// 对 `null` 必须放行（null 不是类型错误）。
+func foldMatch(root gjson.Result, target string, policy nullPolicy, validate func(gjson.Result) error, deepValidate func(gjson.Result) error) (selected gjson.Result, found bool, err error) {
+	if !root.IsObject() {
+		return gjson.Result{}, false, nil
+	}
+	// validateOther 校验「不参与取值」的匹配键（被 first-wins/last-wins 跳过的键，以及被
+	// 大小写变体或显式 null 覆盖的旧胜出键）：优先递归到目标类型（deepValidate），否则浅层校验。
+	validateOther := func(value gjson.Result) error {
+		if deepValidate != nil {
+			return deepValidate(value)
+		}
+		if validate != nil {
+			return validate(value)
+		}
+		return nil
+	}
+	winningKey := ""
+	root.ForEach(func(key, value gjson.Result) bool {
+		// 先精确匹配（快路径），失败再回退 Unicode 简单折叠匹配。
+		if key.Str != target && !strings.EqualFold(key.Str, target) {
+			return true
+		}
+		if value.Type == gjson.Null && policy == nullIsNoOp {
+			// string 目标字段：null 是无操作——不产出值、不占用 first-wins 键位、不阻断后续覆盖。
+			if validateErr := validateOther(value); validateErr != nil {
+				err = validateErr
+				return false
+			}
+			return true
+		}
+		if value.Type == gjson.Null {
+			// 非 string 目标字段：null 参与文档序 last-wins，覆盖为零值，且不占用 first-wins 键位。
+			if found {
+				// 旧胜出键被 null 覆盖：仍须递归校验（契约 4.2 Step 4）。
+				if validateErr := validateOther(selected); validateErr != nil {
+					err = validateErr
+					return false
+				}
+			}
+			selected = value
+			found = true
+			winningKey = ""
+			return true
+		}
+		// 字节（解码后）完全相同的重复键：first-wins（AC-9 sanctioned 差异）；仍须递归校验。
+		if winningKey != "" && winningKey == key.Str {
+			if validateErr := validateOther(value); validateErr != nil {
+				err = validateErr
+				return false
+			}
+			return true
+		}
+		if found {
+			// 大小写变体覆盖旧胜出键：旧值不再参与取值，仍须递归校验（契约 4.2 Step 4）。
+			if validateErr := validateOther(selected); validateErr != nil {
+				err = validateErr
+				return false
+			}
+		}
+		winningKey = key.Str
+		selected = value
+		found = true
+		return true
+	})
+	if err != nil {
+		return gjson.Result{}, false, err
+	}
+	if found && validate != nil {
+		// 胜出键由调用方按目标类型完整解析，此处仅做浅层类型校验。
+		if validateErr := validate(selected); validateErr != nil {
+			return gjson.Result{}, false, validateErr
+		}
+	}
+	return selected, found, nil
+}
+
+// validateString 校验匹配键为非 null 的 JSON string（对齐 encoding/json 对 Go string 字段的严格性）。
+func validateString(value gjson.Result) error {
+	if value.Type != gjson.Null && value.Type != gjson.String {
+		return fmt.Errorf("expected string, got %s", value.Type)
+	}
+	return nil
+}
+
+// validateExactInt 校验匹配键为非 null 的精确十进制 int64（拒绝小数、指数形式与溢出）。
+func validateExactInt(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if value.Type != gjson.Number {
+		return fmt.Errorf("expected integer, got %s", value.Type)
+	}
+	if _, err := strconv.ParseInt(value.Raw, 10, 64); err != nil {
+		return fmt.Errorf("expected integer, got %s", value.Raw)
+	}
+	return nil
+}
+
+// validateBool 校验匹配键为非 null 的布尔（旧 typed *bool 语义）。
+func validateBool(value gjson.Result) error {
+	if value.Type != gjson.Null && value.Type != gjson.True && value.Type != gjson.False {
+		return fmt.Errorf("expected boolean, got %s", value.Type)
+	}
+	return nil
+}
+
+// validateObject 校验匹配键为非 null 的 JSON 对象。
+func validateObject(value gjson.Result) error {
+	if value.Type != gjson.Null && !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	return nil
+}
+
+// validateArray 校验匹配键为非 null 的 JSON 数组。
+func validateArray(value gjson.Result) error {
+	if value.Type != gjson.Null && !value.IsArray() {
+		return fmt.Errorf("expected array, got %s", value.Type)
+	}
+	return nil
+}
+
+// validateAny 校验匹配键不含超出 float64 表示范围的数字（旧 typed any 字段解码失败即整帧失败）。
+func validateAny(value gjson.Result) error {
+	if hasUnrepresentableNumber(value) {
+		return fmt.Errorf("contains a number outside float64 range")
+	}
+	return nil
+}
+
+// validateChatStreamUsage 把匹配值递归校验为 *model.Usage 目标类型（契约 4.2 Step 4）：
+// null 合法（零值）；非对象或任一嵌套字段无法解析为 model.Usage 即报错。
+func validateChatStreamUsage(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	_, err := buildChatStreamUsage(value)
+	return err
+}
+
+// validateChatStreamChoices 把匹配值递归校验为 choice 对象数组目标类型（契约 4.2 Step 4）：
+// null 合法；非数组、非对象元素或任一 choice 字段无法解析即报错。
+func validateChatStreamChoices(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsArray() {
+		return fmt.Errorf("expected array, got %s", value.Type)
+	}
+	for _, element := range value.Array() {
+		if element.Type == gjson.Null {
 			continue
 		}
-		index := intFromAny(toolCallMap["index"])
-		toolCall, ok := c.toolCalls[index]
-		if !ok {
-			toolCall = &chatStreamToolCallAccumulator{index: index}
-			c.toolCalls[index] = toolCall
+		if !element.IsObject() {
+			return fmt.Errorf("choices element: expected object or null, got %s", element.Type)
 		}
-		toolCall.add(toolCallMap)
+		if _, err := parseChatStreamChoice(element); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateChatStreamDelta 把匹配值递归校验为 model.Message 目标类型（契约 4.2 Step 4）：
+// null 合法；非对象或任一 delta 字段无法解析即报错。
+func validateChatStreamDelta(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	_, err := parseChatStreamDelta(value)
+	return err
+}
+
+// validateChatStreamToolCalls 把匹配值递归校验为 []model.Tool 目标类型（契约 4.2 Step 4）：
+// null 合法；非数组、非对象元素或任一 tool_call 字段无法解析即报错。
+func validateChatStreamToolCalls(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsArray() {
+		return fmt.Errorf("expected array, got %s", value.Type)
+	}
+	for _, element := range value.Array() {
+		if element.Type == gjson.Null {
+			continue
+		}
+		if !element.IsObject() {
+			return fmt.Errorf("tool_calls element: expected object or null, got %s", element.Type)
+		}
+		if _, err := parseChatStreamToolCall(element); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateChatStreamFunction 把匹配值递归校验为 model.Function 目标类型（契约 4.2 Step 4）：
+// null 合法；非对象或任一 function 字段无法解析即报错。
+func validateChatStreamFunction(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	return validateFunctionFields(value)
+}
+
+// validateFunctionFields 校验 JSON 对象的各字段能否解析为 model.Function：
+// name/description 为 Go string，strict 为 *bool，arguments/parameters 为 any。
+func validateFunctionFields(functionResult gjson.Result) error {
+	var err error
+	if _, err = foldString(functionResult, "name"); err != nil {
+		return fmt.Errorf("tool_calls.function.name: %w", err)
+	}
+	if _, err = foldString(functionResult, "description"); err != nil {
+		return fmt.Errorf("tool_calls.function.description: %w", err)
+	}
+	if err = foldBool(functionResult, "strict"); err != nil {
+		return fmt.Errorf("tool_calls.function.strict: %w", err)
+	}
+	if _, _, err = foldAny(functionResult, "arguments"); err != nil {
+		return fmt.Errorf("tool_calls.function.arguments: %w", err)
+	}
+	if _, _, err = foldAny(functionResult, "parameters"); err != nil {
+		return fmt.Errorf("tool_calls.function.parameters: %w", err)
+	}
+	return nil
+}
+
+// validatePromptTokensDetails 把匹配值递归校验为 *model.PromptTokensDetails 目标类型（契约 4.2 Step 4）。
+func validatePromptTokensDetails(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	_, err := parsePromptTokensDetails(value)
+	return err
+}
+
+// validateCompletionTokensDetails 把匹配值递归校验为 *model.CompletionTokensDetails 目标类型（契约 4.2 Step 4）。
+func validateCompletionTokensDetails(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	_, err := parseCompletionTokensDetails(value)
+	return err
+}
+
+// validateCompletionsChoices 把匹配值递归校验为 Completions 的 choice 数组目标类型（契约 4.4 Step 2）：
+// null 合法；非数组、非对象元素或任一 `text`/`finish_reason`（均为 Go string）无法解析即报错。
+func validateCompletionsChoices(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsArray() {
+		return fmt.Errorf("expected array, got %s", value.Type)
+	}
+	for _, element := range value.Array() {
+		if element.Type == gjson.Null {
+			continue
+		}
+		if !element.IsObject() {
+			return fmt.Errorf("choices element: expected object or null, got %s", element.Type)
+		}
+		if _, err := foldString(element, "text"); err != nil {
+			return fmt.Errorf("choices.text: %w", err)
+		}
+		if _, err := foldString(element, "finish_reason"); err != nil {
+			return fmt.Errorf("choices.finish_reason: %w", err)
+		}
+	}
+	return nil
+}
+
+// foldString 返回类型化 string 字段的值：缺失/null 视为零值（null 为无操作），任一匹配键非 String 即报错。
+func foldString(root gjson.Result, target string) (string, error) {
+	selected, found, err := foldMatch(root, target, nullIsNoOp, validateString, nil)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", nil
+	}
+	return selected.String(), nil
+}
+
+// foldNullableString 返回可空 string 指针字段（如 finish_reason）的值与「是否存在非 null 值」标志。
+// finish_reason 在旧 typed 结构体中为 *string（指针），故显式 null 覆盖为 nil（零值），
+// 与 `encoding/json` 的指针语义一致（`{"finish_reason":"stop","finish_reason":null}` → nil）。
+func foldNullableString(root gjson.Result, target string) (string, bool, error) {
+	selected, found, err := foldMatch(root, target, nullResetsToZero, validateString, nil)
+	if err != nil {
+		return "", false, err
+	}
+	if !found || selected.Type == gjson.Null {
+		return "", false, nil
+	}
+	return selected.String(), true, nil
+}
+
+// foldInt64 返回类型化 int64 字段的值：缺失/null 视为 0，其余必须是精确的十进制 int64。
+func foldInt64(root gjson.Result, target string) (int64, error) {
+	selected, found, err := foldMatch(root, target, nullResetsToZero, validateExactInt, nil)
+	if err != nil {
+		return 0, err
+	}
+	if !found || selected.Type == gjson.Null {
+		return 0, nil
+	}
+	return strconv.ParseInt(selected.Raw, 10, 64)
+}
+
+// foldInt 返回类型化 int 字段的值（对齐旧 typed 路径对 Go int 字段的解码）。
+func foldInt(root gjson.Result, target string) (int, error) {
+	value, err := foldInt64(root, target)
+	if err != nil {
+		return 0, err
+	}
+	return int(value), nil
+}
+
+// foldBool 仅校验类型化 *bool 字段：缺失/null 合法，任一匹配键非布尔即报错。
+func foldBool(root gjson.Result, target string) error {
+	_, _, err := foldMatch(root, target, nullResetsToZero, validateBool, nil)
+	return err
+}
+
+// foldObjectValidated 返回对象字段的值：缺失/null 视为不存在，任一匹配键非 Object 即报错；
+// 非胜出的匹配键由 deepValidate 递归校验到目标 Go 类型（契约 4.2 Step 4）。
+func foldObjectValidated(root gjson.Result, target string, deepValidate func(gjson.Result) error) (gjson.Result, bool, error) {
+	selected, found, err := foldMatch(root, target, nullResetsToZero, validateObject, deepValidate)
+	if err != nil {
+		return gjson.Result{}, false, err
+	}
+	if !found || selected.Type == gjson.Null {
+		return gjson.Result{}, false, nil
+	}
+	return selected, true, nil
+}
+
+// foldArrayValidated 返回数组字段的值：缺失/null 视为不存在，任一匹配键非 Array 即报错；
+// 非胜出的匹配键由 deepValidate 递归校验到目标 Go 类型（契约 4.2 Step 4）。
+func foldArrayValidated(root gjson.Result, target string, deepValidate func(gjson.Result) error) (gjson.Result, bool, error) {
+	selected, found, err := foldMatch(root, target, nullResetsToZero, validateArray, deepValidate)
+	if err != nil {
+		return gjson.Result{}, false, err
+	}
+	if !found || selected.Type == gjson.Null {
+		return gjson.Result{}, false, nil
+	}
+	return selected, true, nil
+}
+
+// foldAny 返回非类型化 any 字段的选中值：任一匹配键含超出 float64 范围的数字即报错。
+// 显式 null 参与 last-wins，返回 null Result（消费者按 conv.AsString 语义产出零值）。
+func foldAny(root gjson.Result, target string) (gjson.Result, bool, error) {
+	return foldMatch(root, target, nullResetsToZero, validateAny, nil)
+}
+
+// foldLooseString 沿用旧 map 断言语义：仅选中的 JSON string 产出其值，其余类型忽略为空串。
+// 非 string 匹配键不报错（区别于 foldString 的严格语义）。
+//
+// system_fingerprint 在累积器中为 Go `string` 目标，故显式 null 是无操作：不产出值，
+// 也不占用 first-wins 键位、不阻断后续覆盖（契约 4.2 Step 3 的 string 目标规则）。
+func foldLooseString(root gjson.Result, target string) string {
+	selected, found, err := foldMatch(root, target, nullIsNoOp, nil, nil)
+	if err != nil || !found {
+		return ""
+	}
+	return looseStringValue(selected)
+}
+
+// foldLooseResult 返回宽松字段的选中值（无类型校验）：缺失时返回零值 Result。
+// 显式 null 参与 last-wins（与旧 map 路径一致），返回 null Result。
+func foldLooseResult(root gjson.Result, target string) gjson.Result {
+	selected, found, err := foldMatch(root, target, nullResetsToZero, nil, nil)
+	if err != nil || !found {
+		return gjson.Result{}
+	}
+	return selected
+}
+
+// foldLooseObject 返回宽松对象字段的选中值：仅当选中的匹配值为 Object 时返回 ok=true，
+// 非 Object（含 null）一律忽略且不报错（区别于 foldObject 的严格语义）。
+func foldLooseObject(root gjson.Result, target string) (gjson.Result, bool) {
+	selected := foldLooseResult(root, target)
+	if !selected.IsObject() {
+		return gjson.Result{}, false
+	}
+	return selected, true
+}
+
+// foldLooseInt 是 tool_call.index 的非类型化读取：Number 截断为 int，非 Number 或非有限数取 0。
+func foldLooseInt(root gjson.Result, target string) int {
+	result := foldLooseResult(root, target)
+	if result.Type != gjson.Number {
+		return 0
+	}
+	if math.IsNaN(result.Num) || math.IsInf(result.Num, 0) {
+		return 0
+	}
+	return int(result.Num)
+}
+
+// hasUnrepresentableNumber 递归检测 JSON 中是否存在超出 float64 表示范围的数字。
+// 旧实现的第二步（json.Unmarshal 到 map[string]any）对此类数字会失败并跳过该帧的累积；
+// 本路径不物化 map，需显式检测以决定「是否跳过累积」，从而保持累积 body 与改造前等价
+// （spec: Reconstructed output SHALL be unchanged）。注意：此检测不拒绝整帧——文本与 usage
+// 已由 typed 等价的校验/提取阶段产出，必须保留。
+func hasUnrepresentableNumber(result gjson.Result) bool {
+	switch result.Type {
+	case gjson.Number:
+		// gjson 对超出 float64 范围的数字取值为 ±Inf（与 strconv.ParseFloat 的报错判定等价，
+		// 已由 20 万例随机数字 fuzz 验证）；下溢到 0 的字面量（如 1e-400）取值为有限数，
+		// 与 encoding/json 不报错的行为一致。
+		return math.IsInf(result.Num, 0)
+	case gjson.JSON:
+		found := false
+		result.ForEach(func(_, value gjson.Result) bool {
+			if hasUnrepresentableNumber(value) {
+				found = true
+				return false
+			}
+			return true
+		})
+		return found
+	default:
+		return false
 	}
 }
 
-func (t *chatStreamToolCallAccumulator) add(raw map[string]any) {
-	if value, ok := raw["id"].(string); ok && value != "" {
-		t.id = value
+// looseStringValue 沿用旧 map 断言语义：仅 JSON string 产出其值，其余类型忽略为空串。
+func looseStringValue(result gjson.Result) string {
+	if result.Type != gjson.String {
+		return ""
 	}
-	if value, ok := raw["type"].(string); ok && value != "" {
-		t.typeValue = value
-	}
-	if function, ok := raw["function"].(map[string]any); ok {
-		t.function.add(function)
-	}
-}
-
-func (f *chatStreamFunctionCallAccumulator) add(raw map[string]any) {
-	if value, ok := raw["name"].(string); ok && value != "" {
-		f.name = value
-	}
-	if value, ok := raw["arguments"].(string); ok {
-		f.arguments += value
-	}
+	return result.String()
 }
 
 func (a *chatStreamAccumulator) buildResponseBody() string {
@@ -347,30 +1239,6 @@ func (f *chatStreamFunctionCallAccumulator) asMap() map[string]any {
 	return function
 }
 
-func intFromAny(value any) int {
-	switch typed := value.(type) {
-	case float64:
-		return int(typed)
-	case int:
-		return typed
-	default:
-		return 0
-	}
-}
-
-func int64FromAny(value any) int64 {
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed)
-	case int64:
-		return typed
-	case int:
-		return int64(typed)
-	default:
-		return 0
-	}
-}
-
 func buildStreamResponseBody(responseText string, usage *model.Usage, modelName string) string {
 	type streamChoice struct {
 		Index        int           `json:"index"`
@@ -431,8 +1299,364 @@ func ensureStreamResponseBodyUsage(responseBody string, usage *model.Usage) stri
 	return string(data)
 }
 
+// textResponseExtraction contains only fields consumed by the non-stream handler.
+//
+// 计费语义（spec: Billing-critical fields SHALL fail rather than degrade / Non-billing detail unparseable）：
+// 三个 basis（prompt_tokens/completion_tokens/total_tokens）严格——不可解析即整份提取失败；details 宽容——
+// 不可解析视为该 detail 缺失（指针 nil），不影响 basis。`null` 一律映射为零值。
+//
+// 重复键差异（契约 AC-9 sanctioned exception）：本路径按 gjson 路径取值，字节完全相同的重复键
+// 「first-wins」；旧 `encoding/json` typed 解码为「last-wins」。大小写变体为文档序 last-wins，
+// 与旧实现一致；转义与字面拼写解码后相同的键按重复处理（first-wins）。由
+// TestExtractTextResponseEquivalence 的 duplicate 用例锁定。
+type textResponseExtraction struct {
+	Error          *model.Error
+	Usage          model.Usage
+	ChoiceContents []string
+}
+
+// extractTextResponse validates one upstream chat response and extracts error, billing usage, and
+// choice content; malformed JSON, invalid billing fields, or invalid choices return an error, null
+// billing integers map to zero, and invalid detail fields are omitted.
+//
+// 库间差异（sanctioned）：`encoding/json` 把字符串中的非法 UTF-8 净化为 U+FFFD，`gjson` 保留原始字节，
+// 此处不做修正。
+func extractTextResponse(responseBody []byte) (result textResponseExtraction, err error) {
+	if !json.Valid(responseBody) {
+		return textResponseExtraction{}, fmt.Errorf("chat response body is not valid JSON")
+	}
+	root := gjson.ParseBytes(responseBody)
+	if root.Type == gjson.Null {
+		// 旧 typed 解码 `json.Unmarshal("null", &SlimTextResponse)` 成功且全部为零值。
+		return textResponseExtraction{}, nil
+	}
+	if !root.IsObject() {
+		// 数组/字符串/数字/布尔根：旧 typed 解码失败（非对象根无法解码为 struct）。
+		return textResponseExtraction{}, fmt.Errorf("chat response root must be an object, got %s", root.Type)
+	}
+
+	errorResult, hasError, errorErr := foldObjectValidated(root, "error", validateTextResponseError)
+	if errorErr != nil {
+		return textResponseExtraction{}, fmt.Errorf("error: %w", errorErr)
+	}
+	if hasError {
+		parsed, parseErr := parseTextResponseError(errorResult)
+		if parseErr != nil {
+			return textResponseExtraction{}, fmt.Errorf("error: %w", parseErr)
+		}
+		// 旧 Handler 的触发条件为 `textResponse.Error.Type != ""`：Error 仅在 Type 非空时
+		// 才转成上游错误返回，其余情况（缺失/null/`{}`/仅 message）继续透传。此处沿用同一
+		// 判据，使 `result.Error != nil` 与「旧实现返回上游错误」严格等价。
+		if parsed.Type != "" {
+			result.Error = &parsed
+		}
+	}
+
+	usageResult, hasUsage, usageErr := foldObjectValidated(root, "usage", validateTextResponseUsage)
+	if usageErr != nil {
+		return textResponseExtraction{}, fmt.Errorf("usage: %w", usageErr)
+	}
+	if hasUsage {
+		parsedUsage, parseErr := parseTextResponseUsage(usageResult)
+		if parseErr != nil {
+			return textResponseExtraction{}, parseErr
+		}
+		result.Usage = parsedUsage
+	}
+
+	choices, hasChoices, choicesErr := foldArrayValidated(root, "choices", validateTextResponseChoices)
+	if choicesErr != nil {
+		return textResponseExtraction{}, fmt.Errorf("choices: %w", choicesErr)
+	}
+	if hasChoices {
+		for _, element := range choices.Array() {
+			// foldArrayValidated 仅对「被跳过的匹配键」递归校验到目标类型；胜出键的完整递归校验
+			// 由调用方完成（与 extractCompletionsStreamText 同一约定），故此处显式解析每个 choice。
+			content, choiceErr := parseTextResponseChoiceContent(element)
+			if choiceErr != nil {
+				return textResponseExtraction{}, choiceErr
+			}
+			result.ChoiceContents = append(result.ChoiceContents, content)
+		}
+	}
+	return result, nil
+}
+
+// parseTextResponseChoiceContent 完整校验一个 choice 并按 model.Message.StringContent 的语义
+// 产出其 content 文本：非对象元素报错（null 元素产出空串，对齐旧 typed 切片零值）。
+func parseTextResponseChoiceContent(element gjson.Result) (string, error) {
+	if element.Type == gjson.Null {
+		return "", nil
+	}
+	if !element.IsObject() {
+		return "", fmt.Errorf("choices element: expected object or null, got %s", element.Type)
+	}
+	if _, err := foldInt(element, "index"); err != nil {
+		return "", fmt.Errorf("choices.index: %w", err)
+	}
+	if _, err := foldString(element, "finish_reason"); err != nil {
+		return "", fmt.Errorf("choices.finish_reason: %w", err)
+	}
+	messageResult, hasMessage, messageErr := foldObjectValidated(element, "message", validateTextResponseMessage)
+	if messageErr != nil {
+		return "", fmt.Errorf("choices.message: %w", messageErr)
+	}
+	if !hasMessage {
+		return "", nil
+	}
+	// foldObjectValidated 仅对「被跳过的匹配键」递归校验；胜出 message 由调用方完整校验。
+	if err := validateTextResponseMessage(messageResult); err != nil {
+		return "", err
+	}
+	contentResult, _, contentErr := foldAny(messageResult, "content")
+	if contentErr != nil {
+		return "", fmt.Errorf("choices.message.content: %w", contentErr)
+	}
+	return contentResultToText(contentResult), nil
+}
+
+// validateTextResponseError 校验 error 目标类型（model.Error）：null 合法；非对象或
+// message/type/param 非 string、code 含超出 float64 范围的数字即报错。
+func validateTextResponseError(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsObject() {
+		return fmt.Errorf("expected object, got %s", value.Type)
+	}
+	for _, field := range []string{"message", "type", "param"} {
+		if _, err := foldString(value, field); err != nil {
+			return fmt.Errorf("error.%s: %w", field, err)
+		}
+	}
+	if _, _, err := foldAny(value, "code"); err != nil {
+		return fmt.Errorf("error.code: %w", err)
+	}
+	return nil
+}
+
+// parseTextResponseError 把已确认的 JSON 对象解析为 model.Error。
+func parseTextResponseError(value gjson.Result) (model.Error, error) {
+	parsed := model.Error{}
+	var err error
+	if parsed.Message, err = foldString(value, "message"); err != nil {
+		return parsed, fmt.Errorf("error.message: %w", err)
+	}
+	if parsed.Type, err = foldString(value, "type"); err != nil {
+		return parsed, fmt.Errorf("error.type: %w", err)
+	}
+	if parsed.Param, err = foldString(value, "param"); err != nil {
+		return parsed, fmt.Errorf("error.param: %w", err)
+	}
+	code, _, codeErr := foldAny(value, "code")
+	if codeErr != nil {
+		return parsed, fmt.Errorf("error.code: %w", codeErr)
+	}
+	if code.Exists() && code.Type != gjson.Null {
+		parsed.Code = code.Value()
+	}
+	return parsed, nil
+}
+
+// parseTextResponseUsage 严格解析三个 basis、宽容解析 details：details 不可解析视为缺失。
+func parseTextResponseUsage(usageResult gjson.Result) (model.Usage, error) {
+	parsed := model.Usage{}
+	var err error
+	if parsed.PromptTokens, err = foldInt(usageResult, "prompt_tokens"); err != nil {
+		return parsed, fmt.Errorf("usage.prompt_tokens: %w", err)
+	}
+	if parsed.CompletionTokens, err = foldInt(usageResult, "completion_tokens"); err != nil {
+		return parsed, fmt.Errorf("usage.completion_tokens: %w", err)
+	}
+	if parsed.TotalTokens, err = foldInt(usageResult, "total_tokens"); err != nil {
+		return parsed, fmt.Errorf("usage.total_tokens: %w", err)
+	}
+	parsed.PromptTokensDetails = tolerantPromptTokensDetails(usageResult)
+	parsed.CompletionTokensDetails = tolerantCompletionTokensDetails(usageResult)
+	return parsed, nil
+}
+
+// validateTextResponseUsage 递归校验 usage 目标类型：三个 basis 严格（不可解析即报错），
+// details 宽容（不可解析不报错，由解析阶段降级为缺失）。用于非胜出匹配键的递归校验
+// （对齐 encoding/json 对全部重复键的校验语义，但与 C1 声明的 details 宽容一致）。
+func validateTextResponseUsage(usageResult gjson.Result) error {
+	_, err := parseTextResponseUsage(usageResult)
+	return err
+}
+
+// tolerantPromptTokensDetails 宽容读取 prompt_tokens_details：非对象/null/缺失 → nil；
+// 对象内任一 int 子字段不可解析 → 该子字段按零值（视为缺失），不失败。
+func tolerantPromptTokensDetails(usageResult gjson.Result) *model.PromptTokensDetails {
+	detailsResult, ok, err := foldObjectValidated(usageResult, "prompt_tokens_details", nil)
+	if err != nil || !ok {
+		return nil
+	}
+	details := &model.PromptTokensDetails{}
+	var value int
+	var fieldErr error
+	if value, fieldErr = foldInt(detailsResult, "cached_tokens"); fieldErr == nil {
+		details.CachedTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "cache_write_tokens"); fieldErr == nil {
+		details.CacheWriteTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "audio_tokens"); fieldErr == nil {
+		details.AudioTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "text_tokens"); fieldErr == nil {
+		details.TextTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "image_tokens"); fieldErr == nil {
+		details.ImageTokens = value
+	}
+	return details
+}
+
+// tolerantCompletionTokensDetails 与 tolerantPromptTokensDetails 同构，对应 completion_tokens_details。
+func tolerantCompletionTokensDetails(usageResult gjson.Result) *model.CompletionTokensDetails {
+	detailsResult, ok, err := foldObjectValidated(usageResult, "completion_tokens_details", nil)
+	if err != nil || !ok {
+		return nil
+	}
+	details := &model.CompletionTokensDetails{}
+	var value int
+	var fieldErr error
+	if value, fieldErr = foldInt(detailsResult, "reasoning_tokens"); fieldErr == nil {
+		details.ReasoningTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "accepted_prediction_tokens"); fieldErr == nil {
+		details.AcceptedPredictionTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "rejected_prediction_tokens"); fieldErr == nil {
+		details.RejectedPredictionTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "audio_tokens"); fieldErr == nil {
+		details.AudioTokens = value
+	}
+	if value, fieldErr = foldInt(detailsResult, "text_tokens"); fieldErr == nil {
+		details.TextTokens = value
+	}
+	return details
+}
+
+// validateTextResponseChoices 把匹配值递归校验为 []TextResponseChoice 目标类型：null 合法；
+// 非数组、非对象元素或任一 choice 字段无法解析即报错（对齐旧 typed 解码的严格性）。
+func validateTextResponseChoices(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsArray() {
+		return fmt.Errorf("expected array, got %s", value.Type)
+	}
+	for _, element := range value.Array() {
+		if element.Type == gjson.Null {
+			continue
+		}
+		if !element.IsObject() {
+			return fmt.Errorf("choices element: expected object or null, got %s", element.Type)
+		}
+		if err := validateTextResponseChoice(element); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateTextResponseChoice 校验 index(int)/finish_reason(string)/message(model.Message)，
+// 用于 choices 数组中「被跳过的匹配键」的递归校验。
+func validateTextResponseChoice(element gjson.Result) error {
+	if _, err := foldInt(element, "index"); err != nil {
+		return fmt.Errorf("choices.index: %w", err)
+	}
+	if _, err := foldString(element, "finish_reason"); err != nil {
+		return fmt.Errorf("choices.finish_reason: %w", err)
+	}
+	if _, _, err := foldObjectValidated(element, "message", validateTextResponseMessage); err != nil {
+		return fmt.Errorf("choices.message: %w", err)
+	}
+	return nil
+}
+
+// validateTextResponseMessage 校验 model.Message 目标类型：role/refusal/name/tool_call_id 为
+// string（refusal/name 为 *string，null 视为零值），content/reasoning_content 为 any，
+// tool_calls 递归校验为 []model.Tool。
+func validateTextResponseMessage(value gjson.Result) error {
+	for _, field := range []string{"role", "refusal", "name", "tool_call_id"} {
+		if _, err := foldString(value, field); err != nil {
+			return fmt.Errorf("message.%s: %w", field, err)
+		}
+	}
+	for _, field := range []string{"content", "reasoning_content"} {
+		if _, _, err := foldAny(value, field); err != nil {
+			return fmt.Errorf("message.%s: %w", field, err)
+		}
+	}
+	if _, _, err := foldArrayValidated(value, "tool_calls", validateTextResponseToolCalls); err != nil {
+		return fmt.Errorf("message.tool_calls: %w", err)
+	}
+	return nil
+}
+
+// validateTextResponseToolCalls 把匹配值递归校验为 []model.Tool：null 合法；非数组、
+// 非对象元素或任一 tool 字段无法解析即报错。
+func validateTextResponseToolCalls(value gjson.Result) error {
+	if value.Type == gjson.Null {
+		return nil
+	}
+	if !value.IsArray() {
+		return fmt.Errorf("expected array, got %s", value.Type)
+	}
+	for _, element := range value.Array() {
+		if element.Type == gjson.Null {
+			continue
+		}
+		if !element.IsObject() {
+			return fmt.Errorf("tool_calls element: expected object or null, got %s", element.Type)
+		}
+		if _, err := foldString(element, "id"); err != nil {
+			return fmt.Errorf("tool_calls.id: %w", err)
+		}
+		if _, err := foldString(element, "type"); err != nil {
+			return fmt.Errorf("tool_calls.type: %w", err)
+		}
+		if _, _, err := foldObjectValidated(element, "function", validateFunctionFields); err != nil {
+			return fmt.Errorf("tool_calls.function: %w", err)
+		}
+	}
+	return nil
+}
+
+// contentResultToText 复刻 model.Message.StringContent 的字符串化语义：string 直接返回；
+// 数组仅拼接对象元素中 type == "text" 的字符串 text；其余类型产出空串。
+// 注意数组元素内的 type/text 沿用旧 map 精确键查找（大小写敏感），与 encoding/json 的
+// map[string]any 语义一致。
+func contentResultToText(result gjson.Result) string {
+	switch result.Type {
+	case gjson.String:
+		return result.Str
+	case gjson.JSON:
+		if !result.IsArray() {
+			return ""
+		}
+		var builder strings.Builder
+		for _, item := range result.Array() {
+			if !item.IsObject() {
+				continue
+			}
+			if item.Get("type").Str != model.ContentTypeText {
+				continue
+			}
+			if text := item.Get("text"); text.Type == gjson.String {
+				builder.WriteString(text.Str)
+			}
+		}
+		return builder.String()
+	default:
+		return ""
+	}
+}
+
 func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
-	var textResponse SlimTextResponse
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
@@ -441,13 +1665,16 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	if err != nil {
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
-	err = json.Unmarshal(responseBody, &textResponse)
+	// 按需扫描消费字段（契约 6.1）：畸形 JSON / 非法计费 basis / 非法 choices 仍保留
+	// `unmarshal_response_body_failed` HTTP 500 出口；非法 details 视为缺失，`null` 整数映射零值。
+	// 重复键差异（AC-9）：本路径经 gjson 取 first-wins，旧 typed 解码为 last-wins。
+	extraction, err := extractTextResponse(responseBody)
 	if err != nil {
 		return ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
 	}
-	if textResponse.Error.Type != "" {
+	if extraction.Error != nil {
 		return &model.ErrorWithStatusCode{
-			Error:      textResponse.Error,
+			Error:      *extraction.Error,
 			StatusCode: resp.StatusCode,
 		}, nil
 	}
@@ -471,17 +1698,17 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
 
-	if textResponse.Usage.TotalTokens == 0 || (textResponse.Usage.PromptTokens == 0 && textResponse.Usage.CompletionTokens == 0) {
+	if extraction.Usage.TotalTokens == 0 || (extraction.Usage.PromptTokens == 0 && extraction.Usage.CompletionTokens == 0) {
 		completionTokens := 0
-		for _, choice := range textResponse.Choices {
-			completionTokens += CountTokenText(choice.Message.StringContent(), modelName)
+		for _, choiceContent := range extraction.ChoiceContents {
+			completionTokens += CountTokenText(choiceContent, modelName)
 		}
-		textResponse.Usage = model.Usage{
+		extraction.Usage = model.Usage{
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
 			TotalTokens:      promptTokens + completionTokens,
 		}
 	}
 	c.Set(ctxkey.ResponseBody, string(responseBody))
-	return nil, &textResponse.Usage
+	return nil, &extraction.Usage
 }

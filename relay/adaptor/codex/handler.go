@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,7 @@ import (
 	"github.com/pai801/myapi/relay/constant"
 	"github.com/pai801/myapi/relay/meta"
 	"github.com/pai801/myapi/relay/model"
+	"github.com/tidwall/gjson"
 )
 
 const maxSSEEventBytes = constant.ScannerBufferMax * 2
@@ -74,7 +76,6 @@ var ModelList = []string{
 }
 
 func DoResponsesResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (*model.Usage, *model.ErrorWithStatusCode) {
-	var textResponse model.ResponsesResponse
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Log.Errorf("[%s] %+v", "read_response_body_failed", err)
@@ -86,7 +87,12 @@ func DoResponsesResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (
 		return nil, ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError)
 	}
 
-	err = json.Unmarshal(responseBody, &textResponse)
+	// 按需扫描消费 usage（契约 6.3）：usage 域内畸形 JSON / 非法计费 basis 保留既有
+	// `invalid_json_response` 出口；details 降级为缺失。非 usage 顶层字段类型不符不再使整体失败
+	// （见 Sanctioned C3 Non-Usage Field Difference）。
+	// 重复键差异（AC-9）：本路径经 gjson 取 first-wins，旧 typed 解码为 last-wins
+	// （由 TestExtractResponsesUsageEquivalence 的 duplicate 用例锁定）。
+	responsesUsage, err := extractResponsesUsage(responseBody)
 	if err != nil {
 		logger.Log.Errorf("[%s] %+v", "invalid_json_response", err)
 		return nil, ErrorWrapper(err, "invalid_json_response", http.StatusInternalServerError)
@@ -111,7 +117,7 @@ func DoResponsesResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (
 		return nil, ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError)
 	}
 
-	usage := responsesUsageToInternalUsage(&textResponse.Usage)
+	usage := responsesUsageToInternalUsage(&responsesUsage)
 
 	c.Set(ctxkey.ResponseBody, string(responseBody))
 	return usage, nil
@@ -379,6 +385,66 @@ func readSSEEvent(r *bufio.Reader, maxBytes int) (sseEvent, error) {
 	}
 }
 
+// probeResponsesEventType 对 well-formed JSON 按需探测顶层 type 字段，避免整帧 typed 解码。
+// 仅当 payload 是合法 JSON 对象、顶层 type 存在且为非空字符串时返回 (type, true)；
+// 空 payload、[DONE]、畸形 JSON、非对象根、type 缺失/null/非字符串/空串一律返回 ("", false)。
+//
+// 键匹配语义对齐改造前的消费方（json.Unmarshal 到 struct{Type string `json:"type"`}）：
+// encoding/json 对字段名先精确匹配、再按 Unicode 简单折叠（foldName）匹配，故 `Type`/`TYPE`/
+// `tYpE` 等大小写变体、以及转义拼写（`{"\u0054YPE":"x"}` 解码为 "TYPE"）都会命中。
+// 本函数用 strings.EqualFold（与 encoding/json 的 foldName 同为 Unicode 简单折叠）复现该语义。
+//
+// 值选取与 encoding/json 对齐：大小写变体之间按文档序 last-wins（`{"type":"a","TYPE":"b"}` → "b"）；
+// 显式 null 对 string 字段是无操作，不覆盖前值（`{"type":"a","TYPE":null}` → "a"）。
+//
+// 类型校验覆盖所有匹配键（含被 first-wins 跳过的重复键）：任一匹配键非 string/null 即整体
+// 失败，对齐 encoding/json「任一匹配字段不可解析 → 整体 err」（`{"type":"a","type":123}` → ok=false）。
+// 显式 null 是无操作：既不产出值，也不占用 first-wins 键位（`{"type":null,"type":"b"}` → "b"）。
+//
+// 与 encoding/json 的已知差异（契约 AC-9 声明的 sanctioned exception）：值选取上，字节完全相同的
+// 重复键取「第一个」（first-wins），encoding/json 取「最后一个」（last-wins）；转义与字面拼写解码后
+// 相同的键也按重复处理（`{"type":"a","\u0074ype":"b"}` → "a"）。该差异由 TestProbeResponsesEventType 锁定。
+// 类型校验不受 first-wins 影响：所有匹配键都必须通过校验（见上）。
+func probeResponsesEventType(payload []byte) (eventType string, ok bool) {
+	if !json.Valid(payload) {
+		return "", false
+	}
+	root := gjson.ParseBytes(payload)
+	if !root.IsObject() {
+		return "", false
+	}
+	valid := true
+	winningKey := ""
+	root.ForEach(func(key, value gjson.Result) bool {
+		if !strings.EqualFold(key.Str, "type") {
+			return true
+		}
+		// 类型校验覆盖所有匹配键（含被 first-wins 跳过的重复键）：任一匹配键非 string/null
+		// 即整体失败，精确复刻旧 typed 解码「任一匹配字段不可解析 → 整体 err」的语义
+		// （契约 4.6 Step 3：non-string input 永不覆盖 eventType）。
+		if value.Type != gjson.String && value.Type != gjson.Null {
+			valid = false
+			return false
+		}
+		// 显式 null 对 string 字段是无操作：既不产出值，也不占用 first-wins 的键位
+		// （`{"type":null,"type":"b"}` 与旧实现一致得 "b"）。
+		if value.Type == gjson.Null {
+			return true
+		}
+		// 字节完全相同的重复键：first-wins，跳过后续同名字节键（契约 AC-9 sanctioned 差异）。
+		if winningKey != "" && winningKey == key.Str {
+			return true
+		}
+		winningKey = key.Str
+		eventType = value.Str
+		return true
+	})
+	if !valid || eventType == "" {
+		return "", false
+	}
+	return eventType, true
+}
+
 func classifyTerminalStreamError(event sseEvent) (model.Error, bool) {
 	payload := event.Data
 	eventType := event.Event
@@ -389,11 +455,8 @@ func classifyTerminalStreamError(event sseEvent) (model.Error, bool) {
 		return model.Error{}, false
 	}
 	if payload != "" {
-		var eventProbe struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal([]byte(payload), &eventProbe); err == nil && eventProbe.Type != "" {
-			eventType = eventProbe.Type
+		if probed, ok := probeResponsesEventType([]byte(payload)); ok {
+			eventType = probed
 		}
 	}
 
@@ -415,6 +478,15 @@ func classifyTerminalStreamError(event sseEvent) (model.Error, bool) {
 func buildInitialTerminalCapture(event sseEvent) (*model.ResponsesStreamCapture, bool) {
 	payload := event.Data
 	if payload == "" || payload == done {
+		return nil, false
+	}
+
+	// probe 与完整解码的双重门禁：probe 对字节完全相同的重复键取 first-wins、对大小写变体取
+	// last-wins（对齐旧 typed 探测），完整解码（typed）一律 last-wins。两者同时保留使新行为
+	// 是旧行为的子集：仅当两道路径都判定为 response.failed 时才产出 capture。
+	// 例如 {"type":"response.created","type":"response.failed"} 旧实现产出 capture，
+	// 新实现被 probe 门禁拒绝返回 (nil, false)，属契约 AC-9 sanctioned 差异。
+	if probed, ok := probeResponsesEventType([]byte(payload)); !ok || probed != "response.failed" {
 		return nil, false
 	}
 
@@ -632,6 +704,128 @@ func markCaptureResponseFailed(capture *model.ResponsesStreamCapture, streamErr 
 	}
 }
 
+// extractResponsesUsage validates a Responses body and extracts billing usage; malformed JSON or
+// invalid billing fields return an error, absent/null fields map to zero, and invalid details are
+// omitted.
+//
+// 计费语义（spec: Billing-critical fields SHALL fail rather than degrade）：三个 basis
+// （input_tokens/output_tokens/total_tokens）严格失败——不可解析即返回 error，保留旧
+// `invalid_json_response` 失败路径；details（input_tokens_details/output_tokens_details 及其子字段）
+// 宽容降级为缺失/零值，不失败。`null` 一律映射为零值。
+//
+// Claude 扩展字段（cache_creation_* / cache_read_input_tokens / cache_ttl）不参与计费，按 details
+// 口径宽容提取，以便与旧整体解码在正常样本上逐字段一致。
+//
+// 重复键差异（契约 AC-9 sanctioned exception）：本路径经 gjson 路径取值，字节完全相同的重复键取
+// 「第一个」（first-wins）；旧 `encoding/json` typed 解码取「最后一个」（last-wins）。由
+// TestExtractResponsesUsageEquivalence 的 duplicate 用例锁定。
+func extractResponsesUsage(responseBody []byte) (usage model.ResponsesUsage, err error) {
+	if !json.Valid(responseBody) {
+		return model.ResponsesUsage{}, fmt.Errorf("responses body is not valid JSON")
+	}
+	root := gjson.ParseBytes(responseBody)
+	if root.Type == gjson.Null {
+		// 旧 typed 解码 `json.Unmarshal("null", &ResponsesResponse)` 成功且全部为零值。
+		return model.ResponsesUsage{}, nil
+	}
+	if !root.IsObject() {
+		// 数组/字符串/数字/布尔根：旧 typed 解码失败（非对象根无法解码为 struct）→ 保留
+		// `invalid_json_response` 失败路径。
+		return model.ResponsesUsage{}, fmt.Errorf("responses root must be an object, got %s", root.Type)
+	}
+	usageResult := root.Get("usage")
+	if !usageResult.Exists() || usageResult.Type == gjson.Null {
+		return model.ResponsesUsage{}, nil
+	}
+	if !usageResult.IsObject() {
+		return model.ResponsesUsage{}, fmt.Errorf("usage must be an object, got %s", usageResult.Type)
+	}
+	var ok bool
+	if usage.InputTokens, ok = codexStrictInt(usageResult.Get("input_tokens")); !ok {
+		return model.ResponsesUsage{}, fmt.Errorf("usage.input_tokens is not a valid integer")
+	}
+	if usage.OutputTokens, ok = codexStrictInt(usageResult.Get("output_tokens")); !ok {
+		return model.ResponsesUsage{}, fmt.Errorf("usage.output_tokens is not a valid integer")
+	}
+	if usage.TotalTokens, ok = codexStrictInt(usageResult.Get("total_tokens")); !ok {
+		return model.ResponsesUsage{}, fmt.Errorf("usage.total_tokens is not a valid integer")
+	}
+	if value, detailOK := codexStrictInt(usageResult.Get("cache_creation_input_tokens")); detailOK {
+		usage.CacheCreationInputTokens = value
+	}
+	if value, detailOK := codexStrictInt(usageResult.Get("cache_creation_5m_input_tokens")); detailOK {
+		usage.CacheCreation5mInputTokens = value
+	}
+	if value, detailOK := codexStrictInt(usageResult.Get("cache_creation_1h_input_tokens")); detailOK {
+		usage.CacheCreation1hInputTokens = value
+	}
+	if value, detailOK := codexStrictInt(usageResult.Get("cache_read_input_tokens")); detailOK {
+		usage.CacheReadInputTokens = value
+	}
+	if value := usageResult.Get("cache_ttl"); value.Type == gjson.String {
+		usage.CacheTTL = value.Str
+	}
+	usage.InputTokensDetails = codexTolerantInputDetails(usageResult.Get("input_tokens_details"))
+	usage.OutputTokensDetails = codexTolerantOutputDetails(usageResult.Get("output_tokens_details"))
+	return usage, nil
+}
+
+// codexStrictInt 复刻旧 typed 解码对 Go int 字段的语义：缺失/null → 0 且合法；其余必须是精确的
+// 十进制 int64（ParseInt 拒绝小数、指数形式与 int64 溢出），否则 ok=false。
+// 平台假设：仅在 64 位平台（int == int64）下与旧 typed int 语义一致。
+func codexStrictInt(result gjson.Result) (int, bool) {
+	if !result.Exists() || result.Type == gjson.Null {
+		return 0, true
+	}
+	if result.Type != gjson.Number {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(result.Raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(value), true
+}
+
+// codexTolerantInputDetails：非对象/null/缺失 → nil；对象内任一 int 子字段不可解析 → 该字段零值。
+func codexTolerantInputDetails(result gjson.Result) *model.InputTokensDetails {
+	if !result.IsObject() {
+		return nil
+	}
+	details := &model.InputTokensDetails{}
+	if value, ok := codexStrictInt(result.Get("cached_tokens")); ok {
+		details.CachedTokens = value
+	}
+	if value, ok := codexStrictInt(result.Get("cache_write_tokens")); ok {
+		details.CacheWriteTokens = value
+	}
+	return details
+}
+
+// codexTolerantOutputDetails：与 codexTolerantInputDetails 同构，对应 output_tokens_details。
+func codexTolerantOutputDetails(result gjson.Result) *model.OutputTokensDetails {
+	if !result.IsObject() {
+		return nil
+	}
+	details := &model.OutputTokensDetails{}
+	if value, ok := codexStrictInt(result.Get("reasoning_tokens")); ok {
+		details.ReasoningTokens = value
+	}
+	if value, ok := codexStrictInt(result.Get("accepted_prediction_tokens")); ok {
+		details.AcceptedPredictionTokens = value
+	}
+	if value, ok := codexStrictInt(result.Get("rejected_prediction_tokens")); ok {
+		details.RejectedPredictionTokens = value
+	}
+	if value, ok := codexStrictInt(result.Get("audio_tokens")); ok {
+		details.AudioTokens = value
+	}
+	if value, ok := codexStrictInt(result.Get("text_tokens")); ok {
+		details.TextTokens = value
+	}
+	return details
+}
+
 // responsesUsageToInternalUsage 把 Responses wire usage（§6）映射为网关内部 Usage（Chat §8 details 字段名）。
 // 计费公式仍只看总数与 cached_tokens：cache_write/reasoning 等只进入 detail 承载，供日志与后续策略使用。
 func responsesUsageToInternalUsage(source *model.ResponsesUsage) *model.Usage {
@@ -834,11 +1028,8 @@ func processSSEEvent(
 		return
 	}
 	if payload != done {
-		var eventProbe struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal([]byte(payload), &eventProbe); err == nil && eventProbe.Type != "" {
-			eventType = eventProbe.Type
+		if probed, ok := probeResponsesEventType([]byte(payload)); ok {
+			eventType = probed
 		}
 	}
 

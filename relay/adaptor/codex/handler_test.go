@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1964,6 +1967,100 @@ func TestStreamResponsesHandler_CompletedThenLateFailedEventIsDropped(t *testing
 	}
 }
 
+// GAP-1 端到端回归：终态（failed/completed）之后的 data-only 帧 {"type":"error","type":123}，
+// 其重复 type 键类型不符，旧 typed 探测整体失败 → 该帧被终态守卫 drop，不得多转发一帧。
+// 期望字节直接取自旧实现（HEAD）实测转发结果，逐字节锁定。
+func TestStreamResponsesHandler_DuplicateTypeKeyWithInvalidValueDoesNotLeakFrame(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const leakedFrame = `data: {"type":"error","type":123}`
+
+	scenarios := []struct {
+		name       string
+		stream     string
+		wantBody   string
+		wantStatus int
+	}{
+		{
+			name: "failed_terminal_then_invalid_duplicate_type",
+			stream: strings.Join([]string{
+				`event: response.created`,
+				`data: {"type":"response.created","response":{"id":"resp_leak","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+				"",
+				`event: response.failed`,
+				`data: {"type":"response.failed","response":{"id":"resp_leak","model":"gpt-4o","status":"failed","output":[],"error":{"code":"server_error","message":"boom"}}}`,
+				"",
+				leakedFrame,
+				"",
+				`data: [DONE]`,
+				"",
+			}, "\n"),
+			wantBody: strings.Join([]string{
+				`event: response.created`,
+				`data: {"type":"response.created","response":{"id":"resp_leak","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+				"",
+				`event: response.failed`,
+				`data: {"type":"response.failed","response":{"id":"resp_leak","model":"gpt-4o","status":"failed","output":[],"error":{"code":"server_error","message":"boom"}}}`,
+				"",
+				`data: [DONE]`,
+				"",
+				"",
+			}, "\n"),
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "completed_terminal_then_invalid_duplicate_type",
+			stream: strings.Join([]string{
+				`event: response.created`,
+				`data: {"type":"response.created","response":{"id":"resp_leak2","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+				"",
+				`event: response.completed`,
+				`data: {"type":"response.completed","response":{"id":"resp_leak2","model":"gpt-4o","output":[],"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+				"",
+				leakedFrame,
+				"",
+				`data: [DONE]`,
+				"",
+			}, "\n"),
+			wantBody: strings.Join([]string{
+				`event: response.created`,
+				`data: {"type":"response.created","response":{"id":"resp_leak2","model":"gpt-4o","output":[],"status":"in_progress","usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`,
+				"",
+				`event: response.completed`,
+				`data: {"type":"response.completed","response":{"id":"resp_leak2","model":"gpt-4o","output":[],"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+				"",
+				`data: [DONE]`,
+				"",
+				"",
+			}, "\n"),
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+			resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sc.stream))}
+
+			_, _, _ = StreamResponsesHandler(c, resp)
+
+			body := recorder.Body.String()
+			if strings.Contains(body, leakedFrame) {
+				t.Fatalf("expected invalid-duplicate-type error frame to be dropped after terminal, got %q", body)
+			}
+			if recorder.Code != sc.wantStatus {
+				t.Fatalf("expected status %d, got %d", sc.wantStatus, recorder.Code)
+			}
+			if body != sc.wantBody {
+				t.Fatalf("forwarded bytes diverged from legacy implementation:\n got: %q\nwant: %q", body, sc.wantBody)
+			}
+		})
+	}
+}
+
 func TestStreamResponsesHandler_ErrorEventMissingMessageField(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -3025,4 +3122,542 @@ func TestAdaptorSetupRequestHeader_UsesCommonHeadersAndContext(t *testing.T) {
 	if upstreamReq.Context() != c.Request.Context() {
 		t.Fatalf("expected upstream request to bind downstream context")
 	}
+}
+
+func TestProbeResponsesEventType(t *testing.T) {
+	cases := []struct {
+		name     string
+		payload  string
+		wantType string
+		wantOK   bool
+	}{
+		// 合法：顶层 type 为非空字符串
+		{"simple", `{"type":"response.completed"}`, "response.completed", true},
+		// 转义序列在字符串值内解码为 "b"
+		{"escaped", `{"type":"\u0062"}`, "b", true},
+		// 其他字段即使含无法表示的数值也不影响 type 探测
+		{"sibling_number_overflow", `{"type":"x","other":1e400}`, "x", true},
+		{"leading_trailing_space", ` {"type":"x"} `, "x", true},
+
+		// 空 payload / [DONE]
+		{"empty", ``, "", false},
+		{"done", `[DONE]`, "", false},
+
+		// 畸形 JSON
+		{"unterminated_object", `{"type":"x"`, "", false},
+		{"truncated_value", `{"type":`, "", false},
+		{"trailing_garbage", `{"type":"x"}garbage`, "", false},
+		{"concatenated_objects", `{"type":"x"}{"type":"y"}`, "", false},
+
+		// type 缺失或无效
+		{"empty_object", `{}`, "", false},
+		{"other_field", `{"other":1}`, "", false},
+		{"null_type", `{"type":null}`, "", false},
+		{"empty_string_type", `{"type":""}`, "", false},
+		{"number_type", `{"type":123}`, "", false},
+		{"number_overflow_type", `{"type":1e400}`, "", false},
+		{"bool_type", `{"type":true}`, "", false},
+		{"object_type", `{"type":{}}`, "", false},
+		{"array_type", `{"type":[]}`, "", false},
+
+		// 非对象根
+		{"null_root", `null`, "", false},
+		{"array_root", `[1,2]`, "", false},
+		{"string_root", `"str"`, "", false},
+		{"number_root", `5`, "", false},
+		{"bool_root", `true`, "", false},
+
+		// 大小写变体键命中：encoding/json 对字段名先精确匹配、再按 Unicode 简单折叠匹配，
+		// 故 Type/TYPE/tYpE 等变体与转义拼写均对齐旧 typed 探测。
+		{"upper_key", `{"TYPE":"x"}`, "x", true},
+		{"title_key", `{"Type":"x"}`, "x", true},
+		{"mixed_key", `{"tYpE":"x"}`, "x", true},
+		{"escaped_upper_key", `{"\u0054YPE":"x"}`, "x", true},
+		{"escaped_lower_key", `{"\u0074ype":"x"}`, "x", true},
+		{"variant_number_type", `{"TYPE":123}`, "", false},
+		{"exact_then_variant_number", `{"type":"x","TYPE":123}`, "", false},
+		{"variant_null_only", `{"TYPE":null}`, "", false},
+
+		// 大小写变体之间 last-wins（对齐旧 typed 探测：encoding/json 按文档序后值覆盖前值）。
+		{"variant_last_wins_lower_first", `{"type":"a","TYPE":"b"}`, "b", true},
+		{"variant_last_wins_upper_first", `{"TYPE":"a","type":"b"}`, "b", true},
+		{"variant_null_does_not_override", `{"type":null,"TYPE":"x"}`, "x", true},
+		{"variant_null_keeps_prior", `{"TYPE":"x","type":null}`, "x", true},
+
+		// 字节完全相同的重复键：first-wins（旧 typed 解码为 last-wins，属契约 AC-9 sanctioned 差异）。
+		{"duplicate_type_first_wins", `{"type":"a","type":"b"}`, "a", true},
+		{"duplicate_type_created_failed", `{"type":"response.created","type":"response.failed"}`, "response.created", true},
+		{"escaped_duplicate_treated_as_repeat", `{"type":"a","\u0074ype":"b"}`, "a", true},
+		{"variant_self_duplicate_first_wins", `{"TYPE":"a","TYPE":"b"}`, "a", true},
+
+		// 字节重复跳过 + 大小写变体 last-wins 组合。
+		{"byte_dup_then_variant_last_wins", `{"type":"a","type":"b","TYPE":"c"}`, "c", true},
+		{"variant_byte_dup_then_variant_last_wins", `{"TYPE":"a","type":"b","TYPE":"c"}`, "c", true},
+
+		// GAP-1：类型校验覆盖所有匹配键（含被 first-wins 跳过的重复键），任一匹配键非 string/null
+		// 即整体失败，对齐 encoding/json「任一匹配字段不可解析 → 整体 err」。
+		{"dup_then_number", `{"type":"a","type":123}`, "", false},
+		{"dup_then_bool", `{"type":"a","type":true}`, "", false},
+		{"dup_then_object", `{"type":"a","type":{}}`, "", false},
+		{"dup_then_array", `{"type":"a","type":[]}`, "", false},
+		{"escaped_dup_then_number", `{"type":"a","\u0074ype":123}`, "", false},
+		{"triple_dup_then_number", `{"type":"a","type":"b","type":123}`, "", false},
+		// 端到端回归点：终态后此类 payload 必须整体失败，不得绕过 sawFailedTerminal/sawCompletedTerminal 守卫多转发。
+		{"error_then_number", `{"type":"error","type":123}`, "", false},
+		{"failed_then_number", `{"type":"response.failed","type":123}`, "", false},
+
+		// GAP-2：显式 null 是无操作，既不产出值，也不占用 first-wins 键位。
+		{"null_then_value", `{"type":null,"type":"b"}`, "b", true},
+		{"null_then_null", `{"type":null,"type":null}`, "", false},
+		{"null_then_number", `{"type":null,"type":123}`, "", false},
+		{"number_then_null", `{"type":123,"type":null}`, "", false},
+
+		// 交叉：type 重复取第一个 "a"（first-wins），TYPE 变体 last-wins 覆盖为 "b"，
+		// 再遇 type 重复跳过 → 得 "c"（与旧 typed 一致）。
+		{"cross_case_variant_repeated", `{"type":"a","TYPE":"b","type":"c"}`, "c", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotType, gotOK := probeResponsesEventType([]byte(tc.payload))
+			if gotOK != tc.wantOK || gotType != tc.wantType {
+				t.Fatalf("probeResponsesEventType(%q) = (%q, %v), want (%q, %v)",
+					tc.payload, gotType, gotOK, tc.wantType, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestBuildInitialTerminalCapture_ProbeGating(t *testing.T) {
+	failedBody := `{"type":"response.failed","response":{"id":"resp_probe","model":"gpt-4o","output":[],"status":"failed","error":{"message":"boom","type":"server_error","code":"request_failed"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`
+
+	// 正例：well-formed response.failed 仍产出 capture（与既有集成测试同语义，此处单点锁定 probe 门禁不误伤）
+	t.Run("wellformed_failed_produces_capture", func(t *testing.T) {
+		capture, ok := buildInitialTerminalCapture(sseEvent{Data: failedBody})
+		if !ok || capture == nil {
+			t.Fatalf("expected well-formed response.failed to produce capture, got (%v, %v)", capture, ok)
+		}
+	})
+
+	// probe 提前拒绝非 response.failed，不再完整解码
+	t.Run("completed_rejected_by_probe", func(t *testing.T) {
+		payload := `{"type":"response.completed","response":{"id":"resp_c","model":"gpt-4o","output":[],"status":"completed"}}`
+		capture, ok := buildInitialTerminalCapture(sseEvent{Data: payload})
+		if ok || capture != nil {
+			t.Fatalf("expected response.completed to be rejected, got (%v, %v)", capture, ok)
+		}
+	})
+
+	// 大小写变体键：probe 与完整解码均对齐旧 typed 大小写不敏感语义 → 正常产出 capture。
+	t.Run("case_insensitive_variant_produces_capture", func(t *testing.T) {
+		payload := `{"TYPE":"response.failed","Response":{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3},"status":"failed"}}`
+		capture, ok := buildInitialTerminalCapture(sseEvent{Data: payload})
+		if !ok || capture == nil {
+			t.Fatalf("expected case-insensitive variant response.failed to produce capture, got (%v, %v)", capture, ok)
+		}
+	})
+
+	// 重复键：probe first-wins 得 response.created → 拒绝。
+	// 旧实现（仅 typed 解码 last-wins）会产出 capture，属契约 AC-9 sanctioned 差异。
+	t.Run("duplicate_type_probe_rejects", func(t *testing.T) {
+		payload := `{"type":"response.created","type":"response.failed","response":{"id":"resp_d","model":"gpt-4o","output":[],"status":"failed"}}`
+		capture, ok := buildInitialTerminalCapture(sseEvent{Data: payload})
+		if ok || capture != nil {
+			t.Fatalf("expected duplicate-type payload rejected by first-wins probe, got (%v, %v)", capture, ok)
+		}
+	})
+
+	// 重复键反向：probe first-wins 得 response.failed 通过，但完整解码 last-wins 得 response.created，
+	// 保留的 typed 检查拒绝 → 不产出 capture（新行为是旧行为的子集）。
+	t.Run("duplicate_type_typed_check_rejects", func(t *testing.T) {
+		payload := `{"type":"response.failed","type":"response.created","response":{"id":"resp_e","model":"gpt-4o","output":[],"status":"failed"}}`
+		capture, ok := buildInitialTerminalCapture(sseEvent{Data: payload})
+		if ok || capture != nil {
+			t.Fatalf("expected duplicate-type payload rejected by last-wins typed check, got (%v, %v)", capture, ok)
+		}
+	})
+
+	// GAP-1 回归点：重复键后续出现为类型不符 → probe 整体失败，与旧 typed 一致不产出 capture。
+	t.Run("duplicate_type_with_invalid_value_rejects", func(t *testing.T) {
+		payload := `{"type":"response.failed","type":123}`
+		capture, ok := buildInitialTerminalCapture(sseEvent{Data: payload})
+		if ok || capture != nil {
+			t.Fatalf("expected response.failed with duplicate invalid type to be rejected, got (%v, %v)", capture, ok)
+		}
+	})
+
+	// GAP-2 回归点：显式 null 不占用 first-wins 键位，后续有效 response.failed 正常产出 capture。
+	t.Run("null_then_failed_produces_capture", func(t *testing.T) {
+		payload := `{"type":null,"type":"response.failed","response":{"id":"resp_null","model":"gpt-4o","output":[],"status":"failed","error":{"message":"boom","type":"server_error","code":"request_failed"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`
+		capture, ok := buildInitialTerminalCapture(sseEvent{Data: payload})
+		if !ok || capture == nil {
+			t.Fatalf("expected null-then-failed to produce capture, got (%v, %v)", capture, ok)
+		}
+	})
+
+	// 空 payload / [DONE] / 畸形 JSON
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{"empty", ``},
+		{"done", `[DONE]`},
+		{"malformed", `{"type":"response.failed"`},
+		{"missing_type", `{"response":{"id":"resp_x"}}`},
+		{"invalid_type", `{"type":123}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture, ok := buildInitialTerminalCapture(sseEvent{Data: tc.payload})
+			if ok || capture != nil {
+				t.Fatalf("expected (%q) to be rejected, got (%v, %v)", tc.payload, capture, ok)
+			}
+		})
+	}
+}
+
+func TestClassifyTerminalStreamError_ProbeParity(t *testing.T) {
+	// header fallback：payload 无 type 字段时沿用 header 的 response.failed
+	t.Run("header_fallback_failed", func(t *testing.T) {
+		payload := `{"response":{"id":"resp_hf","model":"gpt-4o","output":[],"status":"failed","error":{"message":"boom","type":"server_error","code":"request_failed"}}}`
+		_, ok := classifyTerminalStreamError(sseEvent{Event: "response.failed", Data: payload})
+		if !ok {
+			t.Fatalf("expected header fallback response.failed to classify as terminal error")
+		}
+	})
+
+	// payload 为空时 header 无法提供可解码载荷，返回 false（改造前后一致）
+	t.Run("header_failed_empty_payload", func(t *testing.T) {
+		if _, ok := classifyTerminalStreamError(sseEvent{Event: "response.failed"}); ok {
+			t.Fatalf("expected header response.failed with empty payload to be rejected")
+		}
+	})
+
+	// payload type 覆盖 header
+	t.Run("payload_type_overrides_header", func(t *testing.T) {
+		payload := `{"type":"response.failed","response":{"id":"resp_h","model":"gpt-4o","output":[],"status":"failed","error":{"message":"boom","type":"server_error","code":"request_failed"}}}`
+		_, ok := classifyTerminalStreamError(sseEvent{Event: "response.created", Data: payload})
+		if !ok {
+			t.Fatalf("expected payload type to override header and classify response.failed")
+		}
+	})
+
+	// [DONE] / 空 payload
+	t.Run("done_payload", func(t *testing.T) {
+		if _, ok := classifyTerminalStreamError(sseEvent{Event: "response.failed", Data: `[DONE]`}); ok {
+			t.Fatalf("expected [DONE] payload to be rejected")
+		}
+	})
+	t.Run("empty_payload_empty_event", func(t *testing.T) {
+		if _, ok := classifyTerminalStreamError(sseEvent{}); ok {
+			t.Fatalf("expected empty event/payload to be rejected")
+		}
+	})
+
+	// 畸形 payload / type 非字符串
+	t.Run("malformed_payload", func(t *testing.T) {
+		if _, ok := classifyTerminalStreamError(sseEvent{Data: `{"type":"response.failed"`}); ok {
+			t.Fatalf("expected malformed payload to be rejected")
+		}
+	})
+	t.Run("number_type", func(t *testing.T) {
+		if _, ok := classifyTerminalStreamError(sseEvent{Data: `{"type":123}`}); ok {
+			t.Fatalf("expected numeric type to be rejected")
+		}
+	})
+
+	// error 类型：payload 路径与 header 路径
+	t.Run("error_via_payload_type", func(t *testing.T) {
+		errInfo, ok := classifyTerminalStreamError(sseEvent{Data: `{"type":"error","message":"kaboom","code":"server_error"}`})
+		if !ok || errInfo.Message != "kaboom" {
+			t.Fatalf("expected payload error type classified, got (%+v, %v)", errInfo, ok)
+		}
+	})
+	t.Run("error_via_header", func(t *testing.T) {
+		errInfo, ok := classifyTerminalStreamError(sseEvent{Event: "error", Data: `{"message":"kaboom","code":"server_error"}`})
+		if !ok || errInfo.Message != "kaboom" {
+			t.Fatalf("expected header error classified, got (%+v, %v)", errInfo, ok)
+		}
+	})
+
+	// 非终态 type 不得误判
+	t.Run("non_terminal_type", func(t *testing.T) {
+		if _, ok := classifyTerminalStreamError(sseEvent{Data: `{"type":"response.completed"}`}); ok {
+			t.Fatalf("expected response.completed not to classify as terminal error")
+		}
+	})
+}
+
+// =============================================================================
+// 模块 E / 任务 5.3：C3（codex.DoResponsesResponse）新旧实现对照测试
+//
+// 对照方式：同一份 body 分别跑「旧实现基线」（真实 `encoding/json` 解码到
+// model.ResponsesResponse，即当前 DoResponsesResponse 的取 usage 方式）与「契约定义的
+// 新提取路径」`extractResponsesUsage`，再各自经 `responsesUsageToInternalUsage` 映射，
+// 逐字段比较内部 Usage 产出；同时断言非法 JSON/非法计费字段保留既有 error 出口。
+//
+// 已声明差异（见 TestExtractResponsesUsageNonUsageFieldTolerance）：旧实现整体解码
+// ResponsesResponse，任一「非 usage 字段」类型不符也会失败；新实现仅扫描 usage，故不再失败。
+// =============================================================================
+
+// c3LegacyUsage 用旧实现路径（整份 encoding/json 解码 → responsesUsageToInternalUsage）取内部 Usage。
+func c3LegacyUsage(body string) (*model.Usage, error) {
+	var textResponse model.ResponsesResponse
+	if err := json.Unmarshal([]byte(body), &textResponse); err != nil {
+		return nil, err
+	}
+	return responsesUsageToInternalUsage(&textResponse.Usage), nil
+}
+
+// c3CurrentUsage 用新提取路径（extractResponsesUsage → responsesUsageToInternalUsage）取内部 Usage。
+func c3CurrentUsage(body string) (*model.Usage, error) {
+	usage, err := extractResponsesUsage([]byte(body))
+	if err != nil {
+		return nil, err
+	}
+	return responsesUsageToInternalUsage(&usage), nil
+}
+
+func TestExtractResponsesUsageEquivalence(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		// declared 为 "firstWins" 时新旧存在已声明差异；为 "" 时要求 error 出口与产出逐字段一致。
+		declared string
+	}{
+		{name: "normal_bases_only", body: `{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`},
+		{name: "normal_with_details", body: `{"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":12},"output_tokens_details":{"reasoning_tokens":10,"accepted_prediction_tokens":2,"rejected_prediction_tokens":1,"audio_tokens":3,"text_tokens":34}}}`},
+		{name: "normal_without_details", body: `{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`},
+		{name: "normal_claude_extension", body: `{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cache_read_input_tokens":9,"cache_creation_input_tokens":4,"cache_creation_5m_input_tokens":2,"cache_creation_1h_input_tokens":1,"cache_ttl":"5m"}}`},
+		{name: "missing_usage", body: `{}`},
+		{name: "missing_usage_null", body: `{"usage":null}`},
+		{name: "missing_null_billing_integers", body: `{"usage":{"input_tokens":null,"output_tokens":null,"total_tokens":null}}`},
+		{name: "zero_empty_usage_object", body: `{"usage":{}}`},
+		{name: "zero_all_bases", body: `{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`},
+		{name: "negative_bases", body: `{"usage":{"input_tokens":-1,"output_tokens":-2,"total_tokens":-3}}`},
+		{name: "extreme_maxint32_adjacent", body: `{"usage":{"input_tokens":2147483646,"output_tokens":2147483647,"total_tokens":2147483647}}`},
+		{name: "extreme_maxint64", body: `{"usage":{"input_tokens":9223372036854775807,"output_tokens":0,"total_tokens":9223372036854775807}}`},
+		{name: "mismatch_basis_string", body: `{"usage":{"input_tokens":5,"output_tokens":"x"}}`},
+		{name: "mismatch_basis_array", body: `{"usage":{"input_tokens":[1]}}`},
+		{name: "mismatch_basis_object", body: `{"usage":{"input_tokens":{"a":1}}}`},
+		{name: "mismatch_basis_bool", body: `{"usage":{"input_tokens":true}}`},
+		{name: "mismatch_usage_number", body: `{"usage":5}`},
+		{name: "mismatch_usage_string", body: `{"usage":"x"}`},
+		{name: "fractional_5_7", body: `{"usage":{"input_tokens":5.7}}`},
+		{name: "fractional_5_0", body: `{"usage":{"input_tokens":5.0}}`},
+		{name: "fractional_exponential_1e2", body: `{"usage":{"input_tokens":1e2}}`},
+		{name: "malformed_unclosed", body: `{"usage":{"input_tokens":5`},
+		{name: "malformed_trailing_garbage", body: `{"usage":{"input_tokens":5}}garbage`},
+		{name: "root_null", body: `null`},
+		{name: "root_array", body: `[]`},
+		{name: "root_number", body: `5`},
+		{name: "detail_mismatch_not_object", body: `{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"input_tokens_details":"x"}}`, declared: "detailTolerant"},
+		{name: "detail_mismatch_field", body: `{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"input_tokens_details":{"cached_tokens":"x"}}}`, declared: "detailTolerant"},
+		{name: "duplicate_basis_same_bytes", body: `{"usage":{"input_tokens":5,"input_tokens":9}}`, declared: "firstWins"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			legacyUsage, legacyErr := c3LegacyUsage(tc.body)
+			currentUsage, currentErr := c3CurrentUsage(tc.body)
+
+			switch tc.declared {
+			case "firstWins":
+				// 旧实现 last-wins → 9；新实现 first-wins → 5（AC-9 sanctioned）。
+				if legacyErr != nil || legacyUsage == nil || legacyUsage.PromptTokens != 9 {
+					t.Fatalf("expected legacy last-wins input_tokens=9, got err=%v usage=%+v", legacyErr, legacyUsage)
+				}
+				if currentErr != nil || currentUsage == nil || currentUsage.PromptTokens != 5 {
+					t.Fatalf("expected new first-wins input_tokens=5, got err=%v usage=%+v", currentErr, currentUsage)
+				}
+				return
+			case "detailTolerant":
+				// 声明差异（spec: Non-billing detail unparseable → treat as absent）：
+				// 旧实现整体解码失败；新实现删除该 detail 且保留 basis。
+				if legacyErr == nil {
+					t.Fatalf("expected legacy full-struct decode to fail on detail type mismatch")
+				}
+				if currentErr != nil || currentUsage == nil {
+					t.Fatalf("expected new extraction to tolerate detail mismatch, got err=%v", currentErr)
+				}
+				if currentUsage.PromptTokens != 1 || currentUsage.CompletionTokens != 2 || currentUsage.TotalTokens != 3 {
+					t.Fatalf("expected bases retained, got %+v", currentUsage)
+				}
+				if currentUsage.PromptTokensDetails != nil {
+					t.Fatalf("expected invalid detail omitted (absent downstream), got %+v", currentUsage.PromptTokensDetails)
+				}
+				return
+			}
+
+			if (legacyErr == nil) != (currentErr == nil) {
+				t.Fatalf("error-exit mismatch: legacyErr=%v currentErr=%v (body=%s)", legacyErr, currentErr, tc.body)
+			}
+			if legacyErr != nil {
+				return
+			}
+			if !reflect.DeepEqual(legacyUsage, currentUsage) {
+				t.Fatalf("internal usage mismatch:\n legacy=%+v\n current=%+v (body=%s)", legacyUsage, currentUsage, tc.body)
+			}
+		})
+	}
+}
+
+// TestExtractResponsesUsageNonUsageFieldTolerance 记录 C3 的一处**已声明但非 DEC-C2-1** 的差异：
+// 旧实现整体解码 model.ResponsesResponse，任一非 usage 顶层字段类型不符（如 output=5）都会失败，
+// 从而走 invalid_json_response 错误出口；新实现仅按需扫描 usage，不再因无关字段失败。
+//
+// 这是任务 5.4 要求上报的「无法达成等价」样本：契约 6.3 只要求保留「非法 JSON」失败路径，
+// 单次 usage 扫描本质上无法复刻整体解码对无关字段的校验。影响面：codex 直连非流式 responses
+// 在「usage 合法但存在无关字段类型错误」的上游响应上，由 500 变为正常透传 + 正常扣费。
+func TestExtractResponsesUsageNonUsageFieldTolerance(t *testing.T) {
+	body := `{"output":5,"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`
+
+	_, legacyErr := c3LegacyUsage(body)
+	if legacyErr == nil {
+		t.Fatalf("expected legacy full-struct decode to fail on non-usage field type mismatch")
+	}
+
+	currentUsage, currentErr := c3CurrentUsage(body)
+	if currentErr != nil {
+		t.Fatalf("new usage-only extraction should tolerate unrelated field mismatch, got %v", currentErr)
+	}
+	if currentUsage == nil || currentUsage.PromptTokens != 1 || currentUsage.CompletionTokens != 2 || currentUsage.TotalTokens != 3 {
+		t.Fatalf("expected usage extracted from valid usage object, got %+v", currentUsage)
+	}
+}
+
+// TestDoResponsesResponseBodyForwardingAndStorage 断言成功路径下原响应 body 仍逐字节写入
+// writer 与 ctxkey.ResponseBody，且 usage 提取正常（任务 5.3 Step 4）。
+func TestDoResponsesResponseBodyForwardingAndStorage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	body := `{"id":"resp_1","object":"response","status":"completed","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":12}},"output":[]}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	usage, relayErr := DoResponsesResponse(c, resp, &meta.Meta{})
+	if relayErr != nil {
+		t.Fatalf("expected no relay error, got %+v", relayErr)
+	}
+	if recorder.Body.String() != body {
+		t.Fatalf("expected byte-identical passthrough, got %q", recorder.Body.String())
+	}
+	if c.GetString(ctxkey.ResponseBody) != body {
+		t.Fatalf("expected ctxkey.ResponseBody to hold original bytes, got %q", c.GetString(ctxkey.ResponseBody))
+	}
+	if usage == nil || usage.PromptTokens != 100 || usage.CompletionTokens != 50 || usage.TotalTokens != 150 {
+		t.Fatalf("expected usage 100/50/150, got %+v", usage)
+	}
+}
+
+// =============================================================================
+// 任务 7.1（AC-1/AC-2 入口级）：C3 codex.DoResponsesResponse
+// =============================================================================
+
+// TestDoResponsesResponseEntryLevelMalformedReturnsHTTP500 断言 C3 入口对
+// 「usage 域内畸形 JSON / 非法计费 basis」保留既有 `invalid_json_response` HTTP 500 出口：
+//   - 不写入任何 body（不转发损坏响应）；
+//   - 不写 ctxkey.ResponseBody；
+//   - 不返回 usage（不得从畸形/部分数据派生计费值）。
+func TestDoResponsesResponseEntryLevelMalformedReturnsHTTP500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"malformed_unclosed", `{"usage":{"input_tokens":5`},
+		{"malformed_trailing_garbage", `{"usage":{"input_tokens":5}}garbage`},
+		{"mismatch_basis_string", `{"usage":{"input_tokens":5,"output_tokens":"x"}}`},
+		{"mismatch_basis_array", `{"usage":{"input_tokens":[1]}}`},
+		{"fractional_basis", `{"usage":{"input_tokens":5.7}}`},
+		{"usage_not_object", `{"usage":5}`},
+		{"root_array", `[]`},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(tc.body)),
+			}
+
+			usage, relayErr := DoResponsesResponse(c, resp, &meta.Meta{})
+
+			if relayErr == nil {
+				t.Fatalf("[%s] expected HTTP 500 relay error, got nil", tc.name)
+			}
+			if relayErr.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("[%s] expected HTTP 500, got %d", tc.name, relayErr.StatusCode)
+			}
+			if fmt.Sprint(relayErr.Error.Code) != "invalid_json_response" {
+				t.Fatalf("[%s] expected code invalid_json_response, got %q", tc.name, fmt.Sprint(relayErr.Error.Code))
+			}
+			if usage != nil {
+				t.Fatalf("[%s] failure path must not derive usage, got %+v", tc.name, usage)
+			}
+			if recorder.Body.Len() != 0 {
+				t.Fatalf("[%s] failure path must not forward body, got %q", tc.name, recorder.Body.String())
+			}
+			if c.GetString(ctxkey.ResponseBody) != "" {
+				t.Fatalf("[%s] failure path must not store ctxkey.ResponseBody", tc.name)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// 任务 7.3：JSON 热路径基准 —— 非流式 usage 响应（改造前后对比）
+// =============================================================================
+
+// BenchmarkJsonParserHotPathResponsesUsage 对比 C3 非流式 usage 响应的改造前后提取开销：
+//   - before_full_decode：改造前 `json.Unmarshal(→model.ResponsesResponse)` 全量反序列化；
+//   - after_on_demand：改造后 `extractResponsesUsage` 的 usage-only on-demand 提取。
+//
+// 契约 7.3 / AC-5：至少一项（ns/op 或 allocs/op）改善；数据在 7.3 报告中如实记录。
+func BenchmarkJsonParserHotPathResponsesUsage(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString(`{"id":"resp_bench","object":"response","status":"completed","model":"gpt-5-codex","output":[`)
+	for i := 0; i < 40; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`{"id":"msg_`)
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString(`","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"`)
+		sb.WriteString(strings.Repeat("q", 200))
+		sb.WriteString(`","annotations":[]}]}`)
+	}
+	sb.WriteString(`],"usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":256,"cache_write_tokens":4},"output_tokens":500,"output_tokens_details":{"reasoning_tokens":64,"accepted_prediction_tokens":8,"rejected_prediction_tokens":2,"audio_tokens":0,"text_tokens":430},"total_tokens":1500}}`)
+	body := []byte(sb.String())
+
+	b.Run("before_full_decode", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(body)))
+		for i := 0; i < b.N; i++ {
+			var resp model.ResponsesResponse
+			if err := json.Unmarshal(body, &resp); err != nil {
+				b.Fatalf("unmarshal failed: %v", err)
+			}
+			_ = resp.Usage
+		}
+	})
+
+	b.Run("after_on_demand", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(body)))
+		for i := 0; i < b.N; i++ {
+			if _, err := extractResponsesUsage(body); err != nil {
+				b.Fatalf("extractResponsesUsage failed: %v", err)
+			}
+		}
+	})
 }

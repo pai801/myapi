@@ -1062,3 +1062,220 @@ func TestResolveAffinityScope_SharedBodyIsRaceFree(t *testing.T) {
 	}
 	assert.Len(t, seenTurnIDs, requests, "每个请求的派生 turn id 必须互不相同（证明无串号）")
 }
+
+// --- T-AFFINITY：readAffinityBodyPayload 参与共享 well-formedness 缓存 ---
+
+// TestReadAffinityBodyPayload_CacheHitTrustsSharedWellFormedness
+// G: ctxkey.KeyRequestBodyMetadata 已预置（WellFormed 为 true / false），且 body 的真实形态与缓存结论相反
+// W: readAffinityBodyPayload
+// T: ok=true 时直接采信缓存结论、绝不重跑 json.Valid、绝不覆写缓存；body 仍可完整重读
+//
+// 可击杀性（json.Valid 未重复执行的间接证明）：
+//   - 缓存称 WellFormed=true 但 body 实为畸形：若实现忽略缓存重跑 json.Valid，会返回 nil；
+//   - 缓存称 WellFormed=false 但 body 实为合法：若实现重跑 json.Valid，会返回 payload。
+//
+// 两个方向都会让断言失败，故「采信缓存、不重复判定」非恒真。
+// 另以 sentinel Model 为探针：缓存命中路径若重建 metadata，Model 会被覆写成 body 中的真实值。
+func TestReadAffinityBodyPayload_CacheHitTrustsSharedWellFormedness(t *testing.T) {
+	const sentinelModel = "sentinel-from-tokenauth"
+
+	cases := []struct {
+		name        string
+		cachedWell  bool
+		body        string
+		wantPayload bool
+	}{
+		{
+			name:        "cached well-formed true is trusted for a malformed body",
+			cachedWell:  true,
+			body:        `{"litellm_session_id":"leaked","messages":[`,
+			wantPayload: true,
+		},
+		{
+			name:        "cached well-formed false is trusted for a valid body",
+			cachedWell:  false,
+			body:        `{"model":"gpt-4","stream":true}`,
+			wantPayload: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newAffinityBodyContext(t, http.MethodPost, "application/json", tc.body, nil)
+			// 预置与 body 真实形态相反的权威结论，并带 sentinel Model 作为「是否被重建」的探针。
+			c.Set(ctxkey.KeyRequestBodyMetadata, ctxkey.RequestBodyMetadata{
+				WellFormed:  tc.cachedWell,
+				Model:       sentinelModel,
+				ModelValid:  true,
+				StreamValid: true,
+			})
+
+			var got *affinityBodyPayload
+			require.NotPanics(t, func() { got = readAffinityBodyPayload(c) }, "缓存命中路径绝不 panic")
+
+			if tc.wantPayload {
+				require.NotNil(t, got,
+					"缓存结论 WellFormed=true 时必须采信，绝不重跑 json.Valid 而返回 nil")
+				assert.Equal(t, tc.body, string(got.Raw), "采信缓存时仍返回完整原始 body")
+			} else {
+				assert.Nil(t, got, "缓存结论 WellFormed=false 时必须直接采信并返回 nil")
+			}
+
+			// 探针：缓存命中路径不得重建并覆写 metadata。
+			metadata, ok := ctxkey.GetRequestBodyMetadata(c)
+			require.True(t, ok, "缓存应保持可读")
+			assert.Equal(t, sentinelModel, metadata.Model,
+				"缓存命中路径不得重建 metadata（否则 Model 会变成 body 中的真实值，即重跑了 json.Valid）")
+			assert.Equal(t, tc.cachedWell, metadata.WellFormed, "缓存结论不得被覆写")
+
+			// body 可读性：无论采信与否，下游都必须能完整重读。
+			restored, err := io.ReadAll(c.Request.Body)
+			require.NoError(t, err)
+			assert.Equal(t, tc.body, string(restored), "读后必须恢复完整 body 供下游直读")
+		})
+	}
+}
+
+// TestReadAffinityBodyPayload_CacheMissPublishesCompleteMetadata
+// G: 无共享缓存、合法 JSON body（同时含 model / stream / session 字段）
+// W: readAffinityBodyPayload
+// T: 返回 payload，并把完整 metadata（well-formedness / model / stream 三结论齐备）写入共享缓存，body 可完整重读
+func TestReadAffinityBodyPayload_CacheMissPublishesCompleteMetadata(t *testing.T) {
+	const body = `{"model":"gpt-4","stream":true,"session_id":"sess-pub","messages":[{"role":"user","content":"hi"}]}`
+	c := newAffinityBodyContext(t, http.MethodPost, "application/json", body, nil)
+
+	got := readAffinityBodyPayload(c)
+	require.NotNil(t, got, "合法 body 且缓存缺失时必须自行构建并返回 payload")
+	assert.Equal(t, body, string(got.Raw), "Raw 必须为完整原始 body")
+
+	metadata, ok := ctxkey.GetRequestBodyMetadata(c)
+	require.True(t, ok, "缓存缺失时 affinity 必须写入共享 metadata（使其同时成为生产者）")
+	t.Logf("affinity 之后 GetRequestBodyMetadata 读到：ok=%v %+v", ok, metadata)
+	assert.True(t, metadata.WellFormed, "合法 body 的 WellFormed 必须为 true")
+	assert.True(t, metadata.ModelValid, "model 为字符串 → ModelValid=true")
+	assert.Equal(t, "gpt-4", metadata.Model, "必须发布 model 供下游复用")
+	assert.True(t, metadata.StreamValid, "stream 为布尔 → StreamValid=true")
+	assert.True(t, metadata.Stream, "必须发布 stream 供 detectStreamFromBody 复用")
+
+	restored, err := io.ReadAll(c.Request.Body)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(restored), "读后必须恢复完整 body 供下游直读")
+}
+
+// TestReadAffinityBodyPayload_CacheMissPublishesMalformedConclusion
+// G: 无共享缓存、畸形 JSON（截断）或空 body
+// W: readAffinityBodyPayload
+// T: 返回 nil、不 abort，缓存写入 WellFormed=false 的零值结论，body 仍可完整重读
+//
+// 锁定契约要求：畸形/空 body 也必须发布 WellFormed=false 结论，让下游复用「畸形」判断而非重复判定。
+func TestReadAffinityBodyPayload_CacheMissPublishesMalformedConclusion(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"malformed truncated json", `{"litellm_session_id":"leaked","messages":[`},
+		{"empty body", ``},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newAffinityBodyContext(t, http.MethodPost, "application/json", tc.body, nil)
+
+			var got *affinityBodyPayload
+			require.NotPanics(t, func() { got = readAffinityBodyPayload(c) }, "畸形/空 body 绝不 panic")
+			assert.Nil(t, got, "畸形/空 body 必须静默降级返回 nil")
+			assert.False(t, c.IsAborted(), "静默降级不得 abort 请求")
+
+			metadata, ok := ctxkey.GetRequestBodyMetadata(c)
+			require.True(t, ok, "畸形/空 body 也必须写入 WellFormed=false 结论供下游复用")
+			assert.False(t, metadata.WellFormed, "结论必须为 WellFormed=false")
+			assert.Equal(t, "", metadata.Model, "WellFormed=false 时 Model 必须为零值")
+			assert.False(t, metadata.Stream, "WellFormed=false 时 Stream 必须为零值")
+			assert.False(t, metadata.ModelValid, "WellFormed=false 时 ModelValid 必须为 false")
+			assert.False(t, metadata.StreamValid, "WellFormed=false 时 StreamValid 必须为 false")
+
+			restored, err := io.ReadAll(c.Request.Body)
+			require.NoError(t, err)
+			assert.Equal(t, tc.body, string(restored), "畸形/空 body 也必须恢复完整 body 供下游直读")
+		})
+	}
+}
+
+// TestReadAffinityBodyPayload_ReadFailureDoesNotPublishMetadata
+// G: 无共享缓存、底层 body 读取失败（reader 先返回部分字节 + error）
+// W: readAffinityBodyPayload
+// T: 返回 nil、不 abort，且绝不写入 metadata（读失败 → 不写缓存，ok 必须仍为 false）
+//
+// 负向锁定：读失败分支刻意「不写缓存」（避免把损坏内容当结论发布），区别于畸形/空 body
+// 会发布 WellFormed=false 的零值结论。若实现改成读失败时也写入零值 metadata，本断言必红 ——
+// 这是当前测试矩阵中唯一击穿该变异的方向。
+func TestReadAffinityBodyPayload_ReadFailureDoesNotPublishMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c := newAffinityBodyContext(t, http.MethodPost, "application/json", "", nil)
+	c.Request.Body = &errReadCloser{data: []byte(`{"session_id":"partial"}`), err: io.ErrUnexpectedEOF}
+
+	// 前置：读失败场景不应已有可命中的缓存（否则走的是缓存命中分支，测不到读失败）。
+	_, preOK := ctxkey.GetRequestBodyMetadata(c)
+	require.False(t, preOK, "前置：读失败前不应存在共享 metadata 缓存")
+
+	var got *affinityBodyPayload
+	require.NotPanics(t, func() { got = readAffinityBodyPayload(c) }, "读失败绝不 panic")
+	assert.Nil(t, got, "读失败必须静默降级返回 nil（绝不返回部分字节）")
+	assert.False(t, c.IsAborted(), "静默降级不得 abort 请求")
+
+	_, ok := ctxkey.GetRequestBodyMetadata(c)
+	assert.False(t, ok, "读失败绝不写缓存：GetRequestBodyMetadata 必须仍返回 ok=false")
+}
+
+// TestReadAffinityBodyPayload_DoesNotRecomputeAfterTokenAuth
+// G: 模拟生产中间件链顺序 —— 先 TokenAuth 的 getRequestModel（写入共享 metadata），
+// 再 Distribute 的 readAffinityBodyPayload；底层 body 用计数 reader 观测 IO
+// W: getRequestModel → readAffinityBodyPayload
+// T: affinity 命中 TokenAuth 已发布的缓存、不重建（同一份字节的 json.Valid 只执行一次），
+// 且底层 body 只被读取一次、下游仍可完整重读
+//
+// json.Valid 计数探针：getRequestModel 已对 body 执行过一次 buildRequestBodyMetadata（内含 json.Valid）。
+// 此处把缓存 metadata 的 Model 改成 sentinel 后调用 affinity：若 affinity 在缓存命中时再次执行
+// buildRequestBodyMetadata，sentinel 必被覆写成 body 的真实 model，断言失败；sentinel 存续即证明
+// affinity 未对同一份字节重跑 well-formedness 判定（合计仍只是一次）。
+func TestReadAffinityBodyPayload_DoesNotRecomputeAfterTokenAuth(t *testing.T) {
+	const body = `{"model":"gpt-4","stream":true,"session_id":"sess-order"}`
+	c := newAffinityBodyContext(t, http.MethodPost, "application/json", body, nil)
+	reader := &countingReadCloser{r: strings.NewReader(body)}
+	c.Request.Body = reader
+
+	modelName, err := getRequestModel(c)
+	require.NoError(t, err, "前置：TokenAuth 的 getRequestModel 必须成功")
+	require.Equal(t, "gpt-4", modelName, "前置：model 提取正确")
+
+	// 前置：getRequestModel 恰好完整消费 body 一次（此后 affinity 只能命中缓存）。
+	assert.Equal(t, len(body), reader.servedAll, "前置：body 必须被 TokenAuth 完整消费一次")
+	assert.Equal(t, len(body), reader.exhaustedAt, "前置：body 恰好一次完整消费事件")
+
+	first, ok := ctxkey.GetRequestBodyMetadata(c)
+	require.True(t, ok, "前置：getRequestModel 必须写入共享 metadata")
+	require.Equal(t, "gpt-4", first.Model, "前置：共享 metadata 携带真实 model")
+	// 覆写为 sentinel，作为「affinity 是否重建 metadata」的探针。
+	first.Model = "sentinel-after-tokenauth"
+	c.Set(ctxkey.KeyRequestBodyMetadata, first)
+
+	servedBeforeAffinity := reader.servedAll
+
+	got := readAffinityBodyPayload(c)
+	require.NotNil(t, got, "缓存命中时 affinity 必须采信 TokenAuth 的结论并返回 payload")
+	assert.Equal(t, body, string(got.Raw), "采信缓存时仍返回完整原始 body")
+
+	after, ok := ctxkey.GetRequestBodyMetadata(c)
+	require.True(t, ok, "共享 metadata 应保持可读")
+	t.Logf("TokenAuth 后 affinity 之前探针写入 Model=sentinel-after-tokenauth；affinity 之后读到：%+v", after)
+	assert.Equal(t, "sentinel-after-tokenauth", after.Model,
+		"affinity 不得重建 metadata（重建即意味着对同一份 body 重跑 json.Valid，本探针必然失败）")
+	assert.True(t, after.WellFormed, "采信的是 TokenAuth 的 WellFormed=true 权威结论")
+
+	assert.Equal(t, servedBeforeAffinity, reader.servedAll,
+		"affinity 命中缓存不得再消费底层 body（同一份 bytes 只读一次）")
+
+	restored, err := io.ReadAll(c.Request.Body)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(restored), "整链之后下游仍能逐字节读到完整 body")
+}

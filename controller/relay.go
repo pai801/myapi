@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
 	"github.com/pai801/myapi/common"
 	"github.com/pai801/myapi/common/config"
@@ -396,22 +397,54 @@ func RelayNotFound(c *gin.Context) {
 	})
 }
 
-// detectStreamFromBody 从请求体中解析 stream 字段，判断是否为流式请求
+// detectStreamFromBody 从请求体中解析 stream 字段，判断是否为流式请求。
+//
+// 优先复用 middleware 阶段（getRequestModel）写入的共享元数据缓存，避免同一 body 被
+// TokenAuth / relay 入口重复扫描；缓存缺失或类型不符时回退自解析。
+//
+// 语义（与改造前的 encoding/json 版本严格等价）：
+//   - 缓存命中（GetRequestBodyMetadata ok=true）→ 直接返回缓存的 Stream 结论。缓存已按同一
+//     不变式把畸形 JSON / 不可接受根 / 类型不符折叠为 false，故 ok=true 时结论权威，
+//     绝不重新校验 body。
+//   - 缓存缺失 / 类型不符（ok=false）→ 回退：GetRequestBody + json.Valid 预检 +
+//     jsonparser.GetBoolean(body, "stream")。jsonparser 对畸形 JSON 会部分成功，故预检是
+//     安全红线而非性能优化。
+//   - 键匹配为**精确键名** `stream`（大小写敏感），与缓存的 stream 语义一致：
+//     `{"Stream":true}`、`{"ſtream":true}` 在两条路径下均为 false；若此处按大小写不敏感匹配，
+//     缓存命中与回退会对同一 body 给出不同结果，破坏 2.3 的一致性验收。
+//   - 缺失 / null / 类型不符（字符串、数字、对象、数组）/ 畸形 / 空 body / 非对象根 /
+//     GetRequestBody 出错 → 一律 false，不 panic。
+//   - 重复键取第一个（first-wins），与 encoding/json 的 last-wins 不同；这是本提取点与
+//     encoding/json 的已知差异，由 TestDetectStreamFromBody_DuplicateStreamFirstWins 锁定。
+//     缓存路径同语义（middleware 的 buildRequestBodyMetadata 对 stream 亦 first-wins）。
+//
+// body 可读性：本函数只读、不恢复 c.Request.Body（与改造前一致）。正常链路中
+// middleware.TokenAuth 的 getRequestModel 已用 GetRequestBody 读取并显式 restore
+// c.Request.Body，且字节缓存在 ctxkey.KeyRequestBody；故本函数命中该缓存时根本不触碰
+// c.Request.Body，下游直读 body 的路由（proxy/audio/text/image）不受影响。
 func detectStreamFromBody(c *gin.Context) bool {
+	if metadata, ok := ctxkey.GetRequestBodyMetadata(c); ok {
+		return metadata.Stream
+	}
+
 	rawBody, err := common.GetRequestBody(c)
 	if err != nil || len(rawBody) == 0 {
 		return false
 	}
-	var bodyMap map[string]any
-	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+	// json.Valid 预检：jsonparser 对畸形 JSON 会部分成功（可能从半截 body 取出 stream 值），
+	// 必须先建立 well-formedness，与改造前 json.Unmarshal 的失败语义一致。
+	if !json.Valid(rawBody) {
 		return false
 	}
-	if stream, ok := bodyMap["stream"]; ok {
-		if b, ok := stream.(bool); ok {
-			return b
-		}
+	// 精确键名 "stream"（大小写敏感，只查顶层）。GetBoolean 对以下情形均返回 error，统一降级为 false：
+	// 缺失键、null、非布尔类型（字符串/数字/对象/数组）、非对象根（数组/字符串/数字/布尔/null 根
+	// 的键查找必然 Key path not found，与改造前 map 查找 miss 等价）、嵌套在其他对象内的 stream。
+	// 重复键由 jsonparser 返回首个匹配值（first-wins，见函数头注释）。
+	stream, err := jsonparser.GetBoolean(rawBody, "stream")
+	if err != nil {
+		return false
 	}
-	return false
+	return stream
 }
 
 // buildActiveRequest 构造活跃请求对象，非流式请求返回 nil
