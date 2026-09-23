@@ -2739,6 +2739,256 @@ func classifyC1Legacy(outcome c1LegacyOutcome) string {
 }
 
 // =============================================================================
+// 模块 C1 / Task 2.1：差分回归测试（differential oracle）
+//
+// 对同一份样本同时运行：
+//   - 完整反序列化基线 c1LegacyBaseline（真实 `encoding/json` → SlimTextResponse）；
+//   - 按需提取 extractTextResponse。
+//
+// 两侧分类均由实际结果计算（success / error / upstreamError），不手写期望分类列；
+// 仅当分类不一致时才判失败，且不一致必须落在闭合的已声明差异集合内
+// （"" | firstWins | detailTolerant），每个非空类别都有理由专属断言。
+//
+// RED 建立说明（Task 2.1）：
+//
+//	三个生产校验缺口（胜出 tool_calls / 胜出 function / 经被跳过 choices 到达的胜出 message）
+//	尚未修复，故对应的嵌套类型错误样本当前会分歧：基线=error、C1=success。这些行的 declared
+//	保持为空，因而走严格一致性断言并当前失败——该失败正是 Tier 1 要求的 RED 证据，而非缺陷。
+//	后续修复批次（Task 2.2 -> 1.2 -> 1.1 -> 1.3）落地后这些行自然转绿，无需任何豁免机制。
+//	绝不静默通过。
+// =============================================================================
+
+// c1DifferentialClassification 由实际结果计算 C1 分类，取值与 classifyC1Legacy 对齐：
+// error 表示 C1 返回提取错误，upstreamError 表示提取成功且带非空上游 Error。
+func c1DifferentialClassification(result textResponseExtraction, err error) string {
+	if err != nil {
+		return "error"
+	}
+	if result.Error != nil {
+		return "upstreamError"
+	}
+	return "success"
+}
+
+// c1CheckDifferentialClassification 判定两侧分类是否可接受：相等即通过；不等仅当 declared
+// 命中闭合的已声明差异集合（firstWins / detailTolerant）才放行，否则返回「未声明分歧」错误。
+// 声明差异的具体理由由对应行的 check 单独断言，本函数只做分类级白名单判定。
+func c1CheckDifferentialClassification(legacyClass, currentClass, declared string) error {
+	if legacyClass == currentClass {
+		return nil
+	}
+	switch declared {
+	case "firstWins", "detailTolerant":
+		return nil
+	case "":
+		return fmt.Errorf("undeclared classification divergence: legacy=%s current=%s", legacyClass, currentClass)
+	default:
+		return fmt.Errorf("unknown declared category %q", declared)
+	}
+}
+
+// c1DifferentialRow 描述差分语料中的一条样本。
+type c1DifferentialRow struct {
+	name string
+	body string
+	// declared 是闭合的已声明差异类别："" | "firstWins" | "detailTolerant"。
+	declared string
+	// check 在 declared 非空时必填，承载该类别的理由专属断言。
+	check func(t *testing.T, legacy c1LegacyOutcome, current textResponseExtraction, legacyClass, currentClass string)
+}
+
+// TestExtractTextResponseDifferentialRegression 把 C1 按需提取的分类与完整反序列化基线对照。
+//
+// G: corpus spans nested winner errors, skipped-key paths, valid boundaries, upstream errors, and explicitly declared exceptions | W: c1LegacyBaseline and extractTextResponse process every body | T: classifications match unless the row names an allowed firstWins or detailTolerant difference
+func TestExtractTextResponseDifferentialRegression(t *testing.T) {
+	corpus := []c1DifferentialRow{
+		// ---- 普通一致样本（未声明：任何分歧都必须失败）----
+		{name: "normal_bases_only", body: `{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`},
+		{name: "normal_with_details", body: `{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":7,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":9,"accepted_prediction_tokens":1}},"choices":[{"message":{"content":"ok"}}]}`},
+		{name: "missing_choices", body: `{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`},
+		{name: "root_null", body: `null`},
+		{name: "empty_error_object_is_success", body: `{"error":{}}`},
+
+		// ---- 合法边界：缺失 / null / 合法结构值（须成功且分类一致）----
+		{name: "boundary_message_missing", body: `{"choices":[{"index":0}]}`},
+		{name: "boundary_message_null", body: `{"choices":[{"message":null}]}`},
+		{name: "boundary_tool_calls_null", body: `{"choices":[{"message":{"content":"a","tool_calls":null}}]}`},
+		{name: "boundary_function_missing", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":"x"}]}}]}`},
+		{name: "boundary_function_null", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":"x","function":null}]}}]}`},
+		{name: "boundary_function_valid", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":"n","strict":true,"arguments":"{}"}}]}}]}`},
+		{name: "valid_tool_calls", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":"n","arguments":"{}"}}]}}]}`},
+
+		// ---- 上游错误：三分类中的 upstreamError 代表 ----
+		{name: "valid_upstream_error", body: `{"error":{"message":"bad","type":"invalid_request_error","code":"x"}}`},
+
+		// ---- 顶层类型错误 / 畸形 JSON：error 一致 ----
+		{name: "mismatch_usage_number", body: `{"usage":5}`},
+		{name: "mismatch_basis_string", body: `{"usage":{"prompt_tokens":"x"}}`},
+		{name: "mismatch_choices_element_number", body: `{"choices":[5]}`},
+		{name: "mismatch_choice_index_string", body: `{"choices":[{"index":"x"}]}`},
+		{name: "malformed_json", body: `{"usage":{"prompt_tokens":5`},
+		{name: "root_array", body: `[]`},
+
+		// ---- 已被现有语义覆盖的嵌套错误（一致：两侧都报错）----
+		// 胜出 message 的嵌套类型错误（胜出值由调用方完整校验，已覆盖）。
+		{name: "message_winner_nested_error_detected", body: `{"choices":[{"message":{"content":1e400}}]}`},
+		// 被跳过（大小写变体）message 的嵌套错误走 deepValidate，已覆盖。
+		{name: "skipped_message_case_variant_bad_deep_validated", body: `{"choices":[{"message":{"content":1e400},"MESSAGE":{"content":"ok"}}]}`},
+		// 被覆盖（大小写变体）function 的嵌套错误走 deepValidate，已覆盖。
+		{name: "skipped_function_case_variant_bad_deep_validated", body: `{"choices":[{"message":{"content":"ok","tool_calls":[{"function":{"name":5},"FUNCTION":{"name":"ok"}}],"TOOL_CALLS":[]}}]}`},
+		// 重复 choices 的胜出值为坏值时由胜出解析报错。
+		{name: "skipped_choices_duplicate_bad_winner", body: `{"choices":[{"message":{"content":1e400}}],"choices":[]}`},
+
+		// ---- 胜出 tool_calls 未递归校验（Task 1.1）：当前分歧 → RED ----
+		{name: "gap_tool_calls_winner_element_number", body: `{"choices":[{"message":{"content":"a","tool_calls":[5]}}]}`},
+		{name: "gap_tool_calls_winner_element_id", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":5}]}}]}`},
+		{name: "gap_tool_calls_winner_element_function_number", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"function":5}]}}]}`},
+
+		// ---- 胜出 function 未递归校验（Task 1.2）：当前分歧 → RED ----
+		{name: "gap_function_winner_name", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":5}}]}}]}`},
+		{name: "gap_function_winner_strict", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"strict":"yes"}}]}}]}`},
+		{name: "gap_function_winner_arguments", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"arguments":1e400}}]}}]}`},
+		// 经被跳过的重复/大小写变体 tool_calls 到达的胜出 function 错误。
+		{name: "gap_function_via_skipped_tool_calls_duplicate", body: `{"choices":[{"message":{"content":"a","tool_calls":[],"tool_calls":[{"function":{"name":5}}]}}]}`},
+		{name: "gap_function_via_skipped_tool_calls_case_variant", body: `{"choices":[{"message":{"content":"a","tool_calls":[{"function":{"name":5}}],"TOOL_CALLS":[]}}]}`},
+
+		// ---- 经被跳过 choices 到达的胜出 message 未递归校验（Task 1.3）：当前分歧 → RED ----
+		{name: "gap_message_via_skipped_choices_duplicate", body: `{"choices":[],"choices":[{"message":{"content":1e400}}]}`},
+		{name: "gap_message_via_skipped_choices_case_variant", body: `{"choices":[{"message":{"content":1e400}}],"CHOICES":[]}`},
+
+		// ---- 已声明差异 firstWins（AC-9：同字节重复键 C1 first-wins，基线 last-wins）----
+		{
+			name:     "duplicate_usage_scalar_first_wins",
+			body:     `{"usage":{"prompt_tokens":5,"prompt_tokens":9},"choices":[{"message":{"content":"a"}}]}`,
+			declared: "firstWins",
+			check: func(t *testing.T, legacy c1LegacyOutcome, current textResponseExtraction, _, _ string) {
+				if legacy.usage.PromptTokens != 9 {
+					t.Fatalf("基线 last-wins 期望 prompt_tokens=9，实得 %d", legacy.usage.PromptTokens)
+				}
+				if current.Usage.PromptTokens != 5 {
+					t.Fatalf("C1 first-wins 期望 prompt_tokens=5，实得 %d", current.Usage.PromptTokens)
+				}
+				if !reflect.DeepEqual(legacy.contents, current.ChoiceContents) {
+					t.Fatalf("重复键样本 choice 文本不应分歧: legacy=%q current=%q", legacy.contents, current.ChoiceContents)
+				}
+			},
+		},
+		{
+			name:     "duplicate_usage_object_first_wins",
+			body:     `{"usage":{"prompt_tokens":5},"usage":{"prompt_tokens":9},"choices":[{"message":{"content":"a"}}]}`,
+			declared: "firstWins",
+			check: func(t *testing.T, legacy c1LegacyOutcome, current textResponseExtraction, _, _ string) {
+				if legacy.usage.PromptTokens != 9 {
+					t.Fatalf("基线 last-wins 期望 prompt_tokens=9，实得 %d", legacy.usage.PromptTokens)
+				}
+				if current.Usage.PromptTokens != 5 {
+					t.Fatalf("C1 first-wins 期望 prompt_tokens=5，实得 %d", current.Usage.PromptTokens)
+				}
+			},
+		},
+		{
+			name:     "duplicate_error_object_first_wins_classification",
+			body:     `{"error":{},"error":{"type":"invalid_request_error","message":"m"}}`,
+			declared: "firstWins",
+			check: func(t *testing.T, legacy c1LegacyOutcome, current textResponseExtraction, legacyClass, currentClass string) {
+				// AC-9：error 重复键 first-wins 选 {} → 无上游错误；基线 last-wins 选非空 type → 上游错误。
+				if legacyClass != "upstreamError" || legacy.upstreamErr == nil || legacy.upstreamErr.Type == "" {
+					t.Fatalf("基线 last-wins 期望非空上游错误，实得 class=%s err=%+v", legacyClass, legacy.upstreamErr)
+				}
+				if currentClass != "success" || current.Error != nil {
+					t.Fatalf("C1 first-wins 期望 success（error 选 {}），实得 class=%s err=%+v", currentClass, current.Error)
+				}
+			},
+		},
+
+		// ---- 已声明差异 detailTolerant（details 不可解析时基线整份失败，C1 宽容降级）----
+		{
+			name:     "detail_prompt_not_object",
+			body:     `{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":"x"}}`,
+			declared: "detailTolerant",
+			check: func(t *testing.T, _ c1LegacyOutcome, current textResponseExtraction, _, _ string) {
+				if current.Usage.PromptTokens != 1 || current.Usage.CompletionTokens != 2 || current.Usage.TotalTokens != 3 {
+					t.Fatalf("宽容降级应保留 basis，实得 %+v", current.Usage)
+				}
+				if current.Usage.PromptTokensDetails != nil {
+					t.Fatalf("非对象 prompt_tokens_details 应降级为缺失，实得 %+v", current.Usage.PromptTokensDetails)
+				}
+			},
+		},
+		{
+			name:     "detail_prompt_field_unparseable",
+			body:     `{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":"x"}}}`,
+			declared: "detailTolerant",
+			check: func(t *testing.T, _ c1LegacyOutcome, current textResponseExtraction, _, _ string) {
+				if current.Usage.PromptTokens != 1 || current.Usage.CompletionTokens != 2 || current.Usage.TotalTokens != 3 {
+					t.Fatalf("宽容降级应保留 basis，实得 %+v", current.Usage)
+				}
+				if current.Usage.PromptTokensDetails != nil && current.Usage.PromptTokensDetails.CachedTokens != 0 {
+					t.Fatalf("不可解析的 cached_tokens 应降级为 0，实得 %+v", current.Usage.PromptTokensDetails)
+				}
+			},
+		},
+		{
+			name:     "detail_completion_not_object",
+			body:     `{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"completion_tokens_details":5}}`,
+			declared: "detailTolerant",
+			check: func(t *testing.T, _ c1LegacyOutcome, current textResponseExtraction, _, _ string) {
+				if current.Usage.PromptTokens != 1 || current.Usage.CompletionTokens != 2 || current.Usage.TotalTokens != 3 {
+					t.Fatalf("宽容降级应保留 basis，实得 %+v", current.Usage)
+				}
+				if current.Usage.CompletionTokensDetails != nil {
+					t.Fatalf("非对象 completion_tokens_details 应降级为缺失，实得 %+v", current.Usage.CompletionTokensDetails)
+				}
+			},
+		},
+	}
+
+	for _, tc := range corpus {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.declared != "" && tc.check == nil {
+				t.Fatalf("declared category %q requires a reason-specific check", tc.declared)
+			}
+
+			legacy := c1LegacyBaseline(t, tc.body)
+			legacyClass := classifyC1Legacy(legacy)
+			current, currentErr := extractTextResponse([]byte(tc.body))
+			currentClass := c1DifferentialClassification(current, currentErr)
+
+			if err := c1CheckDifferentialClassification(legacyClass, currentClass, tc.declared); err != nil {
+				t.Fatalf("%v (err=%v, body=%s)", err, currentErr, tc.body)
+			}
+
+			if tc.check != nil {
+				tc.check(t, legacy, current, legacyClass, currentClass)
+			}
+		})
+	}
+
+	// 白名单是「选择加入」而非全局放行：强制构造未声明分歧必须被拒，已声明类别与相等分类放行。
+	t.Run("guard_rejects_undeclared_mismatch", func(t *testing.T) {
+		if err := c1CheckDifferentialClassification("success", "error", ""); err == nil {
+			t.Fatalf("未声明分歧必须被拒绝")
+		}
+		if err := c1CheckDifferentialClassification("upstreamError", "success", ""); err == nil {
+			t.Fatalf("未声明分歧必须被拒绝")
+		}
+		if err := c1CheckDifferentialClassification("success", "error", "firstWins"); err != nil {
+			t.Fatalf("已声明 firstWins 分歧应放行: %v", err)
+		}
+		if err := c1CheckDifferentialClassification("success", "error", "detailTolerant"); err != nil {
+			t.Fatalf("已声明 detailTolerant 分歧应放行: %v", err)
+		}
+		if err := c1CheckDifferentialClassification("success", "success", ""); err != nil {
+			t.Fatalf("相等分类应放行: %v", err)
+		}
+		if err := c1CheckDifferentialClassification("success", "error", "bogus"); err == nil {
+			t.Fatalf("未知声明类别必须被拒绝")
+		}
+	})
+}
+
+// =============================================================================
 // 模块 C1 单次扫描改造 / Task 2：choice 与 message 层折叠语义锁定
 //
 // 这两个测试把 choice / message 层的选值与校验语义（first-wins 重复键、大小写变体 last-wins、
@@ -2819,14 +3069,25 @@ func TestExtractTextResponseChoiceFoldSemantics(t *testing.T) {
 		{name: "message_null_resets_to_zero", body: `{"choices":[{"message":{"content":"a"},"message":null}]}`, wantContents: []string{""}},
 		{name: "message_null_then_value", body: `{"choices":[{"message":null,"message":{"content":"a"}}]}`, wantContents: []string{"a"}},
 		{name: "message_bad_value_errors", body: `{"choices":[{"message":5}]}`, wantErrContains: []string{"choices.message"}},
+		// message 边界：缺失 / null / 合法值均成功且 ChoiceContents 不变（null 见上方 message_null_resets_to_zero）。
+		{name: "message_absent_succeeds", body: `{"choices":[{"index":0}]}`, wantContents: []string{""}},
+		{name: "message_valid_succeeds", body: `{"choices":[{"message":{"content":"a"}}]}`, wantContents: []string{"a"}},
 		{name: "message_skipped_bad_nested_deep_validated", body: `{"choices":[{"message":{"content":"ok"},"message":{"content":1e400}}]}`, wantErrContains: []string{"choices.message", "message.content"}},
+		// 胜出 message 的递归校验（Task 1.3）：经被跳过的重复/大小写变体 choices 到达的胜出
+		// message 内含嵌套类型错误时按既有文案报错。
+		{name: "skipped_choices_duplicate_winner_message_nested_error", body: `{"choices":[],"choices":[{"message":{"content":1e400}}]}`, wantErrContains: []string{"choices.message", "message.content"}},
+		{name: "skipped_choices_case_variant_winner_message_nested_error", body: `{"choices":[{"message":{"content":1e400}}],"CHOICES":[]}`, wantErrContains: []string{"choices.message", "message.content"}},
 
 		// ---- 跨字段同时出错：声明顺序 index -> finish_reason -> message ----
 		{name: "priority_index_over_finish_reason_and_message", body: `{"choices":[{"index":"x","finish_reason":5,"message":5}]}`, wantErrContains: []string{"choices.index"}, wantErrAbsent: []string{"choices.finish_reason", "choices.message"}},
 		{name: "priority_finish_reason_over_message", body: `{"choices":[{"finish_reason":5,"message":5}]}`, wantErrContains: []string{"choices.finish_reason"}, wantErrAbsent: []string{"choices.message"}},
+		// 新检测到的嵌套 message 错误不得抢占更早声明目标的既有错误。
+		{name: "priority_index_over_nested_message_error", body: `{"choices":[{"index":"x","message":{"content":1e400}}]}`, wantErrContains: []string{"choices.index"}, wantErrAbsent: []string{"choices.message"}},
 
 		// ---- 数组元素顺序：第二个 choice 出错时返回该元素错误 ----
 		{name: "second_choice_error", body: `{"choices":[{"message":{"content":"a"}},{"message":{"content":"b"},"index":"x"}]}`, wantErrContains: []string{"choices.index"}},
+		// 成功路径保留 ChoiceContents 的内容与顺序（多元素，含空 message 元素）。
+		{name: "valid_multiple_choices_retain_order", body: `{"choices":[{"message":{"content":"first"}},{"index":1},{"message":{"content":"third"}}]}`, wantContents: []string{"first", "", "third"}},
 	}
 
 	for _, tc := range cases {
@@ -2883,8 +3144,28 @@ func TestExtractTextResponseMessageFoldSemantics(t *testing.T) {
 		{name: "tool_calls_case_variant_bad_overwrites", messageJSON: `{"content":"a","tool_calls":[],"TOOL_CALLS":5}`, wantErrContains: []string{"message.tool_calls"}},
 		// 被覆盖的坏数组走 deepValidate：数组元素内被覆盖的坏 function 再走 validateFunctionFields。
 		{name: "tool_calls_covered_bad_nested_deep_validated", messageJSON: `{"content":"ok","tool_calls":[{"function":{"name":5},"FUNCTION":{"name":"ok"}}],"TOOL_CALLS":[]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function.name"}},
-		// 既有语义（须保持）：胜出 tool_calls 元素的 function 仅做浅层对象校验，不递归校验其字段。
-		{name: "tool_calls_winner_function_fields_shallow_only", messageJSON: `{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":5}}]}`, wantContents: []string{"a"}},
+		// 胜出 tool_calls 元素的 function 由调用方递归校验：嵌套字段类型错误按既有路径报错。
+		{name: "tool_calls_winner_nested_error_errors", messageJSON: `{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":5}}]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function.name"}},
+
+		// ---- 胜出 tool_calls 的递归校验（Task 1.1）：元素或元素内字段类型错误报错 ----
+		{name: "tool_calls_winner_element_number_errors", messageJSON: `{"content":"a","tool_calls":[5]}`, wantErrContains: []string{"message.tool_calls"}},
+		{name: "tool_calls_winner_element_id_errors", messageJSON: `{"content":"a","tool_calls":[{"id":5}]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.id"}},
+		{name: "tool_calls_winner_element_function_number_errors", messageJSON: `{"content":"a","tool_calls":[{"function":5}]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function"}},
+
+		// ---- 胜出 function 的递归校验（Task 1.2）：嵌套字段按 tool_calls.function.<field> 文案报错 ----
+		{name: "tool_calls_winner_function_strict_errors", messageJSON: `{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"strict":"yes"}}]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function.strict"}},
+		{name: "tool_calls_winner_function_arguments_unrepresentable_errors", messageJSON: `{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"arguments":1e400}}]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function.arguments"}},
+		// 经被跳过的重复/大小写变体 tool_calls 到达的胜出 function 错误同样被覆盖。
+		{name: "tool_calls_skipped_duplicate_winner_function_name_errors", messageJSON: `{"content":"a","tool_calls":[],"tool_calls":[{"function":{"name":5}}]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function.name"}},
+		{name: "tool_calls_skipped_case_variant_winner_function_name_errors", messageJSON: `{"content":"a","tool_calls":[{"function":{"name":5}}],"TOOL_CALLS":[]}`, wantErrContains: []string{"message.tool_calls", "tool_calls.function.name"}},
+
+		// ---- tool_calls/function 边界：缺失 / null / 合法值均成功且 ChoiceContents 不变 ----
+		{name: "tool_calls_absent_succeeds", messageJSON: `{"content":"a"}`, wantContents: []string{"a"}},
+		{name: "tool_calls_null_succeeds", messageJSON: `{"content":"a","tool_calls":null}`, wantContents: []string{"a"}},
+		{name: "tool_calls_valid_succeeds", messageJSON: `{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":"n","strict":true,"arguments":"{}"}}]}`, wantContents: []string{"a"}},
+		{name: "function_absent_succeeds", messageJSON: `{"content":"a","tool_calls":[{"id":"x"}]}`, wantContents: []string{"a"}},
+		{name: "function_null_succeeds", messageJSON: `{"content":"a","tool_calls":[{"id":"x","function":null}]}`, wantContents: []string{"a"}},
+		{name: "function_valid_succeeds", messageJSON: `{"content":"a","tool_calls":[{"id":"x","type":"function","function":{"name":"n","description":"d","strict":false,"arguments":"{}","parameters":{}}}]}`, wantContents: []string{"a"}},
 
 		// ---- 跨字段同时出错：声明顺序 role->refusal->name->tool_call_id->content->reasoning_content->tool_calls ----
 		{name: "priority_role_over_content_and_tool_calls", messageJSON: `{"role":5,"content":1e400,"tool_calls":5}`, wantErrContains: []string{"message.role"}, wantErrAbsent: []string{"message.content", "message.tool_calls"}},
@@ -2893,6 +3174,14 @@ func TestExtractTextResponseMessageFoldSemantics(t *testing.T) {
 		{name: "priority_tool_call_id_over_content", messageJSON: `{"tool_call_id":5,"content":1e400}`, wantErrContains: []string{"message.tool_call_id"}, wantErrAbsent: []string{"message.content"}},
 		{name: "priority_content_over_reasoning_content", messageJSON: `{"content":1e400,"reasoning_content":1e400}`, wantErrContains: []string{"message.content"}, wantErrAbsent: []string{"message.reasoning_content"}},
 		{name: "priority_reasoning_content_over_tool_calls", messageJSON: `{"reasoning_content":1e400,"tool_calls":5}`, wantErrContains: []string{"message.reasoning_content"}, wantErrAbsent: []string{"message.tool_calls"}},
+		// 新检测到的嵌套 tool_calls 错误不得抢占更早声明目标的既有错误。
+		{name: "priority_content_over_nested_tool_calls_error", messageJSON: `{"content":1e400,"tool_calls":[{"function":{"name":5}}]}`, wantErrContains: []string{"message.content"}, wantErrAbsent: []string{"message.tool_calls"}},
+		{name: "priority_name_over_nested_tool_calls_error", messageJSON: `{"name":5,"tool_calls":[{"function":{"name":5}}]}`, wantErrContains: []string{"message.name"}, wantErrAbsent: []string{"message.tool_calls"}},
+		// tool call 内声明顺序 id -> type -> function：更早的 id/type 错误优先于新检测到的嵌套 function 错误。
+		{name: "priority_tool_calls_id_over_nested_function_error", messageJSON: `{"content":"a","tool_calls":[{"id":5,"function":{"name":5}}]}`, wantErrContains: []string{"tool_calls.id"}, wantErrAbsent: []string{"tool_calls.function"}},
+		{name: "priority_tool_calls_type_over_nested_function_error", messageJSON: `{"content":"a","tool_calls":[{"type":5,"function":{"name":5}}]}`, wantErrContains: []string{"tool_calls.type"}, wantErrAbsent: []string{"tool_calls.function"}},
+		// function 内声明顺序 name -> description -> strict -> arguments -> parameters：更早的 name 错误优先。
+		{name: "priority_function_name_over_strict_error", messageJSON: `{"content":"a","tool_calls":[{"id":"x","function":{"name":5,"strict":"yes"}}]}`, wantErrContains: []string{"tool_calls.function.name"}, wantErrAbsent: []string{"tool_calls.function.strict"}},
 	}
 
 	for _, tc := range cases {

@@ -1786,7 +1786,8 @@ func validateTextResponseChoices(value gjson.Result) error {
 // 用于 choices 数组中「被跳过的匹配键」的递归校验。
 //
 // 单次 foldCollect 收集 index/finish_reason/message；声明顺序锁定错误优先级（契约 3.3 choice）。
-// 与旧实现一致，胜出 message 仅做浅层对象校验，其字段的完整校验由调用方完成。
+// deepValidate 仅作用于被跳过/被覆盖的匹配键；胜出 message 的完整递归校验由本函数在折叠后
+// 显式调用 validateTextResponseMessage 完成。
 func validateTextResponseChoice(element gjson.Result) error {
 	targets := []foldTarget{
 		{key: "index", policy: nullResetsToZero, validate: validateExactInt},
@@ -1794,8 +1795,16 @@ func validateTextResponseChoice(element gjson.Result) error {
 		{key: "message", policy: nullResetsToZero, validate: validateObject, deepValidate: validateTextResponseMessage},
 	}
 	var selectionsBuf [foldCollectMaxTargets]foldSelection
-	collectErr := foldCollect(element, targets, selectionsBuf[:len(targets)])
+	selections := selectionsBuf[:len(targets)]
+	collectErr := foldCollect(element, targets, selections)
 	if collectErr == nil {
+		// foldCollect 仅对「被跳过/被覆盖的匹配键」递归校验；胜出 message 的完整递归校验由本函数
+		// 在折叠后完成，且不重新扫描 element。
+		if messageSel := selections[2]; messageSel.found && messageSel.selected.Type != gjson.Null {
+			if err := validateTextResponseMessage(messageSel.selected); err != nil {
+				return fmt.Errorf("choices.message: %w", err)
+			}
+		}
 		return nil
 	}
 	fields := [...]string{"index", "finish_reason", "message"}
@@ -1835,6 +1844,13 @@ func parseTextResponseMessageContent(value gjson.Result) (gjson.Result, error) {
 		}
 		return gjson.Result{}, collectErr
 	}
+	// foldCollect 仅对「被跳过/被覆盖的匹配键」递归校验；胜出 tool_calls 的完整递归校验由本函数
+	// 在折叠后完成，且不重新扫描 message。
+	if toolCallsSel := selections[6]; toolCallsSel.found && toolCallsSel.selected.Type != gjson.Null {
+		if err := validateTextResponseToolCalls(toolCallsSel.selected); err != nil {
+			return gjson.Result{}, fmt.Errorf("message.tool_calls: %w", err)
+		}
+	}
 	return selections[4].selected, nil
 }
 
@@ -1851,8 +1867,8 @@ func validateTextResponseMessage(value gjson.Result) error {
 // 非对象元素或任一 tool 字段无法解析即报错。
 //
 // 每个元素单次 foldCollect 收集 id/type/function；声明顺序锁定错误优先级（契约 3.3 tool call）。
-// 与旧实现一致，胜出 function 仅做浅层对象校验，其字段的完整校验由 validateTextResponseFunctionFields
-// 在「被跳过的 function 值」路径上完成。
+// deepValidate 仅作用于被跳过/被覆盖的匹配键；胜出 function 的完整递归校验由本函数在折叠后
+// 显式调用 validateTextResponseFunctionFields 完成。
 func validateTextResponseToolCalls(value gjson.Result) error {
 	if value.Type == gjson.Null {
 		return nil
@@ -1877,6 +1893,13 @@ func validateTextResponseToolCalls(value gjson.Result) error {
 		}
 		collectErr := foldCollect(element, targets, selections)
 		if collectErr == nil {
+			// foldCollect 仅对「被跳过/被覆盖的匹配键」递归校验；胜出 function 的完整递归校验
+			// 由本函数在折叠后完成（与其它调用点同一约定）。
+			if functionSel := selections[2]; functionSel.found && functionSel.selected.Type != gjson.Null {
+				if err := validateTextResponseFunctionFields(functionSel.selected); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		fields := [...]string{"id", "type", "function"}
