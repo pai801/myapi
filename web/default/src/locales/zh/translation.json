@@ -436,6 +436,66 @@
     }
   },
   "dashboard": {
+    "panes": {
+      "overview": "概览",
+      "model": "模型分析",
+      "token": "令牌分析",
+      "channel": "渠道分析",
+      "user": "用户分析"
+    },
+    "filters": {
+      "range": "时间范围",
+      "presets": {
+        "1": "1天",
+        "7": "7天",
+        "14": "14天",
+        "29": "29天",
+        "custom": "自定义"
+      },
+      "start": "起",
+      "end": "止",
+      "granularity": "粒度",
+      "granularities": {
+        "hour": "小时",
+        "day": "天",
+        "week": "周"
+      },
+      "username": "用户名（留空=全部用户）",
+      "query": "查询"
+    },
+    "summary": {
+      "total_requests": "总请求数",
+      "total_quota": "总额度",
+      "total_tokens": "总 Token",
+      "cached_tokens": "缓存 Token",
+      "cache_hit_rate": "缓存命中率",
+      "avg_ttft": "平均首字延迟",
+      "avg_elapsed": "平均耗时",
+      "avg_rpm": "平均 RPM",
+      "avg_tpm": "平均 TPM"
+    },
+    "dimensions": {
+      "model": "模型",
+      "channel": "渠道",
+      "token": "令牌",
+      "user": "用户"
+    },
+    "views": {
+      "trend": "趋势",
+      "proportion": "占比",
+      "top": "Top"
+    },
+    "topN": "Top-N",
+    "units": {
+      "requests": "次",
+      "quota": "额度",
+      "tokens": "Token",
+      "milliseconds": "毫秒",
+      "rpm": "请求/分钟",
+      "tpm": "Token/分钟"
+    },
+    "empty": "暂无数据",
+    "error": "数据加载失败",
     "charts": {
       "requests": {
         "title": "模型请求趋势",
@@ -454,6 +514,7 @@
       "title": "统计",
       "tooltip": {
         "date": "日期",
+        "dimension": "维度",
         "value": "数值"
       }
     }

@@ -138,6 +138,97 @@ func TestNormalizeLogStatistics(t *testing.T) {
 	})
 }
 
+// TestLegacyDashboardCompatibility 锁定旧接口 SearchLogsByDayAndModel 的 day/model 行结果基线：
+// 无等价元数据时仅小写化，按 (day, model_name) 升序返回，且 userId/username 过滤与
+// type=2 过滤语义保持不变。生产函数不得改动，本用例是其兼容性回归闸门。
+func TestLegacyDashboardCompatibility(t *testing.T) {
+	origDB := DB
+	origLogDB := LOG_DB
+	origUsingSQLite := common.UsingSQLite
+	origRedisEnabled := common.RedisEnabled
+	defer func() {
+		DB = origDB
+		LOG_DB = origLogDB
+		common.UsingSQLite = origUsingSQLite
+		common.RedisEnabled = origRedisEnabled
+	}()
+
+	initTestLogDB(t)
+
+	// 元数据走全局 DB；空表使 alias 为空，锁定"仅小写化"的基线
+	dbPath := filepath.Join(t.TempDir(), "legacy_dashboard_test.db")
+	var err error
+	DB, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open metadata db: %v", err)
+	}
+	if err := DB.AutoMigrate(&ModelMetadata{}); err != nil {
+		t.Fatalf("failed to migrate model metadata: %v", err)
+	}
+
+	day1 := time.Date(2024, 7, 3, 12, 0, 0, 0, time.UTC).Unix()
+	day2 := time.Date(2024, 7, 4, 12, 0, 0, 0, time.UTC).Unix()
+
+	seed := []*Log{
+		{UserId: 1, Username: "u1", Type: LogTypeConsume, ModelName: "DeepSeek-v4-Pro", Quota: 100, PromptTokens: 10, CompletionTokens: 20, CreatedAt: day1},
+		{UserId: 1, Username: "u1", Type: LogTypeConsume, ModelName: "deepseek-v4-pro", Quota: 150, PromptTokens: 11, CompletionTokens: 21, CreatedAt: day1},
+		{UserId: 1, Username: "u1", Type: LogTypeConsume, ModelName: "gpt-4o", Quota: 50, PromptTokens: 5, CompletionTokens: 6, CreatedAt: day1},
+		{UserId: 1, Username: "u1", Type: LogTypeConsume, ModelName: "GPT-4O", Quota: 70, PromptTokens: 9, CompletionTokens: 10, CreatedAt: day2},
+		{UserId: 2, Username: "u2", Type: LogTypeConsume, ModelName: "gpt-4o", Quota: 30, CreatedAt: day1},
+		// type=2 之外的日志不参与统计
+		{UserId: 1, Username: "u1", Type: LogTypeManage, ModelName: "DeepSeek-v4-Pro", CreatedAt: day1},
+	}
+	for _, l := range seed {
+		if err := LOG_DB.Create(l).Error; err != nil {
+			t.Fatalf("failed to seed log: %v", err)
+		}
+	}
+
+	Convey("SearchLogsByDayAndModel keeps the legacy day/model row contract", t, func() {
+		Convey("userId scope returns only that user's rows, lowercased and day/model ordered", func() {
+			stats, err := SearchLogsByDayAndModel(1, int(day1)-86400, int(day2)+86400, "")
+			So(err, ShouldBeNil)
+			So(len(stats), ShouldEqual, 3)
+
+			So(stats[0].Day, ShouldEqual, "2024-07-03")
+			So(stats[0].ModelName, ShouldEqual, "deepseek-v4-pro")
+			So(stats[0].RequestCount, ShouldEqual, 2)
+			So(stats[0].Quota, ShouldEqual, 250)
+			So(stats[0].PromptTokens, ShouldEqual, 21)
+			So(stats[0].CompletionTokens, ShouldEqual, 41)
+
+			So(stats[1].Day, ShouldEqual, "2024-07-03")
+			So(stats[1].ModelName, ShouldEqual, "gpt-4o")
+			So(stats[1].RequestCount, ShouldEqual, 1)
+			So(stats[1].Quota, ShouldEqual, 50)
+
+			So(stats[2].Day, ShouldEqual, "2024-07-04")
+			So(stats[2].ModelName, ShouldEqual, "gpt-4o")
+			So(stats[2].RequestCount, ShouldEqual, 1)
+			So(stats[2].Quota, ShouldEqual, 70)
+		})
+
+		Convey("userId=0 covers all users and username adds exact filtering", func() {
+			all, err := SearchLogsByDayAndModel(0, int(day1)-86400, int(day2)+86400, "")
+			So(err, ShouldBeNil)
+			So(len(all), ShouldEqual, 3)
+			// 07-03 的 gpt-4o 聚合了 u1 与 u2 两条日志
+			So(all[1].Day, ShouldEqual, "2024-07-03")
+			So(all[1].ModelName, ShouldEqual, "gpt-4o")
+			So(all[1].RequestCount, ShouldEqual, 2)
+			So(all[1].Quota, ShouldEqual, 80)
+
+			scoped, err := SearchLogsByDayAndModel(0, int(day1)-86400, int(day2)+86400, "u2")
+			So(err, ShouldBeNil)
+			So(len(scoped), ShouldEqual, 1)
+			So(scoped[0].Day, ShouldEqual, "2024-07-03")
+			So(scoped[0].ModelName, ShouldEqual, "gpt-4o")
+			So(scoped[0].RequestCount, ShouldEqual, 1)
+			So(scoped[0].Quota, ShouldEqual, 30)
+		})
+	})
+}
+
 // TestBuildCanonicalDisplayAlias 验证等价展示映射的构建规则：跳过无主名记录、
 // key 用简化名、value 用小写主名（保留连字符等展示字符）。
 func TestBuildCanonicalDisplayAlias(t *testing.T) {

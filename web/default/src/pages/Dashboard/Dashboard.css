@@ -107,4 +107,148 @@
     border: none !important;
     box-shadow: none !important;
     padding: 1rem 0 !important;
+}
+
+/* 共享筛选器：用户名 / 起止日期 / 查询按钮同排，窄屏自动换行 */
+.dashboard-filters {
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.dashboard-filter-label {
+    font-size: 13px;
+    color: #A3AED0;
+    white-space: nowrap;
+}
+
+.dashboard-date-input {
+    padding: 6px 10px;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    font-size: 13px;
+    outline: none;
+}
+
+.dashboard-preset-group,
+.dashboard-granularity-group {
+    margin-right: 4px;
+}
+
+/* 分区容器：筛选器在其之上，切换分区不重置筛选状态 */
+.dashboard-sections {
+    margin-top: 4px;
+}
+
+/* 角色化 Tab 分区：与设置页 Tab 视觉一致，保留筛选器在上方 */
+.dashboard-tabs {
+    margin-top: 1rem !important;
+    border-bottom: none !important;
+}
+
+.dashboard-tabs .item {
+    color: #A3AED0 !important;
+    font-weight: 500 !important;
+    padding: 0.8rem 1.2rem !important;
+}
+
+.dashboard-tabs .active.item {
+    color: #2B3674 !important;
+    font-weight: 600 !important;
+    border-color: #4318FF !important;
+}
+
+.dashboard-sections .ui.tab.segment {
+    min-height: 120px;
+}
+
+/* KPI 卡片条 */
+.summary-cards {
+    margin-bottom: 1rem !important;
+}
+
+.summary-cards .column {
+    padding: 0.5rem !important;
+}
+
+.summary-card {
+    height: 100%;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04) !important;
+    border: none !important;
+    border-radius: 16px !important;
+}
+
+.summary-card-label {
+    font-size: 13px;
+    color: #A3AED0;
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.summary-card-value {
+    font-size: 1.3em;
+    font-weight: 600;
+    color: #2B3674;
+    white-space: nowrap;
+}
+
+/* 维度图三视图切换控件 */
+.dimension-chart-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* 维度图 tooltip：token 度量 + request/quota 上下文 */
+.dimension-tooltip {
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #2B3674;
+    line-height: 1.6;
+}
+
+.dimension-tooltip-label {
+    color: #A3AED0;
+    margin-bottom: 4px;
+}
+
+.dimension-tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.dimension-tooltip-key {
+    font-weight: 600;
+}
+
+.chart-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 300px;
+    color: #A3AED0;
+    font-size: 14px;
+}
+
+@media (max-width: 768px) {
+    .summary-cards .column {
+        padding: 0.25rem !important;
+    }
+
+    .dimension-chart-controls {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .dashboard-tabs {
+        width: 100%;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
 } 

@@ -3,6 +3,7 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-contrib/sessions"
@@ -37,6 +38,63 @@ func routeSet(r *gin.Engine) map[string]bool {
 		set[ri.Method+" "+ri.Path] = true
 	}
 	return set
+}
+
+// routeHandler 返回指定 "METHOD PATH" 上最后一个处理器（即 controller handler）的全限定名，
+// 未注册时返回空串。中间件不在 Routes() 中暴露，故仅用于断言 handler 绑定。
+func routeHandler(r *gin.Engine, method, path string) string {
+	for _, ri := range r.Routes() {
+		if ri.Method == method && ri.Path == path {
+			return ri.Handler
+		}
+	}
+	return ""
+}
+
+// TestDashboardStatisticsRoutesRegistered 锁定 dashboard 统计扩展的路由契约（Task 2.4）：
+// 两条新 GET 路由注册在既有 UserAuth 保护的 selfRoute 分组下，且既有
+// GET /api/user/dashboard → controller.GetUserDashboard 绑定保持不变。
+// 同时验证 /dashboard 与 /dashboard/{aggregate,summary} 在 gin 路由树中共存（SetApiRouter 不 panic）。
+func TestDashboardStatisticsRoutesRegistered(t *testing.T) {
+	r := newTestEngine()
+	SetApiRouter(r)
+
+	got := routeSet(r)
+
+	// 1. 两条新路由已注册，且绑定到预期 handler。
+	for _, tc := range []struct {
+		method, path, handlerSuffix string
+	}{
+		{http.MethodGet, "/api/user/dashboard/aggregate", "controller.GetUserDashboardAggregate"},
+		{http.MethodGet, "/api/user/dashboard/summary", "controller.GetUserDashboardSummary"},
+	} {
+		key := tc.method + " " + tc.path
+		if !got[key] {
+			t.Errorf("route %q not registered", key)
+			continue
+		}
+		if h := routeHandler(r, tc.method, tc.path); !strings.HasSuffix(h, tc.handlerSuffix) {
+			t.Errorf("route %q handler=%q, want suffix %q", key, h, tc.handlerSuffix)
+		}
+	}
+
+	// 2. 既有 legacy 路由绑定保持不变。
+	const legacyKey = "GET /api/user/dashboard"
+	if !got[legacyKey] {
+		t.Errorf("legacy route %q not registered", legacyKey)
+	} else if h := routeHandler(r, http.MethodGet, "/api/user/dashboard"); !strings.HasSuffix(h, "controller.GetUserDashboard") {
+		t.Errorf("legacy route handler=%q, want suffix %q", h, "controller.GetUserDashboard")
+	}
+
+	// 3. 两条新路由处于认证用户分组：无任何凭证时 UserAuth 拒绝并返回 401。
+	for _, path := range []string{"/api/user/dashboard/aggregate", "/api/user/dashboard/summary"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s code=%d, want 401 (must be behind UserAuth)", path, w.Code)
+		}
+	}
 }
 
 // TestChannelDescriptorsRouteRegistered 断言渠道能力清单端点已注册（它是主仓路由，非渠道专属；

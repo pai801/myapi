@@ -436,6 +436,66 @@
     }
   },
   "dashboard": {
+    "panes": {
+      "overview": "Overview",
+      "model": "Model Analysis",
+      "token": "Token Analysis",
+      "channel": "Channel Analysis",
+      "user": "User Analysis"
+    },
+    "filters": {
+      "range": "Time Range",
+      "presets": {
+        "1": "1 day",
+        "7": "7 days",
+        "14": "14 days",
+        "29": "29 days",
+        "custom": "Custom"
+      },
+      "start": "Start",
+      "end": "End",
+      "granularity": "Granularity",
+      "granularities": {
+        "hour": "Hour",
+        "day": "Day",
+        "week": "Week"
+      },
+      "username": "Username (empty = all users)",
+      "query": "Query"
+    },
+    "summary": {
+      "total_requests": "Total Requests",
+      "total_quota": "Total Quota",
+      "total_tokens": "Total Tokens",
+      "cached_tokens": "Cached Tokens",
+      "cache_hit_rate": "Cache Hit Rate",
+      "avg_ttft": "Avg TTFT",
+      "avg_elapsed": "Avg Elapsed",
+      "avg_rpm": "Avg RPM",
+      "avg_tpm": "Avg TPM"
+    },
+    "dimensions": {
+      "model": "Model",
+      "channel": "Channel",
+      "token": "Token",
+      "user": "User"
+    },
+    "views": {
+      "trend": "Trend",
+      "proportion": "Proportion",
+      "top": "Top"
+    },
+    "topN": "Top-N",
+    "units": {
+      "requests": "Requests",
+      "quota": "Quota",
+      "tokens": "Tokens",
+      "milliseconds": "ms",
+      "rpm": "Requests/min",
+      "tpm": "Tokens/min"
+    },
+    "empty": "No data",
+    "error": "Failed to load data",
     "charts": {
       "requests": {
         "title": "Model Request Trend",
@@ -454,6 +514,7 @@
       "title": "Statistics",
       "tooltip": {
         "date": "Date",
+        "dimension": "Dimension",
         "value": "Value"
       }
     }

@@ -244,6 +244,172 @@ func GetUserDashboard(c *gin.Context) {
 	return
 }
 
+// dashboardQuery 是 aggregate 与 summary handler 共用的、已校验的 HTTP 查询参数。
+type dashboardQuery struct {
+	Dimension      string
+	Granularity    string
+	StartTimestamp int64
+	EndTimestamp   int64
+	Username       string
+}
+
+// parseDashboardQuery 校验必填的时间/粒度字段以及可选的 aggregate 维度，全程不访问数据库：
+// 任何非法输入都在触库前返回错误，由 handler 映射为 HTTP 400。requireDimension 为 true
+// （aggregate）时 dimension 必填，summary 传入 false。dimension/granularity 的合法性一律
+// 委托 model 层白名单校验函数，controller 不复制映射表。错误信息仅用于内部分支判断，
+// 不直接回传给客户端，避免泄漏实现细节。
+func parseDashboardQuery(c *gin.Context, requireDimension bool) (dashboardQuery, error) {
+	var query dashboardQuery
+
+	query.Granularity = c.Query("granularity")
+	if query.Granularity == "" {
+		return query, fmt.Errorf("granularity is required")
+	}
+	if !model.IsValidDashboardGranularity(query.Granularity) {
+		return query, fmt.Errorf("invalid granularity")
+	}
+
+	if requireDimension {
+		query.Dimension = c.Query("dimension")
+		if query.Dimension == "" {
+			return query, fmt.Errorf("dimension is required")
+		}
+		if !model.IsValidDashboardDimension(query.Dimension) {
+			return query, fmt.Errorf("invalid dimension")
+		}
+	}
+
+	// 时间戳必须为正整数 Unix 秒，且 start < end（零时长/倒置区间一律拒绝）
+	startTimestamp, err := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	if err != nil || startTimestamp <= 0 {
+		return query, fmt.Errorf("invalid start_timestamp")
+	}
+	endTimestamp, err := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	if err != nil || endTimestamp <= 0 {
+		return query, fmt.Errorf("invalid end_timestamp")
+	}
+	if startTimestamp >= endTimestamp {
+		return query, fmt.Errorf("start_timestamp must be less than end_timestamp")
+	}
+
+	query.StartTimestamp = startTimestamp
+	query.EndTimestamp = endTimestamp
+	query.Username = c.Query("username")
+	return query, nil
+}
+
+// dashboardScope 是由认证身份与角色推导出的、精确的 model 查询 scope。
+type dashboardScope struct {
+	UserID   int
+	Username string
+}
+
+// resolveDashboardScope 依据认证身份、角色、维度与请求的 username 推导 model 查询 scope：
+// 普通用户仅可请求 model/token 维度，且一律强制限定为认证用户 ID，请求中的 username 参数
+// 被忽略（绝不扩大或改变 scope）；请求 channel/user 维度直接报错，由 handler 映射为 HTTP 403。
+// 管理员使用 userID=0：username 非空则追加精确 username 过滤，为空则覆盖全部用户。
+// 错误信息仅供内部分支判断，不直接回传客户端。
+func resolveDashboardScope(role, authenticatedUserID int, dimension, requestedUsername string) (dashboardScope, error) {
+	if role >= model.RoleAdminUser {
+		return dashboardScope{UserID: 0, Username: requestedUsername}, nil
+	}
+	// 普通用户：channel/user 属于受限维度，须在触库前拒绝
+	if dimension == "channel" || dimension == "user" {
+		return dashboardScope{}, fmt.Errorf("dashboard dimension is not permitted for common user")
+	}
+	return dashboardScope{UserID: authenticatedUserID, Username: ""}, nil
+}
+
+// GetUserDashboardAggregate 校验 dashboard 查询参数并返回扁平的聚合行。
+// 参数非法时在调用 model 查询前返回 HTTP 400；普通用户请求受限维度时在触库前返回 HTTP 403；
+// 空结果区间返回 HTTP 200 与空数组。错误响应只回传通用文案，绝不透出 SQL 文本或数据库驱动细节。
+func GetUserDashboardAggregate(c *gin.Context) {
+	query, err := parseDashboardQuery(c, true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "dashboard query rejected",
+			"data":    nil,
+		})
+		return
+	}
+
+	// 权限 scope 必须先于 model 查询解析：受限维度在此直接 403，绝不触库
+	scope, err := resolveDashboardScope(c.GetInt(ctxkey.Role), c.GetInt(ctxkey.Id), query.Dimension, query.Username)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "dashboard query forbidden",
+			"data":    nil,
+		})
+		return
+	}
+
+	rows, err := model.SearchDashboardAggregates(scope.UserID, query.StartTimestamp, query.EndTimestamp, scope.Username, query.Dimension, query.Granularity)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "无法获取统计信息",
+			"data":    nil,
+		})
+		return
+	}
+	if rows == nil {
+		rows = make([]*model.DashboardAggregate, 0)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    rows,
+	})
+	return
+}
+
+// GetUserDashboardSummary 校验 dashboard 查询参数并返回 KPI 汇总对象。
+// 复用 aggregate 的查询校验与权限 scope 契约：summary 无 dimension，故以空维度解析 scope
+// （普通用户走非受限维度路径，仍被强制限定为本人；管理员 userID=0 且 username 可选）。
+// 参数非法时在调用 model 查询前返回 HTTP 400。错误响应只回传通用文案，
+// 绝不透出 SQL 文本或数据库驱动细节。
+func GetUserDashboardSummary(c *gin.Context) {
+	query, err := parseDashboardQuery(c, false)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "dashboard query rejected",
+			"data":    nil,
+		})
+		return
+	}
+
+	// summary 不含 dimension：空维度不会命中 channel/user 受限分支，
+	// 普通用户因此被强制限定为认证用户 ID，管理员按 username 可选过滤。
+	scope, err := resolveDashboardScope(c.GetInt(ctxkey.Role), c.GetInt(ctxkey.Id), "", query.Username)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "dashboard query forbidden",
+			"data":    nil,
+		})
+		return
+	}
+
+	summary, err := model.SearchDashboardSummary(scope.UserID, query.StartTimestamp, query.EndTimestamp, scope.Username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "无法获取统计信息",
+			"data":    nil,
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    summary,
+	})
+	return
+}
+
 func GenerateAccessToken(c *gin.Context) {
 	id := c.GetInt(ctxkey.Id)
 	user, err := model.GetUserById(id, true)
