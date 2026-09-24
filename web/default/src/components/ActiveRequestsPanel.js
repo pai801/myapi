@@ -26,7 +26,7 @@ function getColorByElapsedTime(elapsedTime) {
   return 'red';
 }
 
-const MESSAGE_MAX_LENGTH = 16;
+const MESSAGE_MAX_LENGTH = 26;
 
 // 单元格内单行展示，超长截断；无论是否截断，hover 都浮出完整原文
 function renderMessage(text) {
@@ -100,32 +100,32 @@ const ActiveRequestsPanel = ({ logs, onDetailClick }) => {
         <Table unstackable compact basic='very' size='small'>
           <Table.Header>
             <Table.Row>
-              <Table.HeaderCell width={2.4}>
+              <Table.HeaderCell width={2}>
                 {t('log.table.time')}
               </Table.HeaderCell>
               {isAdmin() && (
-                <Table.HeaderCell className='hide-on-mobile' width={1.5}>
+                <Table.HeaderCell className='hide-on-mobile' width={1}>
                   {t('log.table.channel_name')}
                 </Table.HeaderCell>
               )}
-              <Table.HeaderCell width={3}>
+              <Table.HeaderCell width={2}>
                 {t('log.table.model')}
               </Table.HeaderCell>
-              <Table.HeaderCell width={2.5}>
+              <Table.HeaderCell width={6}>
                 消息
               </Table.HeaderCell>
               {isAdmin() && (
-                <Table.HeaderCell className='hide-on-mobile' width={1.2}>
+                <Table.HeaderCell className='hide-on-mobile' width={1}>
                   {t('log.table.username')}
                 </Table.HeaderCell>
               )}
-              <Table.HeaderCell width={1.5}>
+              <Table.HeaderCell width={1}>
                 {t('log.table.token_name')}
               </Table.HeaderCell>
-              <Table.HeaderCell width={1.2}>
+              <Table.HeaderCell width={1}>
                 {t('log.table.first_token_time')}
               </Table.HeaderCell>
-              <Table.HeaderCell width={1.5}>
+              <Table.HeaderCell width={1}>
                 Elapsed
               </Table.HeaderCell>
               <Table.HeaderCell width={0.8}>
