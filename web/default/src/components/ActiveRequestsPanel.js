@@ -26,7 +26,7 @@ function getColorByElapsedTime(elapsedTime) {
   return 'red';
 }
 
-const MESSAGE_MAX_LENGTH = 26;
+const MESSAGE_MAX_LENGTH = 36;
 
 // 单元格内单行展示，超长截断；无论是否截断，hover 都浮出完整原文
 function renderMessage(text) {
