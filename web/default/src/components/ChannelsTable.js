@@ -4,6 +4,7 @@ import {Button, Dropdown, Form, Input, Label, Message, Pagination, Popup, Table,
 import {Link} from 'react-router-dom';
 import {
   API,
+  copy,
   loadChannelModels,
   setPromptShown,
   shouldShowPrompt,
@@ -86,6 +87,51 @@ function renderBalance(type, balance, t) {
     default:
       return <span>{t('channel.table.balance_not_supported')}</span>;
   }
+}
+
+// buildChannelCopyEnvelope 把完整渠道响应收敛为剪贴板 v1 信封（仅白名单字段）。
+// 只导出可编辑字段，绝不整包转储 API 对象；Go 侧可空指针（base_url/other/model_mapping/
+// system_prompt/priority）在此归一为表单默认值，group/models 保持逗号字符串形态。
+// 必填字段缺失或类型不符时抛错，由调用方统一走失败提示。
+export function buildChannelCopyEnvelope(channel) {
+  if (!channel || typeof channel !== 'object' || Array.isArray(channel)) {
+    throw new Error('invalid channel payload');
+  }
+  if (typeof channel.type !== 'number' || !Number.isFinite(channel.type)) {
+    throw new Error('invalid channel type');
+  }
+  for (const field of ['name', 'group', 'models', 'key']) {
+    if (typeof channel[field] !== 'string') {
+      throw new Error(`invalid channel ${field}`);
+    }
+  }
+  if (typeof channel.config !== 'string') {
+    throw new Error('invalid channel config');
+  }
+  let priority = channel.priority;
+  if (priority === null || priority === undefined) {
+    priority = 1;
+  } else if (typeof priority !== 'number' || !Number.isFinite(priority)) {
+    throw new Error('invalid channel priority');
+  }
+  const normalizeNullable = (value) =>
+    value === null || value === undefined ? '' : String(value);
+  return {
+    myapi_channel: 1,
+    channel: {
+      type: channel.type,
+      name: channel.name,
+      group: channel.group,
+      models: channel.models,
+      key: channel.key,
+      base_url: normalizeNullable(channel.base_url),
+      other: normalizeNullable(channel.other),
+      model_mapping: normalizeNullable(channel.model_mapping),
+      system_prompt: normalizeNullable(channel.system_prompt),
+      priority,
+      config: channel.config === '' ? '{}' : channel.config,
+    },
+  };
 }
 
 function isShowDetail() {
@@ -249,6 +295,27 @@ const ChannelsTable = () => {
       }
     } else {
       showError(message);
+    }
+  };
+
+  const copyChannel = async (id) => {
+    try {
+      const res = await API.get(`/api/channel/copy/${id}`);
+      const { success, message, data } = res.data;
+      if (!success) {
+        showError(message || t('channel.messages.copy_failed'));
+        return;
+      }
+      const envelope = buildChannelCopyEnvelope(data);
+      const okay = await copy(JSON.stringify(envelope));
+      if (okay) {
+        showSuccess(t('channel.messages.copy_success'));
+      } else {
+        showError(t('channel.messages.copy_failed'));
+      }
+    } catch (e) {
+      // 请求被拒 / 信封非法：统一提示失败，绝不回显密钥或完整响应体
+      showError(t('channel.messages.copy_failed'));
     }
   };
 
@@ -705,6 +772,14 @@ const ChannelsTable = () => {
                         }}
                       >
                         {t('channel.buttons.reset')}
+                      </Button>
+                      <Button
+                        size={'tiny'}
+                        onClick={() => {
+                          copyChannel(channel.id);
+                        }}
+                      >
+                        {t('channel.buttons.copy')}
                       </Button>
                       <Button
                         size={'tiny'}

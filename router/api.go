@@ -62,6 +62,7 @@ func SetApiRouter(router *gin.Engine) {
 			// 本仓不注册任何渠道，故返回空列表；扩展方注册的渠道由其在 init() 期注入。
 			channelRoute.GET("/descriptors", controller.GetChannelDescriptors)
 			channelRoute.GET("/:id", controller.GetChannel)
+			channelRoute.GET("/copy/:id", controller.CopyChannel)
 			channelRoute.GET("/reset/:id", controller.ResetChannel)
 			channelRoute.GET("/test", controller.TestChannels)
 			channelRoute.GET("/test/:id", controller.TestChannel)

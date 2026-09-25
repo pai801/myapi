@@ -40,6 +40,92 @@ const SYSTEM_CONFIG_KEYS = [
   'vertex_ai_adc',
 ];
 
+// 剪贴板 v1 信封中 channel 必填的字符串字段（group/models 为逗号串，非数组；base_url 等可空指针已归一为 ''）。
+const ENVELOPE_STRING_FIELDS = [
+  'name',
+  'group',
+  'models',
+  'key',
+  'base_url',
+  'other',
+  'model_mapping',
+  'system_prompt',
+];
+
+// parseChannelCopyEnvelope 校验整份剪贴板文本并归一为受控的 channel 对象。
+// 必须在校验全部通过后才允许写任何 state：任一处不合法即抛错，调用方据此保持表单不变。
+// 仅返回白名单字段（未知属性一律丢弃，不进入提交态）；config 由 JSON 文本解析为普通对象，
+// 空串按历史空库值归一为 {}；非空 model_mapping 必须是合法 JSON。
+export function parseChannelCopyEnvelope(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new Error('invalid envelope JSON');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('invalid envelope');
+  }
+  if (raw.myapi_channel !== 1) {
+    throw new Error('unsupported envelope version');
+  }
+  const channel = raw.channel;
+  if (!channel || typeof channel !== 'object' || Array.isArray(channel)) {
+    throw new Error('invalid channel object');
+  }
+  if (typeof channel.type !== 'number' || !Number.isFinite(channel.type)) {
+    throw new Error('invalid channel type');
+  }
+  for (const field of ENVELOPE_STRING_FIELDS) {
+    if (typeof channel[field] !== 'string') {
+      throw new Error(`invalid channel ${field}`);
+    }
+  }
+  if (
+    typeof channel.priority !== 'number' ||
+    !Number.isFinite(channel.priority)
+  ) {
+    throw new Error('invalid channel priority');
+  }
+  if (typeof channel.config !== 'string') {
+    throw new Error('invalid channel config');
+  }
+  let parsedConfig;
+  try {
+    parsedConfig = channel.config.trim() === '' ? {} : JSON.parse(channel.config);
+  } catch (e) {
+    throw new Error('invalid channel config JSON');
+  }
+  if (
+    parsedConfig === null ||
+    typeof parsedConfig !== 'object' ||
+    Array.isArray(parsedConfig)
+  ) {
+    throw new Error('invalid channel config shape');
+  }
+  if (channel.model_mapping !== '') {
+    try {
+      JSON.parse(channel.model_mapping);
+    } catch (e) {
+      throw new Error('invalid channel model_mapping');
+    }
+  }
+  // 白名单重建：只保留契约字段，未知属性被丢弃，不写入提交态。
+  return {
+    type: channel.type,
+    name: channel.name,
+    group: channel.group,
+    models: channel.models,
+    key: channel.key,
+    base_url: channel.base_url,
+    other: channel.other,
+    model_mapping: channel.model_mapping,
+    system_prompt: channel.system_prompt,
+    priority: channel.priority,
+    config: parsedConfig,
+  };
+}
+
 function type2secretPrompt(type, t) {
   switch (type) {
     case 15:
@@ -294,6 +380,111 @@ const EditChannel = () => {
     }
   };
 
+  // 读取剪贴板并填充新建表单，仅供人工复核，绝不自动提交。
+  // 校验全部前置：解析/校验失败或剪贴板不可用时，表单保持原样且不发任何请求。
+  const pasteChannelFromClipboard = async () => {
+    let text;
+    try {
+      if (
+        !navigator.clipboard ||
+        typeof navigator.clipboard.readText !== 'function'
+      ) {
+        throw new Error('clipboard unavailable');
+      }
+      text = await navigator.clipboard.readText();
+    } catch (e) {
+      showError(t('channel.edit.messages.paste_failed'));
+      return;
+    }
+    let envelope;
+    try {
+      envelope = parseChannelCopyEnvelope(text);
+    } catch (e) {
+      showError(t('channel.edit.messages.paste_invalid'));
+      return;
+    }
+    // 派生全部表单状态；任何意外错误都必须发生在任何 setState 之前，
+    // 一旦抛出即提示失败并保持表单原样（绝无部分写入 / 无未处理 rejection）。
+    let derived;
+    try {
+      // 冷缓存兜底：descriptor 清单在挂载时异步加载，用户可能在加载完成前点击粘贴。
+      // 先 await loadChannelDescriptors（已加载时直接返回缓存）确保清单就绪，再走模块级
+      // getChannelDescriptor 做归属分类；绝不改用可能过期的 React state，避免把已声明的
+      // 请求头键误判为扩展键。
+      await loadChannelDescriptors();
+      const desc = getChannelDescriptor(envelope.type);
+      const descHeadersKey =
+        (desc && desc.capabilities && desc.capabilities.custom_headers_key) || '';
+      const supportsHeaders =
+        !!(desc &&
+          desc.capabilities &&
+          desc.capabilities.supports_custom_headers) &&
+        descHeadersKey !== '';
+
+      const parsedConfig = envelope.config;
+      let customHeaderRows = [{ name: '', value: '' }];
+      if (supportsHeaders) {
+        const headers = parsedConfig[descHeadersKey];
+        if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+          customHeaderRows = Object.entries(headers).map(([name, value]) => ({
+            name,
+            value: value === null || value === undefined ? '' : String(value),
+          }));
+          if (customHeaderRows.length === 0) {
+            customHeaderRows = [{ name: '', value: '' }];
+          }
+        }
+      }
+      const excludedKeys = supportsHeaders ? [descHeadersKey] : [];
+      // 与载入路径同款原型安全构造：__proto__ 等字面键名必须作为自有属性往返。
+      const extensionConfig = Object.fromEntries(
+        Object.entries(parsedConfig).filter(
+          ([key]) =>
+            !SYSTEM_CONFIG_KEYS.includes(key) && !excludedKeys.includes(key)
+        )
+      );
+      // getChannelModels 可能抛错（如 localStorage.channel_models === "null"）；
+      // 必须在任何 setState 之前调用，抛错时表单保持原样。
+      const basicModels = getChannelModels(envelope.type);
+
+      derived = {
+        inputs: {
+          name: envelope.name,
+          type: envelope.type,
+          key: envelope.key,
+          base_url: envelope.base_url,
+          other: envelope.other,
+          model_mapping: envelope.model_mapping,
+          system_prompt: envelope.system_prompt,
+          priority: envelope.priority,
+          groups: envelope.group === '' ? [] : envelope.group.split(','),
+          models: envelope.models === '' ? [] : envelope.models.split(','),
+        },
+        basicModels,
+        config: parsedConfig,
+        customHeaders: customHeaderRows,
+        editorExcludedKeys: excludedKeys,
+        customConfigText:
+          Object.keys(extensionConfig).length > 0
+            ? JSON.stringify(extensionConfig, null, 2)
+            : '',
+      };
+    } catch (e) {
+      showError(t('channel.edit.messages.paste_invalid'));
+      return;
+    }
+
+    setInputs(derived.inputs);
+    setBasicModels(derived.basicModels);
+    setConfig(derived.config);
+    setCustomHeaders(derived.customHeaders);
+    setEditorExcludedKeys(derived.editorExcludedKeys);
+    setCustomConfigText(derived.customConfigText);
+    setConfigLoadFailed(false);
+    setBatch(false);
+    showSuccess(t('channel.edit.messages.paste_success'));
+  };
+
   const fetchModels = async () => {
     try {
       let res = await API.get(`/api/channel/models`);
@@ -512,6 +703,8 @@ const EditChannel = () => {
         showSuccess(t('channel.edit.messages.create_success'));
         setInputs(originInputs);
       }
+      // 保存成功后统一回到渠道列表（新建与编辑一致）；失败/校验不通过时不跳转。
+      navigate('/channel');
     } else {
       showError(message);
     }
@@ -608,6 +801,15 @@ const EditChannel = () => {
             {isEdit
               ? t('channel.edit.title_edit')
               : t('channel.edit.title_create')}
+            {!isEdit && (
+              <Button
+                size='tiny'
+                style={{ marginLeft: '0.75em' }}
+                onClick={pasteChannelFromClipboard}
+              >
+                {t('channel.edit.buttons.paste')}
+              </Button>
+            )}
           </Card.Header>
           <Form loading={loading} autoComplete='new-password'>
             <Form.Field>

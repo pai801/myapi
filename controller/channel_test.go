@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/relay/channeltype"
@@ -173,5 +178,83 @@ func TestCompactChannelKey(t *testing.T) {
 	})
 	if got, ok := compactChannelKey(unregisteredCT55, "raw"); !ok || got != "raw" {
 		t.Errorf("compactChannelKey on error = (%q,%v), want (raw,true) (never split)", got, ok)
+	}
+}
+
+// copyChannelResponse 是 CopyChannel 端点的响应形状：data 用 RawMessage 以便断言「有无 data」。
+type copyChannelResponse struct {
+	Success bool            `json:"success"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
+}
+
+// TestCopyChannelReturnsKey 锁定复制端点的核心契约：对既有渠道返回 success=true，
+// 且 data.key 与库中凭证一致（这是列表 / 详情刻意省略的字段）。
+func TestCopyChannelReturnsKey(t *testing.T) {
+	initUnregisteredChannelTestDB(t)
+
+	id := insertUnregisteredChannel(t, unregisteredCT55, model.ChannelStatusEnabled)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: strconv.Itoa(id)}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/channel/copy/"+strconv.Itoa(id), nil)
+	CopyChannel(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("CopyChannel code = %d, want 200", w.Code)
+	}
+	var resp copyChannelResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal copy response: %v (body=%s)", err, w.Body.String())
+	}
+	if !resp.Success {
+		t.Fatalf("success = false, body=%s", w.Body.String())
+	}
+	var ch model.Channel
+	if err := json.Unmarshal(resp.Data, &ch); err != nil {
+		t.Fatalf("unmarshal data: %v (data=%s)", err, resp.Data)
+	}
+	if ch.Key != "legacy-key" {
+		t.Errorf("data.key = %q, want %q (full channel must include the credential)", ch.Key, "legacy-key")
+	}
+}
+
+// TestCopyChannelInvalidOrMissingIdFails 锁定失败路径：非法 id 与不存在的 id 都必须
+// 返回 HTTP 200 + success=false，且不带 data，与 GetChannel / ResetChannel 约定一致。
+func TestCopyChannelInvalidOrMissingIdFails(t *testing.T) {
+	initUnregisteredChannelTestDB(t)
+
+	for _, tc := range []struct {
+		name string
+		id   string
+	}{
+		{name: "non-numeric", id: "abc"},
+		{name: "not-found", id: "999999"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Params = gin.Params{{Key: "id", Value: tc.id}}
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/channel/copy/"+tc.id, nil)
+			CopyChannel(c)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("CopyChannel(%q) code = %d, want 200", tc.id, w.Code)
+			}
+			var resp copyChannelResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal copy response: %v (body=%s)", err, w.Body.String())
+			}
+			if resp.Success {
+				t.Errorf("CopyChannel(%q) success = true, want false", tc.id)
+			}
+			if resp.Message == "" {
+				t.Errorf("CopyChannel(%q) message empty, want error message", tc.id)
+			}
+			if len(resp.Data) != 0 {
+				t.Errorf("CopyChannel(%q) data = %s, want absent", tc.id, resp.Data)
+			}
+		})
 	}
 }

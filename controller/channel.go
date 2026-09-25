@@ -83,6 +83,36 @@ func GetChannel(c *gin.Context) {
 	return
 }
 
+// CopyChannel 返回完整渠道（含 Key），仅供管理员复制配置使用。
+//
+// 与 GetChannel 的唯一区别是 selectAll=true：列表 / 搜索 / 详情刻意省略 Key，
+// 本端点用于「复制渠道配置」，故必须带上 Key。响应沿用既有 Gin 约定：
+// 成功 200 + success=true + data；非法 id 或查询失败 200 + success=false + message。
+func CopyChannel(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	channel, err := model.GetChannelById(id, true)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    channel,
+	})
+	return
+}
+
 func AddChannel(c *gin.Context) {
 	channel := model.Channel{}
 	err := c.ShouldBindJSON(&channel)

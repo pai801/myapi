@@ -108,6 +108,29 @@ func TestChannelDescriptorsRouteRegistered(t *testing.T) {
 	}
 }
 
+// TestChannelCopyRouteRegistered 锁定复制渠道端点：注册为 GET /api/channel/copy/:id、
+// 绑定 controller.CopyChannel，且与既有 /api/channel/:id 静态子段共存（SetApiRouter 不 panic）；
+// 同时验证它位于 AdminAuth 分组下——无凭证请求被拒（401）。
+func TestChannelCopyRouteRegistered(t *testing.T) {
+	r := newTestEngine()
+	SetApiRouter(r)
+
+	const key = "GET /api/channel/copy/:id"
+	if !routeSet(r)[key] {
+		t.Fatalf("route %q not registered", key)
+	}
+	if h := routeHandler(r, http.MethodGet, "/api/channel/copy/:id"); !strings.HasSuffix(h, "controller.CopyChannel") {
+		t.Errorf("route %q handler=%q, want suffix %q", key, h, "controller.CopyChannel")
+	}
+
+	// 位于 AdminAuth 分组：无任何凭证时被拒并返回 401。
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/channel/copy/1", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("GET /api/channel/copy/1 code=%d, want 401 (must be behind AdminAuth)", w.Code)
+	}
+}
+
 // TestEmptyRegistryYields404 模拟空注册表：不挂任何渠道路由，
 // 目标路径必须返回 404 且不 panic。
 func TestEmptyRegistryYields404(t *testing.T) {

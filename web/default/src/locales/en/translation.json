@@ -129,7 +129,8 @@
       "refresh": "Refresh",
       "show_detail": "Details",
       "hide_detail": "Hide Details",
-      "reset": "Reset"
+      "reset": "Reset",
+      "copy": "Copy"
     },
     "messages": {
       "test_success": "Channel {{name}} test successful, model {{model}}, time {{time}}s, output: {{message}}",
@@ -137,7 +138,9 @@
       "delete_disabled_success": "Deleted all disabled channels, total: {{count}}",
       "balance_update_success": "Channel {{name}} balance updated successfully!",
       "all_balance_updated": "All enabled channel balances have been updated!",
-      "operation_success": "Operation completed successfully!"
+      "operation_success": "Operation completed successfully!",
+      "copy_success": "Channel configuration copied to clipboard. Paste it on the create-channel page.",
+      "copy_failed": "Failed to copy the channel configuration. Check your browser clipboard permission and retry."
     },
     "edit": {
       "title_edit": "Update Channel Information",
@@ -170,7 +173,8 @@
         "fill_all": "Fill All Models",
         "clear": "Clear All Models",
         "add_custom": "Add",
-        "custom_placeholder": "Enter custom model name"
+        "custom_placeholder": "Enter custom model name",
+        "paste": "Paste"
       },
       "messages": {
         "name_required": "Please enter channel name and key!",
@@ -180,7 +184,10 @@
         "create_success": "Channel created successfully!",
         "base_url_required": "Please enter base URL first!",
         "fetch_models_success": "Successfully fetched {{count}} models",
-        "fetch_models_failed": "Failed to fetch models. Please check base URL and API key."
+        "fetch_models_failed": "Failed to fetch models. Please check base URL and API key.",
+        "paste_success": "Channel configuration pasted from clipboard. Review carefully, then submit manually.",
+        "paste_invalid": "The clipboard content is not a valid channel configuration. The form was not changed.",
+        "paste_failed": "Failed to read the clipboard. Check your browser clipboard permission and retry."
       },
       "spark_version": "Model Version",
       "spark_version_placeholder": "Please enter Spark model version from API URL, e.g.: v2.1",

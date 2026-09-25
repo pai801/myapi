@@ -129,7 +129,8 @@
       "refresh": "刷新",
       "show_detail": "详情",
       "hide_detail": "隐藏详情",
-      "reset": "重置"
+      "reset": "重置",
+      "copy": "复制"
     },
     "messages": {
       "test_success": "渠道 {{name}} 测试成功，模型 {{model}}，耗时 {{time}} 秒，模型输出：{{message}}",
@@ -137,7 +138,9 @@
       "delete_disabled_success": "已删除所有禁用渠道，共计 {{count}} 个",
       "balance_update_success": "渠道 {{name}} 余额更新成功！",
       "all_balance_updated": "已更新完毕所有已启用渠道余额！",
-      "operation_success": "操作成功完成！"
+      "operation_success": "操作成功完成！",
+      "copy_success": "渠道配置已复制到剪贴板，可在新建渠道页粘贴。",
+      "copy_failed": "复制渠道配置失败，请检查浏览器剪贴板权限后重试。"
     },
     "edit": {
       "title_edit": "更新渠道信息",
@@ -170,7 +173,8 @@
         "fill_all": "填入所有模型",
         "clear": "清除所有模型",
         "add_custom": "填入",
-        "custom_placeholder": "输入自定义模型名称"
+        "custom_placeholder": "输入自定义模型名称",
+        "paste": "粘贴"
       },
       "messages": {
         "name_required": "请填写渠道名称和渠道密钥！",
@@ -180,7 +184,10 @@
         "create_success": "渠道创建成功！",
         "base_url_required": "请先填写渠道地址！",
         "fetch_models_success": "成功拉取 {{count}} 个模型",
-        "fetch_models_failed": "拉取模型列表失败，请检查渠道地址和密钥是否正确"
+        "fetch_models_failed": "拉取模型列表失败，请检查渠道地址和密钥是否正确",
+        "paste_success": "已从剪贴板填入渠道配置，请仔细核对后手动提交。",
+        "paste_invalid": "剪贴板内容不是有效的渠道配置，未修改表单。",
+        "paste_failed": "读取剪贴板失败，请检查浏览器剪贴板权限后重试。"
       },
       "spark_version": "模型版本",
       "spark_version_placeholder": "请输入星火大模型版本，注意是接口地址中的版本号，例如：v2.1",

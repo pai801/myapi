@@ -24,6 +24,9 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 // i18n 的 t 用可变 mock 承载：既保持 t:(k)=>k 的既有语义，又能断言冲突键确实传给了 t。
 let mockT;
 
+// navigate 用可变 mock 承载：断言保存成功后才跳转回渠道列表。
+let mockNavigate;
+
 jest.mock('react-i18next', () => ({
   useTranslation: () => ({ t: mockT, i18n: { language: 'zh' } }),
 }));
@@ -31,7 +34,7 @@ jest.mock('react-i18next', () => ({
 // 走「加载已有渠道」路径：useParams 返回 id，页面进入 isEdit 分支。
 jest.mock('react-router-dom', () => ({
   useParams: () => ({ id: '1' }),
-  useNavigate: () => jest.fn(),
+  useNavigate: () => mockNavigate,
 }));
 
 jest.mock('../../helpers', () => ({
@@ -72,6 +75,7 @@ import {
   API,
   getChannelModels,
   showError,
+  showSuccess,
   verifyJSON,
 } from '../../helpers';
 // eslint-disable-next-line import/first
@@ -92,6 +96,7 @@ const INVALID_JSON_ERROR_KEY = 'channel.edit.custom_config.invalid_json';
 const NOT_OBJECT_ERROR_KEY = 'channel.edit.custom_config.not_object';
 const CONFLICT_ERROR_KEY = 'channel.edit.custom_config.conflict';
 const SUBMIT_KEY = 'channel.edit.buttons.submit';
+const UPDATE_SUCCESS_KEY = 'channel.edit.messages.update_success';
 // 一个不该被写入的硬编码键名（中性占位：真实键名由清单下发，本常量只用于反证硬编码路径）。
 const HARDCODED_KEY = 'hardcoded_custom_headers';
 
@@ -141,6 +146,7 @@ describe('EditChannel custom-headers contract', () => {
   beforeEach(() => {
     // 所有实现必须在此重新装配（CRA resetMocks 会清空上一用例的实现）。
     mockT = jest.fn((k) => k);
+    mockNavigate = jest.fn();
     loadChannelDescriptors.mockImplementation(() =>
       Promise.resolve(mockDescriptor ? [mockDescriptor] : [])
     );
@@ -660,5 +666,36 @@ describe('EditChannel custom-headers contract', () => {
     // 无原型污染：全局 Object.prototype 未被写入。
     expect({}.polluted).toBeUndefined();
     expect(showError).not.toHaveBeenCalled();
+  });
+
+  it('navigates to /channel after a successful edit save', async () => {
+    mockDescriptor = null;
+    mockChannelData = channelResponse('{}');
+
+    await renderPage();
+
+    expect(mockNavigate).not.toHaveBeenCalled();
+    await clickSubmit();
+
+    expect(API.put).toHaveBeenCalledTimes(1);
+    expect(showSuccess).toHaveBeenCalledWith(UPDATE_SUCCESS_KEY);
+    expect(mockNavigate).toHaveBeenCalledTimes(1);
+    expect(mockNavigate).toHaveBeenCalledWith('/channel');
+  });
+
+  it('does NOT navigate when the edit save returns success:false', async () => {
+    mockDescriptor = null;
+    mockChannelData = channelResponse('{}');
+    API.put.mockResolvedValue({
+      data: { success: false, message: 'save-failed' },
+    });
+
+    await renderPage();
+
+    await clickSubmit();
+
+    expect(API.put).toHaveBeenCalledTimes(1);
+    expect(showError).toHaveBeenCalledWith('save-failed');
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });
