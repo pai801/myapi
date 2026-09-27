@@ -30,7 +30,10 @@ const (
 type Capabilities struct {
 	// SupportsBalance 该渠道是否支持查询余额。
 	SupportsBalance bool `json:"supports_balance"`
-	// SupportsModelList 该渠道是否支持拉取/展示模型清单。
+	// SupportsModelList 该渠道是否支持展示/拉取模型清单。
+	//
+	// 语义仅为「该渠道是否支持展示/拉取模型清单」，MUST NOT 隐含「是否启用模型白名单」：
+	// 消费方 MUST NOT 将其解释为出站请求的模型准入开关。
 	SupportsModelList bool `json:"supports_model_list"`
 	// SupportsTest 该渠道是否支持连通性测试。
 	SupportsTest bool `json:"supports_test"`

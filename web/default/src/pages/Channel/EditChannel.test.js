@@ -96,6 +96,7 @@ const INVALID_JSON_ERROR_KEY = 'channel.edit.custom_config.invalid_json';
 const NOT_OBJECT_ERROR_KEY = 'channel.edit.custom_config.not_object';
 const CONFLICT_ERROR_KEY = 'channel.edit.custom_config.conflict';
 const SUBMIT_KEY = 'channel.edit.buttons.submit';
+const FETCH_MODELS_KEY = 'channel.edit.buttons.fetch_models';
 const UPDATE_SUCCESS_KEY = 'channel.edit.messages.update_success';
 // 一个不该被写入的硬编码键名（中性占位：真实键名由清单下发，本常量只用于反证硬编码路径）。
 const HARDCODED_KEY = 'hardcoded_custom_headers';
@@ -203,6 +204,12 @@ describe('EditChannel custom-headers contract', () => {
     return container.querySelector('textarea[name="custom_config"]');
   }
 
+  function findFetchModelsButton() {
+    return Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent.includes(FETCH_MODELS_KEY)
+    );
+  }
+
   // 卸载当前页面并换新容器/根，供同一用例内覆盖多组输入（组件状态需重置）。
   async function remountPage() {
     act(() => root.unmount());
@@ -231,6 +238,16 @@ describe('EditChannel custom-headers contract', () => {
     expect(submitButton).toBeTruthy();
     await act(async () => {
       submitButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+
+  // 点击「拉取模型」：走 API.post('/api/channel/fetch_models', payload) 路径。
+  async function clickFetchModels() {
+    const fetchButton = findFetchModelsButton();
+    expect(fetchButton).toBeTruthy();
+    await act(async () => {
+      fetchButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
@@ -697,5 +714,103 @@ describe('EditChannel custom-headers contract', () => {
     expect(API.put).toHaveBeenCalledTimes(1);
     expect(showError).toHaveBeenCalledWith('save-failed');
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it('produces the same config for submit (string) and fetch models (object)', async () => {
+    // 单一真源契约：提交与拉取共用 buildLocalConfig()，两处产出的 config 必须深相等。
+    mockDescriptor = descriptorWith({
+      supports_custom_headers: true,
+      custom_headers_key: KEY,
+    });
+    mockChannelData = channelResponse(
+      JSON.stringify({ region: 'us-east-1', [KEY]: { Authorization: 'Bearer secret' } })
+    );
+
+    await renderPage();
+
+    // 同时覆盖扩展键（customConfigText）与自定义请求头折叠路径。
+    await changeCustomConfigText(
+      JSON.stringify({ custom_flag: { nested: { a: 1 } }, custom_num: 7 })
+    );
+
+    await clickSubmit();
+
+    expect(API.put).toHaveBeenCalledTimes(1);
+    const submitPayload = API.put.mock.calls[0][1];
+    // 提交侧 config 是 JSON 字符串。
+    expect(typeof submitPayload.config).toBe('string');
+
+    await clickFetchModels();
+
+    expect(API.post).toHaveBeenCalledTimes(1);
+    const fetchPayload = API.post.mock.calls[0][1];
+    // 拉取侧 config 是对象（不是 JSON 字符串）。
+    expect(typeof fetchPayload.config).toBe('object');
+    expect(fetchPayload.config).not.toBeNull();
+
+    // 两处产出深相等（系统键 + 请求头键 + 扩展键）。
+    expect(fetchPayload.config).toEqual(JSON.parse(submitPayload.config));
+    expect(fetchPayload.config.region).toBe('us-east-1');
+    expect(fetchPayload.config[KEY]).toEqual({ Authorization: 'Bearer secret' });
+    expect(fetchPayload.config.custom_flag).toEqual({ nested: { a: 1 } });
+  });
+
+  it('sends a config field in the fetch models payload', async () => {
+    mockDescriptor = descriptorWith({
+      supports_custom_headers: true,
+      custom_headers_key: KEY,
+    });
+    mockChannelData = channelResponse('{}');
+
+    await renderPage();
+
+    await clickFetchModels();
+
+    expect(API.post).toHaveBeenCalledTimes(1);
+    const [url, payload] = API.post.mock.calls[0];
+    expect(url).toBe('/api/channel/fetch_models');
+    // 任务 4.3：拉取 payload 必须携带 config 字段，且为对象。
+    expect(Object.prototype.hasOwnProperty.call(payload, 'config')).toBe(true);
+    expect(payload.config).toEqual(expect.any(Object));
+    // 既有 payload 字段保持不变（编辑态：channel_id + base_url）。
+    expect(payload.channel_id).toBe(1);
+    expect(Object.prototype.hasOwnProperty.call(payload, 'base_url')).toBe(true);
+  });
+
+  it('does NOT fetch models when the config is invalid or conflicting', async () => {
+    // 非法 JSON：不发请求，沿用既有报错。
+    mockDescriptor = descriptorWith({
+      supports_custom_headers: true,
+      custom_headers_key: KEY,
+    });
+    mockChannelData = channelResponse('{}');
+
+    await renderPage();
+
+    showError.mockClear();
+    await changeCustomConfigText('{not valid json');
+    await clickFetchModels();
+
+    expect(showError).toHaveBeenCalledWith(INVALID_JSON_ERROR_KEY);
+    expect(API.post).not.toHaveBeenCalled();
+
+    // 冲突键：同样不发请求，并显式把冲突键传给 t。
+    await remountPage();
+    mockDescriptor = descriptorWith({
+      supports_custom_headers: true,
+      custom_headers_key: KEY,
+    });
+    mockChannelData = channelResponse('{}');
+
+    await renderPage();
+
+    showError.mockClear();
+    mockT.mockClear();
+    await changeCustomConfigText(JSON.stringify({ [KEY]: 'evil' }));
+    await clickFetchModels();
+
+    expect(mockT).toHaveBeenCalledWith(CONFLICT_ERROR_KEY, { key: KEY });
+    expect(showError).toHaveBeenCalledWith(CONFLICT_ERROR_KEY);
+    expect(API.post).not.toHaveBeenCalled();
   });
 });

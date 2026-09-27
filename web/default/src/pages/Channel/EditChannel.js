@@ -557,6 +557,93 @@ const EditChannel = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 组装并校验「提交 / 拉取模型」共用的最终 config 对象（单一真源，避免两处语义漂移）。
+  // 返回 null 表示校验失败：错误已由 showError 提示，调用方必须直接中止且不发任何请求。
+  const buildLocalConfig = () => {
+    // 提交前清洗自定义请求头：剔除空名条目，空对象则删除该字段，避免写入无意义配置。
+    const localConfig = { ...config };
+    // 自定义配置编辑器：空白文本等价于空对象，即清空编辑器会删除全部旧扩展键。
+    const trimmedCustomConfig = customConfigText.trim();
+    let parsedCustomConfig = {};
+    if (trimmedCustomConfig !== '') {
+      try {
+        parsedCustomConfig = JSON.parse(trimmedCustomConfig);
+      } catch (e) {
+        showError(t('channel.edit.custom_config.invalid_json'));
+        return null;
+      }
+    }
+    if (
+      parsedCustomConfig === null ||
+      typeof parsedCustomConfig !== 'object' ||
+      Array.isArray(parsedCustomConfig)
+    ) {
+      showError(t('channel.edit.custom_config.not_object'));
+      return null;
+    }
+    // 关于 __proto__ / constructor / prototype 等特殊键名的取舍：选择「安全承载」而非「拒绝」。
+    // JSON.parse 产出的是普通对象，__proto__ 在解析结果里是自有属性，编辑器文本可完整承载并往返；
+    // 真正的丢键发生在写回环节（Object.assign / 普通赋值会触发原型 setter），因此下面一律用
+    // defineProperty 按自有属性写入。拒绝方案会与「编辑器完整拥有扩展键、清空即删除」的所有权
+    // 语义冲突，且需在载入与提交两处各自报错，代价更高；承载方案无额外 UI 文案、行为更一致。
+    const parsedCustomKeys = Object.keys(parsedCustomConfig);
+    // 编辑器不得写入的「他方拥有键」= 载入时被排除的专属键 ∪ 当前类型声明的请求头键。
+    // 取并集而非二选一：前者修复「切换类型后原专属键被静默删除/被编辑器接管」，后者保证
+    // 新建渠道（无载入 config，editorExcludedKeys 为空）时手写请求头键仍被冲突校验拦截。
+    const ownedConfigKeys = Array.from(
+      new Set([
+        ...editorExcludedKeys,
+        ...(customHeadersKey !== '' ? [customHeadersKey] : []),
+      ])
+    );
+    const conflictingKey = parsedCustomKeys.find(
+      (key) =>
+        SYSTEM_CONFIG_KEYS.includes(key) || ownedConfigKeys.includes(key)
+    );
+    if (conflictingKey !== undefined) {
+      showError(
+        t('channel.edit.custom_config.conflict', { key: conflictingKey })
+      );
+      return null;
+    }
+    // 先删除旧扩展键是为了实现编辑器完整所有权和清空即删除语义：
+    // 系统键与 ownedConfigKeys 归既有专属表单所有，其余键全部由本编辑器接管。
+    Object.keys(localConfig).forEach((key) => {
+      if (SYSTEM_CONFIG_KEYS.includes(key)) return;
+      if (ownedConfigKeys.includes(key)) return;
+      delete localConfig[key];
+    });
+    // 用 defineProperty 逐键写入而非 Object.assign：键名可能字面为 __proto__，
+    // assign 会触发原型 setter 而丢弃该键（无法往返）。defineProperty 按自有属性写入。
+    parsedCustomKeys.forEach((key) => {
+      Object.defineProperty(localConfig, key, {
+        value: parsedCustomConfig[key],
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    });
+    if (supportsCustomHeaders) {
+      const headers = {};
+      customHeaders.forEach((row) => {
+        const name = row.name.trim();
+        if (name === '') return;
+        // 名称非空即写入；取值为空串也照常写入（headers[name] = ''），
+        // 后端据此走 value == "" 分支执行 Header.Del，真实删除该内置头（「留空=不发送」）。
+        headers[name] = row.value;
+      });
+      localConfig[customHeadersKey] = headers;
+    }
+    if (
+      localConfig[customHeadersKey] &&
+      typeof localConfig[customHeadersKey] === 'object' &&
+      Object.keys(localConfig[customHeadersKey]).length === 0
+    ) {
+      delete localConfig[customHeadersKey];
+    }
+    return localConfig;
+  };
+
   const submit = async () => {
     // config 未能成功解析时禁止提交，防止用默认值覆盖库中原始配置
     if (configLoadFailed) {
@@ -605,86 +692,10 @@ const EditChannel = () => {
     let res;
     localInputs.models = localInputs.models.join(',');
     localInputs.group = localInputs.groups.join(',');
-    // 提交前清洗自定义请求头：剔除空名条目，空对象则删除该字段，避免写入无意义配置。
-    const localConfig = { ...config };
-    // 自定义配置编辑器：空白文本等价于空对象，即清空编辑器会删除全部旧扩展键。
-    const trimmedCustomConfig = customConfigText.trim();
-    let parsedCustomConfig = {};
-    if (trimmedCustomConfig !== '') {
-      try {
-        parsedCustomConfig = JSON.parse(trimmedCustomConfig);
-      } catch (e) {
-        showError(t('channel.edit.custom_config.invalid_json'));
-        return;
-      }
-    }
-    if (
-      parsedCustomConfig === null ||
-      typeof parsedCustomConfig !== 'object' ||
-      Array.isArray(parsedCustomConfig)
-    ) {
-      showError(t('channel.edit.custom_config.not_object'));
+    const localConfig = buildLocalConfig();
+    if (localConfig === null) {
+      // 校验失败：错误已提示，直接中止（不发请求）。
       return;
-    }
-    // 关于 __proto__ / constructor / prototype 等特殊键名的取舍：选择「安全承载」而非「拒绝」。
-    // JSON.parse 产出的是普通对象，__proto__ 在解析结果里是自有属性，编辑器文本可完整承载并往返；
-    // 真正的丢键发生在写回环节（Object.assign / 普通赋值会触发原型 setter），因此下面一律用
-    // defineProperty 按自有属性写入。拒绝方案会与「编辑器完整拥有扩展键、清空即删除」的所有权
-    // 语义冲突，且需在载入与提交两处各自报错，代价更高；承载方案无额外 UI 文案、行为更一致。
-    const parsedCustomKeys = Object.keys(parsedCustomConfig);
-    // 编辑器不得写入的「他方拥有键」= 载入时被排除的专属键 ∪ 当前类型声明的请求头键。
-    // 取并集而非二选一：前者修复「切换类型后原专属键被静默删除/被编辑器接管」，后者保证
-    // 新建渠道（无载入 config，editorExcludedKeys 为空）时手写请求头键仍被冲突校验拦截。
-    const ownedConfigKeys = Array.from(
-      new Set([
-        ...editorExcludedKeys,
-        ...(customHeadersKey !== '' ? [customHeadersKey] : []),
-      ])
-    );
-    const conflictingKey = parsedCustomKeys.find(
-      (key) =>
-        SYSTEM_CONFIG_KEYS.includes(key) || ownedConfigKeys.includes(key)
-    );
-    if (conflictingKey !== undefined) {
-      showError(
-        t('channel.edit.custom_config.conflict', { key: conflictingKey })
-      );
-      return;
-    }
-    // 先删除旧扩展键是为了实现编辑器完整所有权和清空即删除语义：
-    // 系统键与 ownedConfigKeys 归既有专属表单所有，其余键全部由本编辑器接管。
-    Object.keys(localConfig).forEach((key) => {
-      if (SYSTEM_CONFIG_KEYS.includes(key)) return;
-      if (ownedConfigKeys.includes(key)) return;
-      delete localConfig[key];
-    });
-    // 用 defineProperty 逐键写入而非 Object.assign：键名可能字面为 __proto__，
-    // assign 会触发原型 setter 而丢弃该键（无法往返）。defineProperty 按自有属性写入。
-    parsedCustomKeys.forEach((key) => {
-      Object.defineProperty(localConfig, key, {
-        value: parsedCustomConfig[key],
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    });
-    if (supportsCustomHeaders) {
-      const headers = {};
-      customHeaders.forEach((row) => {
-        const name = row.name.trim();
-        if (name === '') return;
-        // 名称非空即写入；取值为空串也照常写入（headers[name] = ''），
-        // 后端据此走 value == "" 分支执行 Header.Del，真实删除该内置头（「留空=不发送」）。
-        headers[name] = row.value;
-      });
-      localConfig[customHeadersKey] = headers;
-    }
-    if (
-      localConfig[customHeadersKey] &&
-      typeof localConfig[customHeadersKey] === 'object' &&
-      Object.keys(localConfig[customHeadersKey]).length === 0
-    ) {
-      delete localConfig[customHeadersKey];
     }
     localInputs.config = JSON.stringify(localConfig);
     if (isEdit) {
@@ -731,12 +742,20 @@ const EditChannel = () => {
   };
 
   const fetchModelsFromBaseURL = async () => {
+    // 拉取与提交共用同一份 config 组装：校验失败时错误已提示，直接中止且不发请求。
+    const localConfig = buildLocalConfig();
+    if (localConfig === null) {
+      return;
+    }
     // 先记录当前已选中的模型
     const prevSelectedModels = inputs.models;
     setFetchingModels(true);
     try {
       let payload = {
         channel_type: inputs.type,
+        // 拉取请求携带对象形式的 config（提交才用 JSON 字符串）：让渠道专属拉取能力
+        // 感知编辑页尚未保存的 config 改动；后端优先级为「请求 config > DB 渠道 config」。
+        config: localConfig,
       };
       if (isEdit) {
         // 编辑渠道：传 channel_id，后端从 DB 取 key 和 base_url

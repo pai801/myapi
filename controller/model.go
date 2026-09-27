@@ -3,8 +3,10 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -165,6 +167,10 @@ func appendModelsForAPIType(apiType int) {
 // buildChannelId2Models 构建 channelType -> 模型清单映射。
 // 覆盖内置渠道（1 .. Dummy-1）与注册表登记的扩展渠道（内置范围之外），
 // 使扩展渠道在渠道编辑的默认模型下拉中可见，而无需本仓登记任何具体扩展渠道。
+//
+// 该映射**仅用于界面展示与候选**（渠道编辑的默认模型下拉 / DashboardListModels）。
+// 它 MUST NOT 被当作出站请求的模型准入白名单：出站路径不得以「模型不在本清单内」为由
+// 在本地拒绝合法模型，模型合法性由上游裁决。清单陈旧只影响展示，不得成为拒绝合法模型的理由。
 func buildChannelId2Models() {
 	channelId2Models = make(map[int][]string)
 	for i := 1; i < channeltype.Dummy; i++ { // 内置范围（行为逐字不变）
@@ -335,6 +341,9 @@ type FetchModelsRequest struct {
 	Key         string `json:"key"`
 	ChannelID   int    `json:"channel_id"`
 	ChannelType int    `json:"channel_type"`
+	// Config 为可选的渠道配置（原始 JSON）。向后兼容：既有调用方不传时该字段为 nil，
+	// 后端回落到渠道记录中已保存的配置（见 FetchChannelModels 的解析优先级）。
+	Config json.RawMessage `json:"config"`
 }
 
 type openAIModelListResponse struct {
@@ -352,7 +361,11 @@ type openAIModelItem struct {
 // FetchChannelModels 从上游拉取模型列表。
 // 编辑渠道时传 channel_id（后端从 DB 取 key）；新增渠道时传 key。
 // base_url 优先用请求值，空则回退到 channeltype.ChannelBaseURLs。
-// 先尝试 {base_url}/v1/models，若返回非 2xx 则回退到 {base_url}/models。
+//
+// 分派：先按 channel_type 解析适配器，若其实现了可选能力 adaptor.ModelLister，
+// 则把请求委托给渠道自身的拉取实现（成功以渠道返回值为准，失败直接返回明确错误、
+// 不回退）；否则走通用 OpenAI 兼容回退路径：先尝试 {base_url}/v1/models，
+// 若返回非 2xx 则回退到 {base_url}/models。base_url 必填校验只约束通用回退分支。
 func FetchChannelModels(c *gin.Context) {
 	var req FetchModelsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -363,22 +376,50 @@ func FetchChannelModels(c *gin.Context) {
 		return
 	}
 
-	// —— 确定 key ——
-	apiKey := req.Key
-	if len(apiKey) == 0 && req.ChannelID > 0 {
-		channel, err := model.GetChannelById(req.ChannelID, true) // selectAll=true 包含 key
-		if err != nil {
-			logger.Log.Errorf("fetch models: failed to get channel %d: %v", req.ChannelID, err)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"success": false,
-				"message": "failed to get channel: " + err.Error(),
-			})
-			return
-		}
-		apiKey = channel.Key
+	// —— 分派判断先行于 base_url 必填门（设计 D3）——
+	// 先解析渠道适配器并判定其是否实现可选的 ModelLister 能力，再决定是否施加 base_url 必填约束：
+	// 实现能力的渠道即使 base_url 为空也 MUST NOT 返回 400（渠道按其声明默认基址回落，与推理路径同口径）。
+	apiType := channeltype.ToAPIType(req.ChannelType)
+	adp := relay.GetAdaptor(apiType)
+	var lister adaptor.ModelLister
+	if adp != nil {
+		// 仅在 adp 非 nil 时做类型断言：adp == nil（未注册 apiType）安全走通用回退，不 panic。
+		lister, _ = adp.(adaptor.ModelLister)
 	}
 
-	// —— 确定 base_url ——
+	// —— 确定 key 与 config ——
+	apiKey := req.Key
+	var channel *model.Channel
+	// 需要 channel 的两种情形：取 key（请求未提供 key）或取 config（仅渠道能力分支需要，
+	// 且请求未携带 config）。二者共用一次加载，避免重复读库。
+	//
+	// 关键：通用回退分支（lister == nil）**不**为 config 加载 channel，故其读库行为与改造前
+	// 逐字节一致（仅在请求未提供 key 时读一次），既有日志与错误文案均不受影响。
+	needKey := apiKey == ""
+	needConfig := lister != nil && req.Config == nil
+	if req.ChannelID > 0 && (needKey || needConfig) {
+		ch, err := model.GetChannelById(req.ChannelID, true) // selectAll=true 包含 key
+		if err != nil {
+			if needKey {
+				// 取 key 失败：保持既有 400 语义（逐字节不变）。
+				logger.Log.Errorf("fetch models: failed to get channel %d: %v", req.ChannelID, err)
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"message": "failed to get channel: " + err.Error(),
+				})
+				return
+			}
+			// 仅因取 config 失败：记 warn 并以零值 config 继续，绝不因此让原本能成功的请求失败。
+			logger.Log.Warnf("fetch models: failed to get channel %d for config, falling back to empty config: %v", req.ChannelID, err)
+		} else {
+			channel = ch
+			if needKey {
+				apiKey = ch.Key
+			}
+		}
+	}
+
+	// —— 确定 base_url（解析后的值，可为空；供 meta 与通用回退共用）——
 	baseURL := strings.TrimRight(req.BaseURL, "/")
 	if baseURL == "" {
 		// 用存在性判断而非 `ChannelType < len(map)`：ChannelBaseURLs 的键由内置渠道与
@@ -388,6 +429,53 @@ func FetchChannelModels(c *gin.Context) {
 			baseURL = strings.TrimRight(base, "/")
 		}
 	}
+
+	// —— 渠道实现专属拉取能力：委托并直接返回，成功不回退、失败也不回退（设计 D4）——
+	if lister != nil {
+		m := &meta.Meta{
+			ChannelType: req.ChannelType,
+			ChannelId:   req.ChannelID,
+			BaseURL:     baseURL,
+			APIKey:      apiKey,
+			Config:      resolveFetchModelsConfig(req.Config, channel),
+		}
+		m.APIType = apiType
+		adp.Init(m)
+
+		ids, err := lister.FetchModels(c.Request.Context(), m)
+		if err != nil {
+			reason := classifyModelListerError(err)
+			channelName := adp.GetChannelName()
+			if channelName == "" {
+				channelName = fmt.Sprintf("channel type %d", req.ChannelType)
+			}
+			// 上游原始错误只进服务端日志（截断后），绝不回显到响应文案：原文可能含上游
+			// body 或渠道凭证。响应只暴露受控的归类原因与渠道名。
+			logger.Log.Errorf("fetch models: channel %d (%s) ModelLister failed (%s): %s",
+				req.ChannelID, channelName, reason, truncateBody([]byte(err.Error()), 1024))
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("渠道 %s 拉取模型失败：%s", channelName, reason),
+			})
+			return
+		}
+		// 归一责任在渠道侧：controller 只过滤空串，不 trim、不去重、不排序。
+		// nil 结果须序列化为 []（而非 null），故预分配空切片。
+		data := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if id != "" {
+				data = append(data, id)
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "",
+			"data":    data,
+		})
+		return
+	}
+
+	// —— 通用回退：base_url 必填门只在此分支内生效（设计 D3）——
 	if baseURL == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -487,6 +575,87 @@ func truncateBody(body []byte, maxLen int) string {
 		return string(body)
 	}
 	return string(body[:maxLen]) + fmt.Sprintf("... (truncated %d more bytes)", len(body)-maxLen)
+}
+
+// resolveFetchModelsConfig 按设计 D5 的优先级解析提供给渠道能力的配置：
+//  1. 请求携带 config（json.RawMessage 非 nil）→ 用请求值；
+//  2. 否则 channel 已加载 → 用 channel.LoadConfig()；
+//  3. 否则零值。
+//
+// 请求值路径复用 Channel.LoadConfig 的 JSON→ChannelConfig 口径（含 Raw 全量键视图），
+// 而**不是** json.Unmarshal(req.Config, &cfg)——后者不会填充 Raw，会与推理路径看到的
+// 配置结构分叉。用 (&model.Channel{Config: string(req.Config)}) 承载同一段 JSON，
+// 即复用同一份解析逻辑。
+//
+// 已拍板语义：显式 `config: null`（RawMessage 为字面 "null" 且非 nil）视为「已提供」，
+// 按 LoadConfig 对 JSON null 的口径得零值（typed 字段零值、Raw 为 nil），**不回落数据库**。
+// 只有字段缺失（RawMessage 为 nil）才回落。
+func resolveFetchModelsConfig(raw json.RawMessage, channel *model.Channel) model.ChannelConfig {
+	if raw != nil {
+		cfg, err := (&model.Channel{Config: string(raw)}).LoadConfig()
+		if err != nil {
+			// 请求 config 非法 JSON：以零值继续（与 LoadConfig 的降级口径一致），仅记 warn。
+			logger.Log.Warnf("fetch models: failed to parse request config, falling back to empty config: %v", err)
+		}
+		return cfg
+	}
+	if channel != nil {
+		cfg, err := channel.LoadConfig()
+		if err != nil {
+			// 与推理路径 SetupContextForSelectedChannel 一致：忽略错误、以零值继续。
+			logger.Log.Warnf("fetch models: failed to load config for channel %d, falling back to empty config: %v", channel.Id, err)
+		}
+		return cfg
+	}
+	return model.ChannelConfig{}
+}
+
+// 渠道拉取能力失败时的受控归类文案（MUST NOT 回显 err.Error() 的原始内容，原文可能含
+// 上游 body 或渠道凭证）。原文只进服务端日志（见 FetchChannelModels 的 truncateBody 用法）。
+const (
+	modelListerReasonAuth     = "鉴权失败"
+	modelListerReasonNetwork  = "网络错误"
+	modelListerReasonUpstream = "上游业务错误"
+	modelListerReasonParse    = "解析失败"
+	modelListerReasonOther    = "其它错误"
+)
+
+func classifyModelListerError(err error) string {
+	if err == nil {
+		return modelListerReasonOther
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return modelListerReasonNetwork
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return modelListerReasonNetwork
+	}
+	// 文本 marker 兜底分类：仅用于选文案，不外泄原文。
+	text := strings.ToLower(err.Error())
+	switch {
+	case containsAnyMarker(text, "unauthorized", "forbidden", "invalid api key", "invalid_api_key",
+		"authentication", "permission denied", "鉴权", "无权"):
+		return modelListerReasonAuth
+	case containsAnyMarker(text, "timeout", "timed out", "connection refused", "connection reset",
+		"no such host", "network", "eof", "网络", "超时"):
+		return modelListerReasonNetwork
+	case containsAnyMarker(text, "unmarshal", "parse", "malformed", "invalid character", "解析"):
+		return modelListerReasonParse
+	case containsAnyMarker(text, "business", "upstream error", "upstream_error", "业务", "上游"):
+		return modelListerReasonUpstream
+	}
+	return modelListerReasonOther
+}
+
+// containsAnyMarker 判定 s 是否包含任一 marker。
+func containsAnyMarker(s string, markers ...string) bool {
+	for _, m := range markers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // getAllGroupsModels 返回所有分组模型的并集（用于管理员视角的模型可见性）。
