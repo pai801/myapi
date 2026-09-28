@@ -31,10 +31,16 @@ jest.mock('../helpers', () => ({
   timestamp2string: jest.fn(),
 }));
 
-jest.mock('../helpers/channelDescriptor', () => ({
-  buildChannelOptions: jest.fn(),
-  loadChannelDescriptors: jest.fn(),
-}));
+jest.mock('../helpers/channelDescriptor', () => {
+  // 保留真实 findDescriptor（纯函数），使 descriptor 路径被真实驱动；
+  // 仅 mock 有副作用的 buildChannelOptions / loadChannelDescriptors。
+  const actual = jest.requireActual('../helpers/channelDescriptor');
+  return {
+    ...actual,
+    buildChannelOptions: jest.fn(),
+    loadChannelDescriptors: jest.fn(),
+  };
+});
 
 jest.mock('../helpers/render', () => ({
   renderGroup: jest.fn(),
@@ -48,6 +54,8 @@ import {
   buildChannelOptions,
   loadChannelDescriptors,
 } from '../helpers/channelDescriptor';
+// eslint-disable-next-line import/first
+import { renderNumber } from '../helpers/render';
 // eslint-disable-next-line import/first
 import ChannelsTable from './ChannelsTable';
 
@@ -245,5 +253,104 @@ describe('ChannelsTable copy action', () => {
     expect(showError).toHaveBeenCalledWith(COPY_FAILED_KEY);
     expect(copy).not.toHaveBeenCalled();
     expect(showSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChannelsTable balance rendering', () => {
+  let container;
+  let root;
+
+  // 行内单元格顺序：id/name/group/type/status/response_time/balance/…
+  const BALANCE_CELL_INDEX = 6;
+
+  function channelRow(overrides) {
+    return { ...listRow, ...overrides };
+  }
+
+  function descriptor(type, supportsBalance) {
+    return {
+      channel_type: type,
+      name: '扩展渠道',
+      capabilities: { supports_balance: supportsBalance },
+    };
+  }
+
+  function mockChannels(row) {
+    API.get.mockImplementation((url) => {
+      if (url === '/api/channel/?p=0') {
+        return Promise.resolve({
+          data: { success: true, message: '', data: [row] },
+        });
+      }
+      return Promise.resolve({ data: { success: true, message: '', data: [] } });
+    });
+  }
+
+  beforeEach(() => {
+    buildChannelOptions.mockImplementation(() => []);
+    loadChannelModels.mockImplementation(() => Promise.resolve([]));
+    loadChannelDescriptors.mockImplementation(() => Promise.resolve([]));
+    // CRA 开启 resetMocks，工厂内实现的 mock 会被重置；这里显式恢复数值直通实现。
+    renderNumber.mockImplementation((n) => n);
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  async function renderPage() {
+    await act(async () => {
+      root.render(<ChannelsTable />);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+
+  function balanceText() {
+    const cell = container.querySelectorAll('td')[BALANCE_CELL_INDEX];
+    return cell ? cell.textContent : '';
+  }
+
+  it('renders numeric points without a currency symbol when supports_balance is true', async () => {
+    mockChannels(channelRow({ type: 1, balance: 8888 }));
+    loadChannelDescriptors.mockImplementation(() =>
+      Promise.resolve([descriptor(1, true)])
+    );
+
+    await renderPage();
+
+    const text = balanceText();
+    expect(text).toContain('8888');
+    // 积分展示：绝无货币符号，也不落入内置 switch 的「不支持」兜底。
+    expect(text).not.toContain('$');
+    expect(text).not.toContain('¥');
+    expect(text).not.toBe('channel.table.balance_not_supported');
+  });
+
+  it('falls back to the built-in switch when supports_balance is false', async () => {
+    mockChannels(channelRow({ type: 1, balance: 12.5 }));
+    loadChannelDescriptors.mockImplementation(() =>
+      Promise.resolve([descriptor(1, false)])
+    );
+
+    await renderPage();
+
+    // 内置 OpenAI(type 1) 分支逐字保留：$ + toFixed(2)。
+    expect(balanceText()).toBe('$12.50');
+  });
+
+  it('falls back to the built-in switch when the descriptor is not loaded yet', async () => {
+    mockChannels(channelRow({ type: 1, balance: 12.5 }));
+    loadChannelDescriptors.mockImplementation(() => Promise.resolve([]));
+
+    await renderPage();
+
+    expect(balanceText()).toBe('$12.50');
   });
 });

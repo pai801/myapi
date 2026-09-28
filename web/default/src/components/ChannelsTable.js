@@ -17,6 +17,7 @@ import {
 import {ITEMS_PER_PAGE} from '../constants';
 import {
   buildChannelOptions,
+  findDescriptor,
   loadChannelDescriptors,
 } from '../helpers/channelDescriptor';
 import {renderGroup, renderNumber} from '../helpers/render';
@@ -59,7 +60,13 @@ function renderType(type, t, type2label) {
   );
 }
 
-function renderBalance(type, balance, t) {
+// renderBalance 渲染渠道余额格。descriptor 为后端下发的渠道清单项：当且仅当
+// capabilities.supports_balance === true 时按「积分」直接显示数值（无货币符号），
+// 其余情况回退既有内置 switch。前端不含任何私有渠道类型/名称硬编码。
+function renderBalance(type, balance, t, descriptor) {
+  if (descriptor?.capabilities?.supports_balance === true) {
+    return <span>{renderNumber(balance)}</span>;
+  }
   switch (type) {
     case 1: // OpenAI
         if (balance === 0) {
@@ -666,7 +673,12 @@ const ChannelsTable = () => {
                           }}
                           style={{ cursor: 'pointer' }}
                         >
-                          {renderBalance(channel.type, channel.balance, t)}
+                          {renderBalance(
+                            channel.type,
+                            channel.balance,
+                            t,
+                            findDescriptor(descriptors, channel.type)
+                          )}
                         </span>
                       }
                       content={t('channel.table.click_to_update')}

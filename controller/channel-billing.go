@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +15,10 @@ import (
 	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/monitor"
+	"github.com/pai801/myapi/relay"
+	"github.com/pai801/myapi/relay/adaptor"
 	"github.com/pai801/myapi/relay/channeltype"
+	"github.com/pai801/myapi/relay/meta"
 
 	"github.com/gin-gonic/gin"
 )
@@ -308,10 +312,59 @@ func updateChannelOpenRouterBalance(channel *model.Channel) (float64, error) {
 	return balance, nil
 }
 
+// channelBalanceQueryTimeout 约束渠道余额查询能力的单次调用时长。
+// updateChannelBalance 的签名没有 context，调用方可能是后台批量任务，
+// 故用 context.Background() 派生一个有界超时，避免上游无响应时永久挂起。
+const channelBalanceQueryTimeout = 30 * time.Second
+
 func updateChannelBalance(channel *model.Channel) (float64, error) {
 	baseURL := channeltype.ChannelBaseURLs[channel.Type]
 	if channel.GetBaseURL() == "" {
 		channel.BaseURL = &baseURL
+	}
+	// —— 可选能力分派先行于既有 switch（设计 A2）——
+	// 按渠道类型解析适配器并判定其是否实现可选的 adaptor.BalanceQuerier：
+	// 命中则委托渠道自身实现查询，未命中则维持既有内置 switch 语义不变。
+	// 本分支刻意保持无副作用：不依赖上方 legacy 的 channel.BaseURL 改写，基址显式计算。
+	apiType := channeltype.ToAPIType(channel.Type)
+	adp := relay.GetAdaptor(apiType)
+	var querier adaptor.BalanceQuerier
+	if adp != nil {
+		// 仅在 adp 非 nil 时做类型断言：adp == nil（未注册 apiType）安全落回 switch，不 panic。
+		querier, _ = adp.(adaptor.BalanceQuerier)
+	}
+	if querier != nil {
+		// 有效基址：渠道配置值优先，空则回落内置默认基址（与模型拉取分派同口径）。
+		effectiveBaseURL := channel.GetBaseURL()
+		if effectiveBaseURL == "" {
+			effectiveBaseURL = channeltype.ChannelBaseURLs[channel.Type]
+		}
+		// Config 经 LoadConfig 解析以填充 Raw 全量键视图；解析失败按零值继续并记 warn
+		// （与 SetupContextForSelectedChannel / resolveFetchModelsConfig 的降级口径一致）。
+		cfg, err := channel.LoadConfig()
+		if err != nil {
+			logger.Log.Warnf("update balance: failed to load config for channel %d, falling back to empty config: %v", channel.Id, err)
+		}
+		m := &meta.Meta{
+			ChannelType: channel.Type,
+			ChannelId:   channel.Id,
+			APIType:     apiType,
+			BaseURL:     effectiveBaseURL,
+			APIKey:      channel.Key,
+			Config:      cfg,
+		}
+		adp.Init(m)
+
+		ctx, cancel := context.WithTimeout(context.Background(), channelBalanceQueryTimeout)
+		defer cancel()
+		balance, err := querier.QueryBalance(ctx, m)
+		if err != nil {
+			// 失败不落库；错误文案由渠道实现负责脱敏（不得含密钥/凭证）。
+			return 0, err
+		}
+		// 落库唯一入口：仅在 controller 侧写入余额两列，渠道实现不碰 DB。
+		channel.UpdateBalance(balance)
+		return balance, nil
 	}
 	switch channel.Type {
 	case channeltype.OpenAI:
