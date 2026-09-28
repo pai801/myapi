@@ -36,6 +36,10 @@ type Capabilities struct {
 	// 消费方 MUST NOT 将其解释为出站请求的模型准入开关。
 	SupportsModelList bool `json:"supports_model_list"`
 	// SupportsTest 该渠道是否支持连通性测试。
+	//
+	// 语义仅为「该渠道是否支持连通性测试」的**纯前端提示元数据**，供前端渲染测试入口。
+	// Go 侧的能力发现以适配器是否实现可选接口 adaptor.Tester 为唯一依据（类型断言，
+	// 接口存在性即能力），MUST NOT 依据本能力位做行为分支，MUST NOT 作为 Go 侧的第二真源。
 	SupportsTest bool `json:"supports_test"`
 	// SupportsCustomHeaders 该渠道是否支持自定义出站请求头。
 	// 前端据此渲染「通用请求头编辑器」，从而不在前端写渠道专属分支。

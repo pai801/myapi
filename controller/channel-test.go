@@ -25,6 +25,7 @@ import (
 	"github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/monitor"
 	"github.com/pai801/myapi/relay"
+	"github.com/pai801/myapi/relay/adaptor"
 	"github.com/pai801/myapi/relay/adaptor/openai"
 	"github.com/pai801/myapi/relay/channeltype"
 	"github.com/pai801/myapi/relay/controller"
@@ -75,6 +76,19 @@ func formatFailureResponseBody(statusCode int, body []byte) []byte {
 	return result
 }
 
+// testerFor 对已注册适配器做可选的 adaptor.Tester 能力发现：接口存在性即能力发现。
+//
+// 抽为独立函数而非在 testChannel 内联断言，原因有二：其一，testChannel 内的局部变量
+// adaptor 会遮蔽包名 adaptor，无法直接书写 adaptor.Tester；其二，此处是「测试能力发现」
+// 的唯一真源，便于审计与复用。adp == nil 时安全返回 false（调用方此前已返回既有错误）。
+func testerFor(adp adaptor.Adaptor) (adaptor.Tester, bool) {
+	if adp == nil {
+		return nil, false
+	}
+	tester, ok := adp.(adaptor.Tester)
+	return tester, ok
+}
+
 func testChannel(ctx context.Context, channel *model.Channel, request *relaymodel.GeneralOpenAIRequest) (responseMessage string, err error, openaiErr *relaymodel.Error) {
 	startTime := time.Now()
 	w := httptest.NewRecorder()
@@ -112,6 +126,35 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 	}
 	meta.OriginModelName, meta.ActualModelName = request.Model, modelName
 	request.Model = modelName
+	// —— 可选能力分派：接口存在性即能力发现（见 relay/adaptor/tester.go）——
+	// 仅当适配器实现可选的 adaptor.Tester 时，才把连通性测试委托给渠道自身的 TestChannel，
+	// 不再走 ConvertRequest / DoRequest / DoResponse / parseTestResponse 的通用约定。
+	// 未实现该接口的渠道保持下方通用流程逐字节不变；adp == nil 已在更早处返回既有错误。
+	// 测试日志归属 controller：命中委托分支时此处补记唯一一条日志后返回，
+	// 渠道实现 MUST NOT 自行落库；日志形状与通用路径一致（Content 沿用成功/失败文案）。
+	if tester, ok := testerFor(adaptor); ok {
+		summary, testErr := tester.TestChannel(ctx, meta)
+		logContent := fmt.Sprintf("渠道 %s 测试成功，响应：%s", channel.Name, summary)
+		responseBody := summary
+		if testErr != nil {
+			// 失败只回传渠道受控的 err（实现方负责脱敏，不得含密钥/凭证/上游原文）；
+			// 不落上游原文，故 ResponseBody 置空。
+			logContent = fmt.Sprintf("渠道 %s 测试失败，错误：%s", channel.Name, testErr.Error())
+			responseBody = ""
+		}
+		model.RecordTestLog(ctx, &model.Log{
+			ChannelId:    channel.Id,
+			ModelName:    modelName,
+			Content:      logContent,
+			ElapsedTime:  helper.CalcElapsedTime(startTime),
+			RequestBody:  "",
+			ResponseBody: responseBody,
+		})
+		if testErr != nil {
+			return "", testErr, nil
+		}
+		return summary, nil, nil
+	}
 	convertedRequest, err := adaptor.ConvertRequest(c, relaymode.ChatCompletions, request)
 	if err != nil {
 		return "", err, nil

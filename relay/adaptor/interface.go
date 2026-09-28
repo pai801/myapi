@@ -8,6 +8,13 @@ import (
 	"net/http"
 )
 
+// Adaptor 是渠道适配器的必选九方法接口。
+//
+// 注意：本接口**不含** SupportsTest 成员。渠道「是否支持连通性测试」等可选能力，
+// Go 侧一律以**可选接口的存在性**（类型断言）为唯一依据发现——如 Tester（见 tester.go）、
+// ResponseSemantics（见 responsesemantics.go）、ModelLister（见 modellister.go）、
+// BalanceQuerier（见 balancequerier.go）。chandesc.Capabilities.SupportsTest 仅为纯前端
+// 提示元数据，MUST NOT 作为 Go 侧行为分支依据，也 MUST NOT 被并入本接口。
 type Adaptor interface {
 	Init(meta *meta.Meta)
 	GetRequestURL(meta *meta.Meta) (string, error)

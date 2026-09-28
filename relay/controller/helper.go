@@ -15,7 +15,9 @@ import (
 	"github.com/pai801/myapi/common/helper"
 	"github.com/pai801/myapi/common/logger"
 	"github.com/pai801/myapi/model"
+	"github.com/pai801/myapi/relay"
 	"github.com/pai801/myapi/relay/active"
+	"github.com/pai801/myapi/relay/adaptor"
 	"github.com/pai801/myapi/relay/adaptor/openai"
 	billingratio "github.com/pai801/myapi/relay/billing/ratio"
 	"github.com/pai801/myapi/relay/channeltype"
@@ -275,6 +277,15 @@ func getMappedModelName(modelName string, mapping map[string]string) (string, bo
 }
 
 func isErrorHappened(meta *meta.Meta, resp *http.Response) bool {
+	// 能力分派：按 meta.APIType 解析渠道适配器，若其实现了可选的 ResponseSemantics，
+	// 则以其 IsUpstreamError 为准。adp 为 nil（未注册）或未实现该能力时，安全回落到
+	// 下方既有默认逻辑，逐字节不变（见 relay/adaptor/responsesemantics.go 契约注释）。
+	adp := relay.GetAdaptor(meta.APIType)
+	if adp != nil {
+		if semantics, ok := adp.(adaptor.ResponseSemantics); ok {
+			return semantics.IsUpstreamError(meta, resp)
+		}
+	}
 	if resp == nil {
 		if meta.ChannelType == channeltype.AwsClaude {
 			return false
