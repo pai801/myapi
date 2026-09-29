@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/pai801/myapi/common"
+	"github.com/pai801/myapi/common/config"
 	"github.com/pai801/myapi/model"
 	"github.com/pai801/myapi/relay/adaptor"
 	"github.com/pai801/myapi/relay/channeltype"
@@ -46,7 +47,7 @@ var (
 type fakeTesterAdaptor struct {
 	fakeCatalogAdaptor
 
-	summary string
+	result  adaptor.TestResult
 	testErr error
 
 	initMeta *meta.Meta
@@ -75,13 +76,14 @@ func (f *fakeTesterAdaptor) DoResponse(*gin.Context, *http.Response, *meta.Meta)
 	return nil, nil
 }
 
-func (f *fakeTesterAdaptor) TestChannel(_ context.Context, m *meta.Meta) (string, error) {
+func (f *fakeTesterAdaptor) TestChannel(_ context.Context, m *meta.Meta) (adaptor.TestResult, error) {
 	f.calls++
 	f.captured = m
 	if f.testErr != nil {
-		return "", f.testErr
+		// 失败时仍交回已捕获的诊断材料（契约要求），摘要可为空。
+		return f.result, f.testErr
 	}
-	return f.summary, nil
+	return f.result, nil
 }
 
 // fakeGenericFlowAdaptor 是一个**未实现** Tester 的临时渠道：它刻意让通用流程可完整跑通，
@@ -91,6 +93,7 @@ type fakeGenericFlowAdaptor struct {
 	fakeCatalogAdaptor
 
 	content string
+	usage   *relaymodel.Usage
 
 	convertCalls    int
 	doRequestCalls  int
@@ -112,6 +115,9 @@ func (f *fakeGenericFlowAdaptor) DoResponse(c *gin.Context, _ *http.Response, _ 
 	f.doResponseCalls++
 	// 按 OpenAI 上游约定写出 choices[0].content，供 parseTestResponse 解析。
 	c.JSON(http.StatusOK, gin.H{"choices": []gin.H{{"message": gin.H{"content": f.content}}}})
+	if f.usage != nil {
+		return f.usage, nil
+	}
 	return &relaymodel.Usage{}, nil
 }
 
@@ -205,7 +211,7 @@ func TestChannelCapability_DelegatesToTester(t *testing.T) {
 
 	adp := &fakeTesterAdaptor{
 		fakeCatalogAdaptor: fakeCatalogAdaptor{name: "cap-delegate"},
-		summary:            wantSummary,
+		result:             adaptor.TestResult{Summary: wantSummary},
 	}
 	registerTesterChannel(t, extAPIType, extChannelType, adp)
 
@@ -374,15 +380,21 @@ func TestChannelCapability_LogsExactlyOnceOnDelegatedPath(t *testing.T) {
 	initChannelTestCapabilityLogDB(t)
 
 	const (
-		extAPIType     = 516
-		extChannelType = 1207
-		wantSummary    = "探针摘要"
+		extAPIType       = 516
+		extChannelType   = 1207
+		wantSummary      = "探针摘要"
+		wantRequestBody  = `{"model":"cap-model","messages":[{"role":"user","content":"ping"}]}`
+		wantResponseBody = `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"pong"}}]}`
 	)
 	ch, request := newTesterChannel(2107, extChannelType, "cap-log", "sk-log-key", "https://cap-log.example.com")
 
 	adp := &fakeTesterAdaptor{
 		fakeCatalogAdaptor: fakeCatalogAdaptor{name: "cap-log"},
-		summary:            wantSummary,
+		result: adaptor.TestResult{
+			Summary:      wantSummary,
+			RequestBody:  wantRequestBody,
+			ResponseBody: wantResponseBody,
+		},
 	}
 	registerTesterChannel(t, extAPIType, extChannelType, adp)
 
@@ -408,8 +420,11 @@ func TestChannelCapability_LogsExactlyOnceOnDelegatedPath(t *testing.T) {
 	if !strings.Contains(log.Content, "测试成功") || !strings.Contains(log.Content, wantSummary) {
 		t.Errorf("log.Content = %q, want 含「测试成功」与摘要", log.Content)
 	}
-	if log.ResponseBody != wantSummary {
-		t.Errorf("log.ResponseBody = %q, want 摘要 %q", log.ResponseBody, wantSummary)
+	if log.ResponseBody != wantResponseBody {
+		t.Errorf("log.ResponseBody = %q, want 探针交回的响应体 %q（新语义：不再等于摘要）", log.ResponseBody, wantResponseBody)
+	}
+	if log.RequestBody != wantRequestBody {
+		t.Errorf("log.RequestBody = %q, want 探针交回的出站请求体 %q", log.RequestBody, wantRequestBody)
 	}
 	if log.ElapsedTime < 0 {
 		t.Errorf("log.ElapsedTime = %d, want >= 0", log.ElapsedTime)
@@ -466,6 +481,378 @@ func TestChannelCapability_FailureTextDoesNotLeakKey(t *testing.T) {
 	}
 }
 
+// --- (g) 委托路径字段完整性：成功路径落库 6 字段 ---
+
+func TestChannelCapability_DelegatedSuccessLogsDiagnosticFields(t *testing.T) {
+	initChannelTestCapabilityLogDB(t)
+
+	const (
+		extAPIType       = 519
+		extChannelType   = 1211
+		channelName      = "cap-delegate-fields"
+		wantSummary      = "委托探针成功：pong"
+		wantRequestBody  = `{"model":"cap-model","stream":false}`
+		wantResponseBody = `{"choices":[{"message":{"content":"pong"}}],"usage":{"total_tokens":42}}`
+	)
+	ch, request := newTesterChannel(2109, extChannelType, channelName, "sk-delegate-fields", "https://cap-delegate-fields.example.com")
+
+	adp := &fakeTesterAdaptor{
+		fakeCatalogAdaptor: fakeCatalogAdaptor{name: channelName},
+		result: adaptor.TestResult{
+			Summary:          wantSummary,
+			RequestBody:      wantRequestBody,
+			ResponseBody:     wantResponseBody,
+			PromptTokens:     11,
+			CompletionTokens: 22,
+			CachedTokens:     33,
+		},
+	}
+	registerTesterChannel(t, extAPIType, extChannelType, adp)
+
+	gotMessage, err, openaiErr := testChannel(context.Background(), ch, request)
+	if err != nil || openaiErr != nil {
+		t.Fatalf("testChannel: err=%v openaiErr=%v, want nil/nil", err, openaiErr)
+	}
+	if gotMessage != wantSummary {
+		t.Errorf("responseMessage = %q, want %q", gotMessage, wantSummary)
+	}
+
+	var log model.Log
+	if err := model.LOG_DB.Where("channel_id = ?", ch.Id).First(&log).Error; err != nil {
+		t.Fatalf("load test log: %v", err)
+	}
+	if log.ChannelName != channelName {
+		t.Errorf("log.ChannelName = %q, want %q", log.ChannelName, channelName)
+	}
+	if log.RequestBody != wantRequestBody {
+		t.Errorf("log.RequestBody = %q, want %q", log.RequestBody, wantRequestBody)
+	}
+	if log.ResponseBody != wantResponseBody {
+		t.Errorf("log.ResponseBody = %q, want %q", log.ResponseBody, wantResponseBody)
+	}
+	if log.PromptTokens != 11 {
+		t.Errorf("log.PromptTokens = %d, want 11", log.PromptTokens)
+	}
+	if log.CompletionTokens != 22 {
+		t.Errorf("log.CompletionTokens = %d, want 22", log.CompletionTokens)
+	}
+	if log.CachedTokens != 33 {
+		t.Errorf("log.CachedTokens = %d, want 33", log.CachedTokens)
+	}
+	// 响应体仅落库，不得随测试结果回传客户端。
+	if strings.Contains(gotMessage, wantResponseBody) {
+		t.Errorf("responseMessage 泄露了上游响应体：%q", gotMessage)
+	}
+}
+
+// --- (h) 委托路径字段完整性：失败路径仍落已捕获材料 ---
+
+func TestChannelCapability_DelegatedFailureLogsCapturedFields(t *testing.T) {
+	initChannelTestCapabilityLogDB(t)
+
+	const (
+		extAPIType       = 520
+		extChannelType   = 1212
+		channelName      = "cap-delegate-fail-fields"
+		wantRequestBody  = `{"model":"cap-model"}`
+		wantResponseBody = `{"error":{"message":"unauthorized"}}`
+	)
+	ch, request := newTesterChannel(2110, extChannelType, channelName, "sk-delegate-fail-fields", "https://cap-delegate-fail-fields.example.com")
+
+	wantErr := errors.New("authentication failed: upstream rejected credentials")
+	adp := &fakeTesterAdaptor{
+		fakeCatalogAdaptor: fakeCatalogAdaptor{name: channelName},
+		testErr:            wantErr,
+		result: adaptor.TestResult{
+			RequestBody:      wantRequestBody,
+			ResponseBody:     wantResponseBody,
+			PromptTokens:     0,
+			CompletionTokens: 0,
+			CachedTokens:     0,
+		},
+	}
+	registerTesterChannel(t, extAPIType, extChannelType, adp)
+
+	gotMessage, err, openaiErr := testChannel(context.Background(), ch, request)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if gotMessage != "" || openaiErr != nil {
+		t.Errorf("msg=%q openaiErr=%v, want (\"\",nil)", gotMessage, openaiErr)
+	}
+
+	var log model.Log
+	if err := model.LOG_DB.Where("channel_id = ?", ch.Id).First(&log).Error; err != nil {
+		t.Fatalf("load failure test log: %v", err)
+	}
+	if log.ChannelName != channelName {
+		t.Errorf("log.ChannelName = %q, want %q", log.ChannelName, channelName)
+	}
+	if log.RequestBody != wantRequestBody {
+		t.Errorf("失败路径 log.RequestBody = %q, want %q", log.RequestBody, wantRequestBody)
+	}
+	if log.ResponseBody != wantResponseBody {
+		t.Errorf("失败路径 log.ResponseBody = %q, want %q", log.ResponseBody, wantResponseBody)
+	}
+	// 上游错误体仅入服务端 DB，不得随错误回传客户端。
+	if strings.Contains(err.Error(), wantResponseBody) {
+		t.Errorf("错误文案泄露了上游响应体：%v", err)
+	}
+}
+
+// --- (i) 通用路径字段完整性：ChannelName 与三 token 字段有值，其余字段等价 ---
+
+func TestChannelCapability_GenericFlowLogsChannelNameAndTokens(t *testing.T) {
+	initChannelTestCapabilityLogDB(t)
+
+	const (
+		extAPIType     = 521
+		extChannelType = 1213
+		channelName    = "cap-generic-fields"
+		wantContent    = "generic-fields-ok"
+	)
+	ch, request := newTesterChannel(2111, extChannelType, channelName, "sk-generic-fields", "https://cap-generic-fields.example.com")
+
+	adp := &fakeGenericFlowAdaptor{
+		fakeCatalogAdaptor: fakeCatalogAdaptor{name: channelName},
+		content:            wantContent,
+		usage: &relaymodel.Usage{
+			PromptTokens:        7,
+			CompletionTokens:    8,
+			TotalTokens:         15,
+			PromptTokensDetails: &relaymodel.PromptTokensDetails{CachedTokens: 5},
+		},
+	}
+	registerTesterChannel(t, extAPIType, extChannelType, adp)
+
+	gotMessage, err, openaiErr := testChannel(context.Background(), ch, request)
+	if err != nil || openaiErr != nil || gotMessage != wantContent {
+		t.Fatalf("通用路径: msg=%q err=%v openaiErr=%v, want (%q,nil,nil)", gotMessage, err, openaiErr, wantContent)
+	}
+
+	waitForChannelTestLogs(t, ch.Id, 1)
+	var log model.Log
+	if err := model.LOG_DB.Where("channel_id = ?", ch.Id).First(&log).Error; err != nil {
+		t.Fatalf("load generic test log: %v", err)
+	}
+	if log.ChannelName != channelName {
+		t.Errorf("log.ChannelName = %q, want %q", log.ChannelName, channelName)
+	}
+	if log.PromptTokens != 7 {
+		t.Errorf("log.PromptTokens = %d, want 7", log.PromptTokens)
+	}
+	if log.CompletionTokens != 8 {
+		t.Errorf("log.CompletionTokens = %d, want 8", log.CompletionTokens)
+	}
+	if log.CachedTokens != 5 {
+		t.Errorf("log.CachedTokens = %d, want 5（口径同消费日志 usage.PromptTokensDetails.CachedTokens）", log.CachedTokens)
+	}
+	// 既有字段等价性保持。
+	if log.Type != model.LogTypeTest {
+		t.Errorf("log.Type = %d, want %d", log.Type, model.LogTypeTest)
+	}
+	if log.ChannelId != ch.Id {
+		t.Errorf("log.ChannelId = %d, want %d", log.ChannelId, ch.Id)
+	}
+	if log.ModelName != "cap-model" {
+		t.Errorf("log.ModelName = %q, want %q", log.ModelName, "cap-model")
+	}
+	if !strings.Contains(log.Content, "测试成功") || !strings.Contains(log.Content, wantContent) {
+		t.Errorf("log.Content = %q, want 含「测试成功」与响应内容", log.Content)
+	}
+	if log.ElapsedTime < 0 {
+		t.Errorf("log.ElapsedTime = %d, want >= 0", log.ElapsedTime)
+	}
+	if log.RequestBody == "" || log.ResponseBody == "" {
+		t.Errorf("通用路径既有大字段应保持有值：req=%q resp=%q", log.RequestBody, log.ResponseBody)
+	}
+}
+
+// --- (k) 两条路径字段形状一致 + 测试语义下无来源字段保持空/零 ---
+
+// assertTestSemanticsNoSourceFields 断言测试日志中「测试语义下确实无来源」的字段保持空/零。
+//
+// 它同时承担两个职责：
+//   - spec「测试语义下无来源的字段不被视为缺陷」Scenario 的直接证据；
+//   - 回归守卫：若未来有人为测试路径误加 UserId / Quota / FirstTokenTime / IsStream /
+//     RequestHeader / SystemPromptReset / Username / TokenName 的赋值，本断言会立即失败。
+func assertTestSemanticsNoSourceFields(t *testing.T, path string, log *model.Log) {
+	t.Helper()
+	if log.UserId != 0 {
+		t.Errorf("%s: log.UserId = %d, want 0（渠道测试非用户发起，无 token 上下文）", path, log.UserId)
+	}
+	if log.Username != "" {
+		t.Errorf("%s: log.Username = %q, want \"\"（渠道测试非用户发起）", path, log.Username)
+	}
+	if log.TokenName != "" {
+		t.Errorf("%s: log.TokenName = %q, want \"\"（渠道测试非用户发起）", path, log.TokenName)
+	}
+	if log.Quota != 0 {
+		t.Errorf("%s: log.Quota = %d, want 0（渠道测试不计费）", path, log.Quota)
+	}
+	if log.SystemPromptReset {
+		t.Errorf("%s: log.SystemPromptReset = true, want false（无 system prompt 重置语义）", path)
+	}
+	if log.FirstTokenTime != 0 {
+		t.Errorf("%s: log.FirstTokenTime = %d, want 0（测试非流式，无首字耗时语义）", path, log.FirstTokenTime)
+	}
+	if log.IsStream {
+		t.Errorf("%s: log.IsStream = true, want false（测试接口对客户端同步返回，恒为非流式）", path)
+	}
+	if log.RequestHeader != "" {
+		t.Errorf("%s: log.RequestHeader = %q, want \"\"（请求头不在测试日志的数据面内）", path, log.RequestHeader)
+	}
+}
+
+// TestChannelCapability_BothPathsFieldShapeConsistency 用**同一渠道名 + 同一上游 usage**
+// 分别经委托路径与通用路径跑 testChannel，构成「形状一致」的对照实验。
+func TestChannelCapability_BothPathsFieldShapeConsistency(t *testing.T) {
+	initChannelTestCapabilityLogDB(t)
+
+	const (
+		delegateAPIType      = 523
+		delegateChannelType  = 1215
+		genericAPIType       = 524
+		genericChannelType   = 1216
+		sharedChannelName    = "cap-shape-shared"
+		wantGenericContent   = "shape-generic-ok"
+		wantPromptTokens     = 17
+		wantCompletionTokens = 23
+		wantCachedTokens     = 9
+	)
+
+	// 同一组上游 usage：委托路径由渠道交回的 TestResult 承载，通用路径由 DoResponse 返回。
+	sharedUsage := relaymodel.Usage{
+		PromptTokens:        wantPromptTokens,
+		CompletionTokens:    wantCompletionTokens,
+		TotalTokens:         wantPromptTokens + wantCompletionTokens,
+		PromptTokensDetails: &relaymodel.PromptTokensDetails{CachedTokens: wantCachedTokens},
+	}
+
+	// 路径 1：委托。token 取自 TestResult，值与本组 usage 对齐。
+	delegateAdp := &fakeTesterAdaptor{
+		fakeCatalogAdaptor: fakeCatalogAdaptor{name: sharedChannelName},
+		result: adaptor.TestResult{
+			Summary:          "shape-delegate-ok",
+			RequestBody:      `{"model":"cap-model"}`,
+			ResponseBody:     `{"choices":[{"message":{"content":"pong"}}]}`,
+			PromptTokens:     sharedUsage.PromptTokens,
+			CompletionTokens: sharedUsage.CompletionTokens,
+			CachedTokens:     sharedUsage.PromptTokensDetails.CachedTokens,
+		},
+	}
+	registerTesterChannel(t, delegateAPIType, delegateChannelType, delegateAdp)
+	delegateCh, delegateReq := newTesterChannel(2113, delegateChannelType, sharedChannelName, "sk-shape-delegate", "https://cap-shape-delegate.example.com")
+	if _, err, _ := testChannel(context.Background(), delegateCh, delegateReq); err != nil {
+		t.Fatalf("委托路径 testChannel error = %v, want nil", err)
+	}
+
+	// 路径 2：通用。token 取自 DoResponse 的 typed usage（同一组数值）。
+	genericAdp := &fakeGenericFlowAdaptor{
+		fakeCatalogAdaptor: fakeCatalogAdaptor{name: sharedChannelName},
+		content:            wantGenericContent,
+		usage:              &sharedUsage,
+	}
+	registerTesterChannel(t, genericAPIType, genericChannelType, genericAdp)
+	genericCh, genericReq := newTesterChannel(2114, genericChannelType, sharedChannelName, "sk-shape-generic", "https://cap-shape-generic.example.com")
+	if _, err, _ := testChannel(context.Background(), genericCh, genericReq); err != nil {
+		t.Fatalf("通用路径 testChannel error = %v, want nil", err)
+	}
+	waitForChannelTestLogs(t, genericCh.Id, 1)
+
+	var delegateLog, genericLog model.Log
+	if err := model.LOG_DB.Where("channel_id = ?", delegateCh.Id).First(&delegateLog).Error; err != nil {
+		t.Fatalf("load delegate test log: %v", err)
+	}
+	if err := model.LOG_DB.Where("channel_id = ?", genericCh.Id).First(&genericLog).Error; err != nil {
+		t.Fatalf("load generic test log: %v", err)
+	}
+
+	// Scenario「两条路径字段形状一致」：同一渠道名 + 同一 usage → 两路径字段语义一致。
+	if delegateLog.ChannelName != genericLog.ChannelName {
+		t.Errorf("ChannelName 形状不一致：委托=%q 通用=%q", delegateLog.ChannelName, genericLog.ChannelName)
+	}
+	if delegateLog.ChannelName != sharedChannelName {
+		t.Errorf("ChannelName = %q, want %q", delegateLog.ChannelName, sharedChannelName)
+	}
+	if delegateLog.PromptTokens != genericLog.PromptTokens {
+		t.Errorf("PromptTokens 形状不一致：委托=%d 通用=%d", delegateLog.PromptTokens, genericLog.PromptTokens)
+	}
+	if delegateLog.CompletionTokens != genericLog.CompletionTokens {
+		t.Errorf("CompletionTokens 形状不一致：委托=%d 通用=%d", delegateLog.CompletionTokens, genericLog.CompletionTokens)
+	}
+	if delegateLog.CachedTokens != genericLog.CachedTokens {
+		t.Errorf("CachedTokens 形状不一致：委托=%d 通用=%d", delegateLog.CachedTokens, genericLog.CachedTokens)
+	}
+	// 反向守卫：MUST NOT 出现「一路径有值、另一路径恒空」。
+	if delegateLog.ChannelName == "" || genericLog.ChannelName == "" {
+		t.Errorf("出现一路径渠道名为空：委托=%q 通用=%q", delegateLog.ChannelName, genericLog.ChannelName)
+	}
+	if delegateLog.PromptTokens == 0 || genericLog.PromptTokens == 0 ||
+		delegateLog.CompletionTokens == 0 || genericLog.CompletionTokens == 0 ||
+		delegateLog.CachedTokens == 0 || genericLog.CachedTokens == 0 {
+		t.Errorf("出现一路径 token 恒零：委托=%d/%d/%d 通用=%d/%d/%d",
+			delegateLog.PromptTokens, delegateLog.CompletionTokens, delegateLog.CachedTokens,
+			genericLog.PromptTokens, genericLog.CompletionTokens, genericLog.CachedTokens)
+	}
+	// 两路径落库值即为注入的同一组 usage。
+	for path, log := range map[string]model.Log{"委托路径": delegateLog, "通用路径": genericLog} {
+		if log.PromptTokens != wantPromptTokens || log.CompletionTokens != wantCompletionTokens || log.CachedTokens != wantCachedTokens {
+			t.Errorf("%s token 落库值 = %d/%d/%d, want %d/%d/%d",
+				path, log.PromptTokens, log.CompletionTokens, log.CachedTokens,
+				wantPromptTokens, wantCompletionTokens, wantCachedTokens)
+		}
+	}
+
+	// Scenario「测试语义下无来源的字段不被视为缺陷」：两路径均须保持空/零。
+	assertTestSemanticsNoSourceFields(t, "委托路径", &delegateLog)
+	assertTestSemanticsNoSourceFields(t, "通用路径", &genericLog)
+}
+
+// --- (j) 委托路径大字段限长：超限写占位、空体保持空 ---
+
+func TestChannelCapability_DelegatedBodySizeLimit(t *testing.T) {
+	initChannelTestCapabilityLogDB(t)
+
+	origMax := config.MaxLoggedBodySize
+	config.MaxLoggedBodySize = 64
+	t.Cleanup(func() { config.MaxLoggedBodySize = origMax })
+
+	const (
+		extAPIType     = 522
+		extChannelType = 1214
+		channelName    = "cap-delegate-limit"
+	)
+	ch, request := newTesterChannel(2112, extChannelType, channelName, "sk-delegate-limit", "https://cap-delegate-limit.example.com")
+
+	hugeBody := strings.Repeat("x", 100)
+	adp := &fakeTesterAdaptor{
+		fakeCatalogAdaptor: fakeCatalogAdaptor{name: channelName},
+		result: adaptor.TestResult{
+			Summary:      "ok",
+			RequestBody:  hugeBody,
+			ResponseBody: "",
+		},
+	}
+	registerTesterChannel(t, extAPIType, extChannelType, adp)
+
+	if _, err, _ := testChannel(context.Background(), ch, request); err != nil {
+		t.Fatalf("testChannel error = %v, want nil", err)
+	}
+
+	var log model.Log
+	if err := model.LOG_DB.Where("channel_id = ?", ch.Id).First(&log).Error; err != nil {
+		t.Fatalf("load test log: %v", err)
+	}
+	wantPlaceholder := "[body too large: 100 bytes]"
+	if log.RequestBody != wantPlaceholder {
+		t.Errorf("超限 log.RequestBody = %q, want %q", log.RequestBody, wantPlaceholder)
+	}
+	if log.ResponseBody != "" {
+		t.Errorf("空体 log.ResponseBody = %q, want \"\"（空体保持空）", log.ResponseBody)
+	}
+}
+
 // --- 5.2（controller 半边）：四条路径在同一进程内组合，互不干扰 ---
 
 func TestChannelCapability_FourPathsCompose(t *testing.T) {
@@ -484,7 +871,7 @@ func TestChannelCapability_FourPathsCompose(t *testing.T) {
 	// 路径 1：实现 Tester 的渠道 → 委托并返回摘要。
 	testerAdp := &fakeTesterAdaptor{
 		fakeCatalogAdaptor: fakeCatalogAdaptor{name: "compose-tester"},
-		summary:            wantTesterSummary,
+		result:             adaptor.TestResult{Summary: wantTesterSummary},
 	}
 	registerTesterChannel(t, testerAPIType, testerChannelType, testerAdp)
 	testerCh, testerReq := newTesterChannel(2201, testerChannelType, "compose-tester", "sk-compose-tester", "https://compose-tester.example.com")

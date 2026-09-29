@@ -76,6 +76,19 @@ func formatFailureResponseBody(statusCode int, body []byte) []byte {
 	return result
 }
 
+// limitLoggedBody 按 config.MaxLoggedBodySize 对委托路径的诊断大字段限长，
+// 口径与消费日志一致（见 controller/relay.go 与 relay/controller/text.go）：
+// 超限写 "[body too large: N bytes]" 占位，空体保持空。
+func limitLoggedBody(body string) string {
+	if body == "" {
+		return ""
+	}
+	if len(body) <= config.MaxLoggedBodySize {
+		return body
+	}
+	return fmt.Sprintf("[body too large: %d bytes]", len(body))
+}
+
 // testerFor 对已注册适配器做可选的 adaptor.Tester 能力发现：接口存在性即能力发现。
 //
 // 抽为独立函数而非在 testChannel 内联断言，原因有二：其一，testChannel 内的局部变量
@@ -133,22 +146,25 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 	// 测试日志归属 controller：命中委托分支时此处补记唯一一条日志后返回，
 	// 渠道实现 MUST NOT 自行落库；日志形状与通用路径一致（Content 沿用成功/失败文案）。
 	if tester, ok := testerFor(adaptor); ok {
-		summary, testErr := tester.TestChannel(ctx, meta)
+		result, testErr := tester.TestChannel(ctx, meta)
+		summary := result.Summary
 		logContent := fmt.Sprintf("渠道 %s 测试成功，响应：%s", channel.Name, summary)
-		responseBody := summary
 		if testErr != nil {
 			// 失败只回传渠道受控的 err（实现方负责脱敏，不得含密钥/凭证/上游原文）；
-			// 不落上游原文，故 ResponseBody 置空。
+			// 已捕获的诊断材料（出站体 / 上游错误体节选）仍落库，仅入服务端 DB，不回传客户端。
 			logContent = fmt.Sprintf("渠道 %s 测试失败，错误：%s", channel.Name, testErr.Error())
-			responseBody = ""
 		}
 		model.RecordTestLog(ctx, &model.Log{
-			ChannelId:    channel.Id,
-			ModelName:    modelName,
-			Content:      logContent,
-			ElapsedTime:  helper.CalcElapsedTime(startTime),
-			RequestBody:  "",
-			ResponseBody: responseBody,
+			ChannelId:        channel.Id,
+			ChannelName:      channel.Name,
+			ModelName:        modelName,
+			Content:          logContent,
+			ElapsedTime:      helper.CalcElapsedTime(startTime),
+			RequestBody:      limitLoggedBody(result.RequestBody),
+			ResponseBody:     limitLoggedBody(result.ResponseBody),
+			PromptTokens:     result.PromptTokens,
+			CompletionTokens: result.CompletionTokens,
+			CachedTokens:     result.CachedTokens,
 		})
 		if testErr != nil {
 			return "", testErr, nil
@@ -164,6 +180,10 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 		return "", err, nil
 	}
 	var respBody []byte
+	// usage 上提到 defer 之前：日志字面量位于 defer 闭包内，需在闭包词法作用域可见。
+	// 这是纯作用域搬迁（赋值时机与 nil 语义不变），使通用路径可落库 token 用量。
+	var usage *relaymodel.Usage
+	var respErr *relaymodel.ErrorWithStatusCode
 	defer func() {
 		logContent := fmt.Sprintf("渠道 %s 测试成功，响应：%s", channel.Name, responseMessage)
 		if err != nil || openaiErr != nil {
@@ -175,13 +195,27 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 			}
 			logContent = fmt.Sprintf("渠道 %s 测试失败，错误：%s", channel.Name, errorMessage)
 		}
+		cachedTokens := 0
+		promptTokens := 0
+		completionTokens := 0
+		if usage != nil {
+			promptTokens = usage.PromptTokens
+			completionTokens = usage.CompletionTokens
+			if usage.PromptTokensDetails != nil {
+				cachedTokens = usage.PromptTokensDetails.CachedTokens
+			}
+		}
 		go model.RecordTestLog(ctx, &model.Log{
-			ChannelId:    channel.Id,
-			ModelName:    modelName,
-			Content:      logContent,
-			ElapsedTime:  helper.CalcElapsedTime(startTime),
-			RequestBody:  string(jsonData),
-			ResponseBody: string(respBody),
+			ChannelId:        channel.Id,
+			ChannelName:      channel.Name,
+			ModelName:        modelName,
+			Content:          logContent,
+			ElapsedTime:      helper.CalcElapsedTime(startTime),
+			RequestBody:      string(jsonData),
+			ResponseBody:     string(respBody),
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			CachedTokens:     cachedTokens,
 		})
 	}()
 	logger.Log.Infof(string(jsonData))
@@ -204,7 +238,7 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 		}
 		return "", fmt.Errorf("http status code: %d%s", resp.StatusCode, errorMessage), &err.Error
 	}
-	usage, respErr := adaptor.DoResponse(c, resp, meta)
+	usage, respErr = adaptor.DoResponse(c, resp, meta)
 	if respErr != nil {
 		if resp != nil {
 			rawBody, _ := io.ReadAll(resp.Body)
